@@ -97,11 +97,13 @@ jobs:
       - uses: vmactions/omnios-vm@v1
         with:
           usesh: true
-          # The official illumos build of the latest Go release.
+          # The official illumos build of the latest Go release. Its archive
+          # has pax headers, which the native tar does not read: GNU tar.
           prepare: |
+            pkg install archiver/gnu-tar
             v=$(curl -fsSL 'https://go.dev/VERSION?m=text' | head -1)
             curl -fsSL -o /tmp/go.tar.gz "https://go.dev/dl/${v}.illumos-amd64.tar.gz"
-            cd /opt && gzip -dc /tmp/go.tar.gz | tar -xf -
+            gtar -xzf /tmp/go.tar.gz -C /opt
           run: |
             export PATH=/opt/go/bin:$PATH
             go test -count=1 ./...

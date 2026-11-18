@@ -37,6 +37,7 @@ defer l.Close()
 ```
 
 - `discard` records the file right after the bind and removes it only while the path still names that same file (`(st_dev, st_ino)`); a socket that replaced it in the meantime is left alone. When the file cannot be recorded, `ListenEx` closes the listener and returns an error (the file is left)
+- `discard` returns an error when it cannot check the file (no permission, for example) or the removal fails; nil when the file is gone or was replaced
 - A replacement in the instant between the check and the removal cannot be told apart (POSIX has no removal by inode)
 - The listener from `ListenEx` does not remove the file on Close (short paths included); only `discard` removes it
 

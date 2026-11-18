@@ -62,8 +62,9 @@ func Dial(path string) (*net.UnixConn, error) {
 // returned.
 //
 // discard does not close the listener: close it yourself (before or after).
-// Its error is that of the removal; nil when the file is gone or is no longer
-// the one bound. Calling it again does nothing. The listener does not remove
+// It returns nil when the file is removed, is gone, or is no longer the one
+// bound; an error when the file cannot be checked (lstat fails otherwise than
+// for a missing file, for example EACCES) or the removal fails. Calling it again does nothing. The listener does not remove
 // the socket file on Close (short paths included), so the removal is
 // discard's alone.
 func ListenEx(path string) (l *net.UnixListener, discard func() error, err error) {
@@ -107,11 +108,22 @@ func discarder(file string, id fileID) func() error {
 	return func() error {
 		var err error
 		once.Do(func() {
-			if now, ok := lstatID(file); ok && now == id {
-				// Gone in the meantime is as good as removed.
-				if err = os.Remove(file); errors.Is(err, os.ErrNotExist) {
-					err = nil
+			var st unix.Stat_t
+			if e := unix.Lstat(file, &st); e != nil {
+				// Gone (or a component no longer a directory): nothing to
+				// remove. Any other failure (EACCES, ...) leaves it unknown
+				// whether the file is the one bound, and is returned.
+				if !errors.Is(e, unix.ENOENT) && !errors.Is(e, unix.ENOTDIR) {
+					err = &os.PathError{Op: "lstat", Path: file, Err: e}
 				}
+				return
+			}
+			if (fileID{uint64(st.Dev), uint64(st.Ino)}) != id {
+				return
+			}
+			// Gone in the meantime is as good as removed.
+			if err = os.Remove(file); errors.Is(err, os.ErrNotExist) {
+				err = nil
 			}
 		})
 		return err

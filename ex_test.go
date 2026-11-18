@@ -247,3 +247,34 @@ func TestListenExErrorsAndAbstractNames(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// When discard cannot check the file (lstat fails otherwise than for a
+// missing file: here EACCES, its directory having lost search permission), it
+// does not know whether the file is the one bound, so it reports an error
+// rather than nil, and removes nothing. Once the file can be checked again, a
+// later call does nothing (discard runs once). A file that is merely gone is
+// nil (TestDiscardLeavesWhatReplacedTheSocket and the others). Root ignores
+// the permission, hence non-root only.
+func TestDiscardThatCannotCheckTheFileIsAnError(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the directory's permission")
+	}
+	for _, p := range exPaths(t) {
+		l, discard := listenEx(t, p)
+		l.Close()
+		dir := filepath.Dir(p)
+		if err := os.Chmod(dir, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		err := discard()
+		os.Chmod(dir, 0o700)
+		if !errors.Is(err, syscall.EACCES) {
+			t.Fatalf("%d bytes: %v, want EACCES", len(p), err)
+		}
+		if !exists(p) {
+			t.Fatalf("%d bytes: the socket file was removed", len(p))
+		}
+		os.Remove(p)
+	}
+}

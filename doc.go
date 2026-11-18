@@ -25,13 +25,13 @@
 // A longer path is tried on these routes, in this order, and bound /
 // connected on the first route that can be used:
 //
-//	| System                          | Listen                              | Dial                                                  |
-//	|---------------------------------|-------------------------------------|-------------------------------------------------------|
-//	| Linux, Android (/proc usable)   | /proc                               | /proc                                                 |
-//	| Linux, Android (no /proc)       | relative path, symlink, thread cwd  | relative path, symlink, thread cwd                    |
-//	| FreeBSD                         | bindat                              | connectat                                             |
-//	| macOS                           | relative path, symlink, thread cwd  | relative path, widened sockaddr, symlink, thread cwd  |
-//	| NetBSD, OpenBSD, illumos, other | relative path, symlink              | relative path, symlink                                |
+//	| System                          | Order tried (Listen and Dial alike) |
+//	|---------------------------------|-------------------------------------|
+//	| Linux, Android (/proc usable)   | /proc                               |
+//	| Linux, Android (no /proc)       | relative path, symlink, thread cwd  |
+//	| FreeBSD                         | bindat / connectat                  |
+//	| macOS                           | relative path, symlink, thread cwd  |
+//	| NetBSD, OpenBSD, illumos, other | relative path, symlink              |
 //
 // The routes:
 //
@@ -41,17 +41,14 @@
 //   - relative path: the path spelled relative to the working directory, when
 //     the net package accepts that. Only the string is rewritten; the cwd is
 //     never changed.
-//   - widened sockaddr: a sockaddr_un carrying up to 253 bytes of path, which
-//     XNU accepts (Dial only: a socket bound that way cannot be handed to the
-//     net package).
 //   - symlink: a short symlink under $TMPDIR or failing that /tmp, removed
 //     right after the call: for Listen to the socket's directory, for Dial to
 //     the socket file. It is created only where no other user can replace it.
 //   - thread cwd: a goroutine locked to its own OS thread moves that thread's
 //     working directory (and no other's) into the socket's directory and binds
-//     / connects by the file name; the thread is then discarded. Linux needs
-//     unshare(CLONE_FS) to be allowed (Docker's default seccomp profile
-//     refuses it), macOS uses __pthread_fchdir.
+//     / connects by the file name; the thread is then discarded. Linux uses
+//     unshare(CLONE_FS), but not under a seccomp filter (such as Docker's
+//     default profile); macOS uses __pthread_fchdir.
 //
 // None of these changes the working directory of the process, and all of
 // them can be used from any goroutine. When no route reaches the path, the

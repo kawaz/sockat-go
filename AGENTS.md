@@ -6,7 +6,7 @@ sockat-go は、`sun_path` の上限を超えるパスでも Unix domain socket 
 
 ## 必読
 
-- [docs/decisions/](docs/decisions/INDEX.md) — Go 版の設計 (公開 API、経路の順番、スレッド cwd、広げた sockaddr は Dial だけ、長いパスの listener)。経路に手を入れる前に読む
+- [docs/decisions/](docs/decisions/INDEX.md) — Go 版の設計 (公開 API、経路の順番、スレッド cwd、macOS の広げた sockaddr を使わない理由、長いパスの listener)。経路に手を入れる前に読む
 - [README-ja.md](README-ja.md) — 利用者に約束している振る舞い (標準と違う点、どこから届かなくなるか)
 
 ## 構成
@@ -15,10 +15,10 @@ sockat-go は、`sun_path` の上限を超えるパスでも Unix domain socket 
 |---|---|
 | `doc.go` / `sockat.go` | package doc と公開 API (`Listen` / `Dial`) |
 | `route.go` | `run` (短いパスの判定、NUL、abstract)、`viaStd`、エラーの形、`config` |
-| `posix.go` | 相対パス → (macOS) 広げた sockaddr → symlink → スレッド cwd の順 (FreeBSD 以外) |
+| `posix.go` | 相対パス → symlink → スレッド cwd の順 (FreeBSD 以外) |
 | `os_*.go` | OS ごとの `runLong`、ディレクトリの開き方、スレッド cwd の `threadChdir`、自前ソケット |
 | `threadcwd*.go` | スレッドだけ cwd を移す経路 |
-| `raw.go` | 自前のソケットを `net.FileListener` / `FileConn` に渡す (macOS、FreeBSD) |
+| `raw.go` | 自前のソケットを `net.FileListener` / `FileConn` に渡す (FreeBSD の bindat) |
 | `path.go` | パスの分割・相対パスの計算 (ファイルシステムに触らない) |
 | `*_test.go` | 経路を強制するパッケージ内の試験 |
 
@@ -34,7 +34,7 @@ sockat-go は、`sun_path` の上限を超えるパスでも Unix domain socket 
 
 ## 試験
 
-- `just test` (macOS)、`just test-linux` (docker で Linux。既定の seccomp と、`unshare` が通る seccomp=unconfined の両方)。経路は OS で違うので、変更したら両方で回す
+- `just test` (macOS)、`just test-linux` (docker で Linux。スレッド cwd が使えない既定の seccomp と、使える seccomp=unconfined の両方)。経路は OS で違うので、変更したら両方で回す
 - 一時ディレクトリはランダム名で作り、試験の終わりに消す。長さを決めたいので、基本は `/tmp` の下に作る
 - cwd のようにプロセス全体に効く設定が要る試験は、試験バイナリを子プロセスで起こして中で行う。試験は並行して走るので、同じプロセスで変えない
 - 各試験の直前に「何を確かめ、なぜそうなるべきか」をコメントで書く。DR の番号だけで済ませない

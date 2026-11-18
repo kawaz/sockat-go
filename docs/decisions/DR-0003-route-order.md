@@ -5,17 +5,17 @@
 
 ## Context
 
-[ハブの SPEC](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md) は OS ごとの経路と試す順番を決め、その言語で作れない経路は飛ばして README に明示することを求める。Go では fork が使えず ([DR-0004](DR-0004-thread-cwd-route.md))、macOS の広げた sockaddr は connect にしか使えない ([DR-0005](DR-0005-widened-sockaddr-only-for-dial.md))。
+[ハブの SPEC](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md) は OS ごとの経路と試す順番を決め、その言語で作れない経路は飛ばして README に明示することを求める。Go では fork が使えず ([DR-0004](DR-0004-thread-cwd-route.md))、macOS の広げた sockaddr は使わない ([DR-0005](DR-0005-no-widened-sockaddr.md))。
 
 ## Decision
 
-| OS | Listen | Dial |
-|---|---|---|
-| Linux / Android (`/proc` を使える) | /proc | /proc |
-| Linux / Android (`/proc` を使えない) | 相対パス → symlink → スレッド cwd | 同左 |
-| FreeBSD | bindat | connectat |
-| macOS | 相対パス → symlink → スレッド cwd | 相対パス → 広げた sockaddr → symlink → スレッド cwd |
-| NetBSD / OpenBSD / illumos / その他 | 相対パス → symlink | 相対パス → symlink |
+| OS | 試す順番 (Listen / Dial 共通) |
+|---|---|
+| Linux / Android (`/proc` を使える) | /proc |
+| Linux / Android (`/proc` を使えない) | 相対パス → symlink → スレッド cwd |
+| FreeBSD | bindat / connectat |
+| macOS | 相対パス → symlink → スレッド cwd |
+| NetBSD / OpenBSD / illumos / その他 | 相対パス → symlink |
 
 - 各経路のやり方・使える条件・相対パスの作り方・symlink の置き場と名前と安全条件と片付けは SPEC のまま
 - 経路が実際に bind / connect して失敗したら、そのエラーを返し、次の経路を試さない。次へ進むのは経路自体が使えない時だけ (SPEC)

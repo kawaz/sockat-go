@@ -40,21 +40,20 @@ Handed to the net package as is:
 
 A longer path is tried on these routes, in this order per OS, and bound / connected on the first route that can be used.
 
-| OS | Listen | Dial |
-|---|---|---|
-| Linux / Android (`/proc` usable) | /proc | /proc |
-| Linux / Android (`/proc` not usable) | relative path → symlink → thread cwd | relative path → symlink → thread cwd |
-| FreeBSD | bindat | connectat |
-| macOS | relative path → symlink → thread cwd | relative path → widened sockaddr → symlink → thread cwd |
-| NetBSD / OpenBSD / illumos / other Unix | relative path → symlink | relative path → symlink |
-| Windows | not supported | not supported |
+| OS | Order tried (Listen and Dial alike) |
+|---|---|
+| Linux / Android (`/proc` usable) | /proc |
+| Linux / Android (`/proc` not usable) | relative path → symlink → thread cwd |
+| FreeBSD | bindat / connectat |
+| macOS | relative path → symlink → thread cwd |
+| NetBSD / OpenBSD / illumos / other Unix | relative path → symlink |
+| Windows | not supported |
 
 - **/proc**: open the directory `O_PATH` and pass `/proc/self/fd/<fd>/<file name>`. Not usable without `/proc`, or for a file name that does not fit it (over about 90 bytes)
 - **bindat / connectat**: pass the file name relative to the directory fd
 - **relative path**: when the path relative to the cwd is short enough for the net package, pass that. Only the string is rewritten; the cwd is not changed
-- **widened sockaddr**: pass a sockaddr carrying up to 253 bytes, which the macOS kernel accepts
 - **symlink**: create a short symlink under `TMPDIR` or `/tmp` and pass the path through it: to the socket's directory for Listen, to the socket file for Dial. Created only where no other user can replace it, and removed right away
-- **thread cwd**: a goroutine locked to its OS thread moves that thread's cwd (and no other's) into the directory and passes the file name; the thread is then discarded. Linux uses `unshare(CLONE_FS)`, macOS `__pthread_fchdir`
+- **thread cwd**: a goroutine locked to its OS thread moves that thread's cwd (and no other's) into the directory and passes the file name; the thread is then discarded. Linux uses `unshare(CLONE_FS)` (not under a seccomp filter, such as Docker's default), macOS `__pthread_fchdir`
 
 None of the routes changes the process's cwd, so any goroutine may call them.
 
@@ -63,7 +62,7 @@ None of the routes changes the process's cwd, so any goroutine may call them.
 | Route | sockat-go | Why |
 |---|---|---|
 | fork | none | Go's runtime cannot fork bare. Hence no `connect_any` either |
-| widened sockaddr | macOS Dial only | A socket bound in the widened form cannot be handed to `net.FileListener` (`syscall` refuses the `getsockname` result with `EINVAL`) |
+| widened sockaddr (macOS) | none | Handing sockat's own socket to the net package's types, `syscall` refuses an address longer than `sockaddr_un`: `net.FileListener` fails with `EINVAL` for a bound one, and a connected one gets a nil `RemoteAddr()` when the peer is bound in the widened form |
 | thread cwd | Linux / macOS only | NetBSD / OpenBSD / illumos have no per-thread working directory |
 
 ### Where a path stops being reachable
@@ -72,9 +71,9 @@ When a path over the limit gets `ENAMETOOLONG` (numbers are bytes).
 
 | OS | Listen | Dial |
 |---|---|---|
-| Linux | file name > 107. Where `unshare` is refused: the file name does not fit the `/proc` spelling, the relative path > 107, and the file name > 84 or no symlink can be made | file name > 107 and no symlink can be made. Where `unshare` is refused: neither the `/proc` spelling nor the relative path fits, and no symlink can be made |
+| Linux | file name > 107. Under a seccomp filter: the file name does not fit the `/proc` spelling, the relative path > 107, and the file name > 84 or no symlink can be made | file name > 107 and no symlink can be made. Under a seccomp filter: neither the `/proc` spelling nor the relative path fits, and no symlink can be made |
 | FreeBSD | file name > 103 | file name > 103 |
-| macOS | file name > 103 | file name > 253 and no symlink can be made |
+| macOS | file name > 103 | file name > 103 and no symlink can be made |
 | NetBSD / OpenBSD | relative path > 103, and file name > 80 or no symlink can be made | relative path > 103 and no symlink can be made |
 | illumos | relative path > 107, and file name > 84 or no symlink can be made | relative path > 107 and no symlink can be made |
 

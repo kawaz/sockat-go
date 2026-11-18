@@ -40,21 +40,20 @@ go get github.com/kawaz/sockat-go
 
 それを超えるパスは、OS ごとに次の順に試し、最初に使えた経路で bind / connect する。
 
-| OS | Listen | Dial |
-|---|---|---|
-| Linux / Android (`/proc` を使える) | /proc | /proc |
-| Linux / Android (`/proc` を使えない) | 相対パス → symlink → スレッド cwd | 相対パス → symlink → スレッド cwd |
-| FreeBSD | bindat | connectat |
-| macOS | 相対パス → symlink → スレッド cwd | 相対パス → 広げた sockaddr → symlink → スレッド cwd |
-| NetBSD / OpenBSD / illumos / その他の Unix | 相対パス → symlink | 相対パス → symlink |
-| Windows | 対象外 | 対象外 |
+| OS | 試す順番 (Listen / Dial 共通) |
+|---|---|
+| Linux / Android (`/proc` を使える) | /proc |
+| Linux / Android (`/proc` を使えない) | 相対パス → symlink → スレッド cwd |
+| FreeBSD | bindat / connectat |
+| macOS | 相対パス → symlink → スレッド cwd |
+| NetBSD / OpenBSD / illumos / その他の Unix | 相対パス → symlink |
+| Windows | 対象外 |
 
 - **/proc**: ディレクトリを `O_PATH` で開き、`/proc/self/fd/<fd>/<ファイル名>` で渡す。`/proc` が無い時と、ファイル名がこれに収まらない時 (およそ 90 バイト超) は使えない
 - **bindat / connectat**: ディレクトリの fd を基準にファイル名で渡す
 - **相対パス**: cwd からの相対パスが標準に渡せる長さなら、それで渡す。文字列を書き直すだけで、cwd は変えない
-- **広げた sockaddr**: macOS のカーネルが受け付ける、253 バイトまで入る sockaddr で渡す
 - **symlink**: `TMPDIR` か `/tmp` に短い symlink を作り、それを通して渡す。Listen はソケットのディレクトリを、Dial はソケットのファイルを指す。他人が差し替えられない置き場にだけ作り、すぐ消す
-- **スレッド cwd**: OS スレッドに固定した goroutine で、そのスレッドだけ cwd をディレクトリに移し、ファイル名で渡す。スレッドは使い終わったら捨てる。Linux は `unshare(CLONE_FS)`、macOS は `__pthread_fchdir`
+- **スレッド cwd**: OS スレッドに固定した goroutine で、そのスレッドだけ cwd をディレクトリに移し、ファイル名で渡す。スレッドは使い終わったら捨てる。Linux は `unshare(CLONE_FS)` (seccomp の filter が掛かった環境では使わない。docker の既定等)、macOS は `__pthread_fchdir`
 
 どの経路もプロセスの cwd を変えないので、どの goroutine から呼んでもよい。
 
@@ -63,7 +62,7 @@ go get github.com/kawaz/sockat-go
 | 経路 | Go 版 | 理由 |
 |---|---|---|
 | fork | なし | Go の runtime では生の fork を使えない。そのため `connect_any` 系も無い |
-| 広げた sockaddr | macOS の Dial だけ | 広げた形で bind したソケットは `net.FileListener` に渡せない (`getsockname` の結果を `syscall` が `EINVAL` で断る) |
+| 広げた sockaddr (macOS) | なし | 自前のソケットを標準の型に渡すと、`sockaddr_un` より長いアドレスを `syscall` が断る。bind したものは `net.FileListener` が `EINVAL`、connect したものは相手が広げた形の時に `RemoteAddr()` が nil になる |
 | スレッド cwd | Linux / macOS だけ | NetBSD / OpenBSD / illumos にはスレッド単位の cwd が無い |
 
 ### どこから届かなくなるか
@@ -72,9 +71,9 @@ go get github.com/kawaz/sockat-go
 
 | OS | Listen | Dial |
 |---|---|---|
-| Linux | ファイル名 > 107。`unshare` が断られる環境では、ファイル名が `/proc` の綴りに収まらず、相対パス > 107 で、ファイル名 > 84 か symlink が使えない時 | ファイル名 > 107 で symlink も使えない。`unshare` が断られる環境では、`/proc` の綴りにも相対パスにも収まらず、symlink も使えない時 |
+| Linux | ファイル名 > 107。seccomp の filter が掛かった環境では、ファイル名が `/proc` の綴りに収まらず、相対パス > 107 で、ファイル名 > 84 か symlink が使えない時 | ファイル名 > 107 で symlink も使えない。seccomp の filter が掛かった環境では、`/proc` の綴りにも相対パスにも収まらず、symlink も使えない時 |
 | FreeBSD | ファイル名 > 103 | ファイル名 > 103 |
-| macOS | ファイル名 > 103 | ファイル名 > 253 で symlink も使えない |
+| macOS | ファイル名 > 103 | ファイル名 > 103 で symlink も使えない |
 | NetBSD / OpenBSD | 相対パス > 103 で、ファイル名 > 80 か symlink が使えない | 相対パス > 103 で symlink も使えない |
 | illumos | 相対パス > 107 で、ファイル名 > 84 か symlink が使えない | 相対パス > 107 で symlink も使えない |
 

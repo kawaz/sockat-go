@@ -99,11 +99,14 @@ const heldLinkName = "s"
 //
 //  1. Create a directory sockat.XXXXXXXXXX of mode 0700 under base (names as
 //     for the symlink: a fresh one on EEXIST, linkAttempts at most).
-//  2. Open it O_DIRECTORY | O_NOFOLLOW and check with fstat(2) that what was
-//     opened is a directory, owned by the effective uid, with no permission
-//     for group and others (isOurPrivateDir). A directory swapped in between
-//     the mkdir and the open fails the check. Then fchmod(2) it to 0700, so a
-//     umask that takes the owner's bits (0277) does not fail every attempt.
+//  2. Open it O_PATH | O_DIRECTORY | O_NOFOLLOW and check with fstat(2) that
+//     what was opened is a directory, owned by the effective uid, with no
+//     permission for group and others (isOurPrivateDir). A directory swapped
+//     in between the mkdir and the open fails the check. Then chmod it to 0700
+//     through <procSelfFD>/<fd> (an O_PATH fd takes no fchmod(2); the /proc
+//     spelling reaches the directory the fd holds), so a umask that takes the
+//     owner's bits (0277, 0477) does not fail every attempt: O_PATH opens the
+//     directory even without read permission.
 //  3. Create in it, through the fd, the symlink "s" to path (symlinkat(2)).
 //  4. Connect through <procSelfFD>/<fd>/s. The kernel follows the fd, not the
 //     name, so renaming the directory away does not matter; and the spelling
@@ -129,7 +132,7 @@ func heldLinkRoute(base, path, procSelfFD string) (endpoint, error) {
 	if err != nil {
 		return nil, errUnusable
 	}
-	dfd, err := unix.Open(dirPath, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	dfd, err := unix.Open(dirPath, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		// What is at the name now is not known to be ours: left alone.
 		return nil, errUnusable
@@ -140,14 +143,14 @@ func heldLinkRoute(base, path, procSelfFD string) (endpoint, error) {
 		return nil, errUnusable
 	}
 	defer removeHeldDir(dirPath, &held)
-	if err := unix.Fchmod(dfd, 0o700); err != nil {
+	fdDir := procSelfFD + "/" + strconv.Itoa(dfd)
+	if err := unix.Chmod(fdDir, 0o700); err != nil {
 		return nil, errUnusable
 	}
 	if err := unix.Symlinkat(target, dfd, heldLinkName); err != nil {
 		return nil, errUnusable
 	}
 	defer unix.Unlinkat(dfd, heldLinkName, 0)
-	fdDir := procSelfFD + "/" + strconv.Itoa(dfd)
 	if _, err := os.Stat(fdDir); err != nil {
 		return nil, errUnusable
 	}

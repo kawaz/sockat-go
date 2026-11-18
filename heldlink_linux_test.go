@@ -30,6 +30,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -313,7 +314,7 @@ func TestCreateHeldDirSkipsTakenNamesAndGivesUpAfter16(t *testing.T) {
 // just created and not one swapped in for it by someone who can write to the
 // place: a directory, owned by the effective uid, with no permission for
 // group and others (mkdir 0700 under any umask gives that; the route then
-// fchmods it to 0700). Checked on fstat of real entries: our 0700, 0500 and
+// chmods it to 0700). Checked on fstat of real entries: our 0700, 0500 and
 // 01700 directories pass; a directory with group or other bits (0755, 0711,
 // 0770), a file of mode 0700, and (as root, chown) a 0700 directory of another
 // user do not; nor does our directory for another uid.
@@ -367,27 +368,34 @@ func TestIsOurPrivateDirTakesOnlyOurOwnPrivateDirectory(t *testing.T) {
 	}
 }
 
-// A umask that takes the owner's bits (0277) makes mkdir(0700) create mode
-// 0500. That directory is still ours and private, so the route uses it
-// (fchmod to 0700 first) rather than failing every dial and leaving a
-// directory behind each time: the dial arrives through the fd-held form and
-// the place is empty afterwards. The umask belongs to the whole process,
-// hence the child.
+// A umask that takes the owner's bits makes mkdir(0700) create a directory
+// the owner cannot fully use: 0277 gives 0500 (no write), 0477 gives 0300 (no
+// read, so a non-root O_RDONLY open would fail with EACCES). Such a directory
+// is still ours and private, so the route uses it (opened O_PATH, which needs
+// no read permission, then chmod 0700 through /proc) rather than failing every
+// dial and leaving a directory behind each time: the dial arrives through the
+// fd-held form and the place is empty afterwards. The umask belongs to the
+// whole process, hence the child. The EACCES case only bites as non-root (root
+// ignores the mode), so the uid 1000 run is the one that pins 0477.
 func TestAUmaskTakingTheOwnersBitsStillUsesTheHeldDirectory(t *testing.T) {
 	t.Parallel()
-	p, l := pastProc(t)
-	base := unsafePlace(t)
-	safe := tmpDir(t)
-	markUntouched(t, safe)
-	runChild(t, "TestChildHeldDirUnderAUmask", "/", "SOCKAT_PATH="+p, "SOCKAT_BASE="+base, "SOCKAT_SAFE="+safe)
-	assertEmpty(t, base)
-	assertUntouched(t, safe)
-	l.SetDeadline(nowPlusGuard())
-	s, err := l.Accept()
-	if err != nil {
-		t.Fatalf("the child's dial did not arrive: %v", err)
+	for _, umask := range []string{"0277", "0477"} {
+		t.Run("umask "+umask, func(t *testing.T) {
+			p, l := pastProc(t)
+			base := unsafePlace(t)
+			safe := tmpDir(t)
+			markUntouched(t, safe)
+			runChild(t, "TestChildHeldDirUnderAUmask", "/", "SOCKAT_PATH="+p, "SOCKAT_BASE="+base, "SOCKAT_SAFE="+safe, "SOCKAT_UMASK="+umask)
+			assertEmpty(t, base)
+			assertUntouched(t, safe)
+			l.SetDeadline(nowPlusGuard())
+			s, err := l.Accept()
+			if err != nil {
+				t.Fatalf("the child's dial did not arrive: %v", err)
+			}
+			s.Close()
+		})
 	}
-	s.Close()
 }
 
 // The check is made on what the route actually opened. A directory swapped in
@@ -432,7 +440,11 @@ func TestADirectoryThatIsNotOurOwnIsNotUsed(t *testing.T) {
 
 func TestChildHeldDirUnderAUmask(t *testing.T) {
 	asChild(t)
-	syscall.Umask(0o277)
+	umask, err := strconv.ParseUint(os.Getenv("SOCKAT_UMASK"), 8, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	syscall.Umask(int(umask))
 	p, base, safe := os.Getenv("SOCKAT_PATH"), os.Getenv("SOCKAT_BASE"), os.Getenv("SOCKAT_SAFE")
 	// The unsafe place comes first and its fd-held form is used despite the
 	// umask; the safe place after it is not reached.

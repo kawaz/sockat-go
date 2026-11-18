@@ -11,7 +11,7 @@
 
 - `/proc` を使える Linux / Android の Dial だけ、symlink の経路で安全でない置き場の候補を飛ばさず、fd で掴む形で使う (`heldLinkRoute`)
   1. 置き場に mode 0700 のディレクトリ `sockat.XXXXXXXXXX` を作る (`EEXIST` で名前を引き直し、16 回で打ち切る)
-  2. `O_DIRECTORY | O_NOFOLLOW` で開き、`fstat` で「ディレクトリ・持ち主が実効 uid・group と other に権限が無い」を確かめ、`fchmod(fd, 0700)` で持ち主のビットをそろえる (umask 0277 等で mkdir が 0500 になっても毎回落ちて残骸が溜まらないように)
+  2. `O_PATH | O_DIRECTORY | O_NOFOLLOW` で開き (読み取り権限が無くても開ける)、`fstat` で「ディレクトリ・持ち主が実効 uid・group と other に権限が無い」を確かめ、`chmod("/proc/self/fd/<fd>", 0700)` で持ち主のビットをそろえる (O_PATH の fd に `fchmod` はできない。umask 0277 / 0477 等で mkdir が 0500 / 0300 になっても毎回落ちて残骸が溜まらないように)
   3. fd の中に `symlinkat` でソケットのファイル (元のパス、相対パスなら cwd を前に付ける) を指す `s` を作る
   4. `/proc/self/fd/<fd>/s` を `net.DialUnix` に渡す
   5. 片付け: `unlinkat(fd, "s")`。ディレクトリは名前を `lstat` した `(st_dev, st_ino)` が fd と一致する時だけ `rmdir`。fd を閉じる
@@ -30,4 +30,4 @@
 ## 判断の出所
 
 - kawaz 裁定 (ハブの DR-0008) 2026-11-18
-- /proc を作る前に確かめること、fstat の確認を緩めて fchmod すること: 統括の裁定 (ハブ b6f511a) 2026-11-18
+- /proc を作る前に確かめること、fstat の確認を緩めて持ち主のビットをそろえること、O_PATH で開いて /proc 経由で chmod すること: 統括の裁定 (ハブ b6f511a、1875978) 2026-11-18

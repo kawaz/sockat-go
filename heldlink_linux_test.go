@@ -1,0 +1,518 @@
+package sockat
+
+// The fd-held form of the symlink route (Linux with /proc, Dial only): in a
+// place for the symlink that others can write to (not safeBase), a symlink
+// reached by its name could be renamed away and replaced, so the route makes
+// a directory of its own there (mode 0700, sockat.XXXXXXXXXX), opens it
+// O_DIRECTORY | O_NOFOLLOW, checks with fstat that it is a directory of the
+// effective uid with mode 0700, creates the symlink "s" to the socket file in
+// it through the fd (symlinkat), and connects through /proc/self/fd/<fd>/s.
+// The kernel follows the fd, not the name, so a rename in the place does not
+// matter, and the spelling is short whatever the path. Afterwards "s" is
+// removed through the fd and the directory only while its name still names
+// the directory held.
+//
+// The order per place: a safe place gets the symlink, an unsafe one the
+// fd-held form; TMPDIR before /tmp; then the thread-cwd route. The form needs
+// /proc: without it an unsafe place is passed over untouched, as on every
+// other system (TestAnUnsafePlaceForTheSymlinkIsPassedOver runs there and on
+// Linux with /proc made to look absent).
+//
+// The socket paths here have a file name of 95 bytes directly under a short
+// directory: too long to fit behind /proc/self/fd/<n>/ (so the /proc route
+// cannot be used although /proc is there, and the POSIX order runs), far from
+// the cwd (no relative spelling).
+
+import (
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"syscall"
+	"testing"
+
+	"golang.org/x/sys/unix"
+)
+
+// unsafePlace is a place for the symlink that others can write to and that is
+// not sticky (mode 0777), so not safeBase.
+func unsafePlace(t *testing.T) string {
+	t.Helper()
+	p := mkdirMode(t, tmpDir(t)+"/open", 0o777)
+	if safeBase(p) {
+		t.Fatal("the premise: a 0777 directory is not a safe place")
+	}
+	return p
+}
+
+// pastProc is a socket path whose 95-byte file name does not fit behind
+// /proc/self/fd/<n>/, with a listener at it (bound under a short name and
+// renamed, since no listen reaches the long name where the thread-cwd route
+// is refused).
+func pastProc(t *testing.T) (string, *net.UnixListener) {
+	t.Helper()
+	d := tmpDir(t)
+	p := d + "/" + strings.Repeat("n", 95)
+	if len("/proc/self/fd/0/")+95 <= directMax {
+		t.Fatal("the premise: the name does not fit behind /proc")
+	}
+	if rel := newRelative(p, d); rel != nil {
+		t.Fatalf("the premise: %s is far from the cwd", p)
+	}
+	l, err := Listen(d + "/s.sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	if err := os.Rename(d+"/s.sock", p); err != nil {
+		t.Fatal(err)
+	}
+	return p, l
+}
+
+// In an unsafe place, a dial takes the fd-held form: it reaches the listener
+// at the path (data flows both ways, the types are the net package's in
+// working order, the server sees this process as the peer), and the place is
+// empty afterwards (the symlink and the directory are removed). The same for
+// a path whose directory part is long (600 bytes): the spelling does not
+// depend on it. A name that fits behind /proc takes the /proc route and the
+// place is not touched at all.
+func TestADialThroughAnUnsafePlaceTakesTheFdHeldForm(t *testing.T) {
+	t.Parallel()
+	base := unsafePlace(t)
+	p, l := pastProc(t)
+	c, r := dialLong(t, p, procCfg(base))
+	if r != routeHeldLink {
+		t.Fatalf("dial: %s, want %s", r, routeHeldLink)
+	}
+	assertEmpty(t, base)
+	checkStdTypes(t, l, c)
+
+	c, _ = dialLong(t, p, procCfg(base))
+	l.SetDeadline(nowPlusGuard())
+	s, err := l.AcceptUnix()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if pid := peerPid(t, s); pid != os.Getpid() {
+		t.Fatalf("the peer is pid %d, not this process", pid)
+	}
+	pingConns(t, s, c)
+
+	deep := nest(t, tmpDir(t), 600, strings.Repeat("m", 95))
+	dl := must{t}.listener(Listen(filepath.Dir(deep) + "/s.sock"))
+	if err := os.Rename(filepath.Dir(deep)+"/s.sock", deep); err != nil {
+		t.Fatal(err)
+	}
+	c, r = dialLong(t, deep, procCfg(base))
+	if r != routeHeldLink {
+		t.Fatalf("a 600-byte path: dial %s", r)
+	}
+	ping(t, dl, c)
+	assertEmpty(t, base)
+
+	fits := nest(t, tmpDir(t), 300, "s.sock")
+	fl, _ := listenLong(t, fits, procCfg())
+	markUntouched(t, base)
+	c, r = dialLong(t, fits, procCfg(base))
+	if r != routeProc {
+		t.Fatalf("a name that fits behind /proc: dial %s", r)
+	}
+	ping(t, fl, c)
+	assertUntouched(t, base)
+}
+
+// The other unsafe places, run as root (docker): a place owned by another user
+// is unsafe whether sticky or not (its owner can rename anything in it), and
+// root may still create the directory there. Both take the fd-held form and
+// are empty afterwards.
+func TestAnotherUsersPlaceTakesTheFdHeldForm(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() != 0 {
+		t.Skip("only root can give a directory to another user")
+	}
+	p, l := pastProc(t)
+	for _, mode := range []os.FileMode{0o755, os.ModeSticky | 0o777} {
+		base := mkdirMode(t, fmt.Sprintf("%s/theirs%o", tmpDir(t), mode.Perm()), mode)
+		if err := os.Chown(base, 65534, -1); err != nil {
+			t.Fatal(err)
+		}
+		if safeBase(base) {
+			t.Fatalf("the premise: %v owned by another user is not safe", mode)
+		}
+		c, r := dialLong(t, p, procCfg(base))
+		if r != routeHeldLink {
+			t.Fatalf("%v: dial %s", mode, r)
+		}
+		ping(t, l, c)
+		assertEmpty(t, base)
+	}
+}
+
+// A dial through the fd-held form that fails is the result: ENOENT for a
+// missing socket, ECONNREFUSED for a socket nobody listens on, as they are,
+// with the place empty afterwards (cleaned up after a failure too), and the
+// later places, unsafe or safe, untouched: no directory or symlink was even
+// created there, and the thread-cwd route was not tried. A missing directory
+// is ENOENT before any place is looked at.
+func TestAFailureThroughTheFdHeldFormIsReturnedAndNotRetried(t *testing.T) {
+	t.Parallel()
+	first, laterUnsafe, laterSafe := unsafePlace(t), unsafePlace(t), tmpDir(t)
+	cfg := procCfg(first, laterUnsafe, laterSafe)
+	p, _ := pastProc(t)
+	dir := filepath.Dir(p)
+	stale := dir + "/z" + strings.Repeat("n", 94)
+	staleSocket(t, stale)
+	cases := []struct {
+		what  string
+		path  string
+		errno syscall.Errno
+	}{
+		{"a missing socket", dir + "/m" + strings.Repeat("n", 94), syscall.ENOENT},
+		{"a socket nobody listens on", stale, syscall.ECONNREFUSED},
+		{"a missing directory", dir + "/nope/" + strings.Repeat("n", 95), syscall.ENOENT},
+	}
+	for _, c := range cases {
+		markUntouched(t, laterUnsafe)
+		markUntouched(t, laterSafe)
+		_, _, err := runLong(opDial, c.path, cfg)
+		wantErrno(t, "dial "+c.what, err, c.errno)
+		assertEmpty(t, first)
+		assertUntouched(t, laterUnsafe)
+		assertUntouched(t, laterSafe)
+	}
+}
+
+// TMPDIR is used up before /tmp: the places are tried in order, each in the
+// form its safety calls for, and the first that works is the result. With two
+// unsafe places the first takes the fd-held form and the second is untouched;
+// an unsafe TMPDIR is used (fd-held) before a safe /tmp, and a safe TMPDIR
+// (the symlink) before an unsafe /tmp, the later one untouched either way.
+// configFromTmpdir puts TMPDIR first (TestConfigFromTmpdirTriesTmpdirThenTmp).
+func TestThePlacesAreTriedInOrderEachInItsForm(t *testing.T) {
+	t.Parallel()
+	p, l := pastProc(t)
+	cases := []struct {
+		first, second string
+		want          route
+	}{
+		{unsafePlace(t), unsafePlace(t), routeHeldLink},
+		{unsafePlace(t), tmpDir(t), routeHeldLink},
+		{tmpDir(t), unsafePlace(t), routeSymlinkFile},
+	}
+	for _, c := range cases {
+		markUntouched(t, c.second)
+		cc, r := dialLong(t, p, procCfg(c.first, c.second))
+		if r != c.want {
+			t.Fatalf("%s then %s: %s, want %s", c.first, c.second, r, c.want)
+		}
+		ping(t, l, cc)
+		assertEmpty(t, c.first)
+		assertUntouched(t, c.second)
+	}
+}
+
+// Without /proc (procSelfFD pointed at an empty directory, or at nothing)
+// there is no fd-held form: an unsafe place is passed over without anything
+// created in it (its mtime is unchanged), as on the systems without /proc, and
+// the order goes on to the thread-cwd route (ENAMETOOLONG where the system
+// refuses it).
+func TestWithoutProcAnUnsafePlaceIsPassedOverUntouched(t *testing.T) {
+	t.Parallel()
+	empty := tmpDir(t) + "/proc/self/fd"
+	if err := os.MkdirAll(empty, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	p, l := pastProc(t)
+	for _, none := range []string{empty, noProc} {
+		base := unsafePlace(t)
+		markUntouched(t, base)
+		cfg := procCfg(base)
+		cfg.procSelfFD = none
+		ep, r, err := runLong(opDial, p, cfg)
+		if wantLastRoute(t, "dial with "+none, r, err) {
+			c := ep.(*net.UnixConn)
+			ping(t, l, c)
+			c.Close()
+		}
+		assertUntouched(t, base)
+	}
+}
+
+// A listen never takes the fd-held form (its spelling,
+// /proc/self/fd/<fd>/s/<name>, would be longer than the /proc route's, which
+// was tried first) and creates nothing in an unsafe place: the 95-byte name
+// goes on to the thread-cwd route, and a name that fits behind /proc takes
+// the /proc route.
+func TestAListenCreatesNothingInAnUnsafePlace(t *testing.T) {
+	t.Parallel()
+	base := unsafePlace(t)
+	markUntouched(t, base)
+	d := tmpDir(t)
+	ep, r, err := runLong(opListen, d+"/"+strings.Repeat("n", 95), procCfg(base))
+	if wantLastRoute(t, "listen on a 95-byte name", r, err) {
+		ep.Close()
+	}
+	_, r = listenLong(t, d+"/s"+strings.Repeat("x", 60), procCfg(base))
+	if r != routeProc {
+		t.Fatalf("listen on a short name: %s", r)
+	}
+	assertUntouched(t, base)
+}
+
+// The directory of the fd-held form is named as the symlink is: a name
+// already taken (by anything, here a file) is skipped for the next, the entry
+// left as it was; after 16 taken names (linkAttempts) it gives up with
+// errNoFreeName; any other failure of mkdir(2) (the place missing: ENOENT),
+// or of drawing a name, ends the attempt at once. What it creates is a
+// directory of mode 0700.
+func TestCreateHeldDirSkipsTakenNamesAndGivesUpAfter16(t *testing.T) {
+	t.Parallel()
+	base := tmpDir(t)
+	taken, free := linkPrefix+"AAAAAAAAAA", linkPrefix+"BBBBBBBBBB"
+	if err := os.WriteFile(base+"/"+taken, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	names := []string{taken, free}
+	calls := 0
+	got, err := createHeldDir(base, func() (string, error) { calls++; return names[calls-1], nil })
+	if err != nil || calls != 2 || got != base+"/"+free {
+		t.Fatalf("%q, %v after %d tries", got, err, calls)
+	}
+	if fi, err := os.Lstat(got); err != nil || !fi.IsDir() || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("%v, %v: want a directory of mode 0700", fi.Mode(), err)
+	}
+	if b, _ := os.ReadFile(base + "/" + taken); string(b) != "keep" {
+		t.Fatalf("the taken entry was changed: %q", b)
+	}
+
+	calls = 0
+	_, err = createHeldDir(base, func() (string, error) { calls++; return taken, nil })
+	if !errors.Is(err, errNoFreeName) || calls != linkAttempts || linkAttempts != 16 {
+		t.Fatalf("all taken: %v after %d tries, want errNoFreeName after 16", err, calls)
+	}
+
+	calls = 0
+	_, err = createHeldDir("/nonexistent", func() (string, error) { calls++; return randomName() })
+	if !errors.Is(err, syscall.ENOENT) || calls != 1 {
+		t.Fatalf("missing place: %v after %d tries", err, calls)
+	}
+	drawErr := errors.New("no randomness")
+	calls = 0
+	_, err = createHeldDir(base, func() (string, error) { calls++; return "", drawErr })
+	if !errors.Is(err, drawErr) || calls != 1 {
+		t.Fatalf("failed draw: %v after %d tries", err, calls)
+	}
+}
+
+// isOurPrivateDir is the check that a directory opened by name is the one
+// just created and not one swapped in for it by someone who can write to the
+// place: a directory, owned by the effective uid, of mode exactly 0700. Checked
+// on fstat of real entries: our 0700 directory passes; a directory of another
+// mode (0755, 0500, 0711, 01700), a file of mode 0700, and (as root, chown) a
+// 0700 directory of another user do not; nor does our directory for another
+// uid.
+func TestIsOurPrivateDirTakesOnlyOurOwn0700Directory(t *testing.T) {
+	t.Parallel()
+	d := tmpDir(t)
+	us := uint32(os.Geteuid())
+	fstat := func(p string) *unix.Stat_t {
+		t.Helper()
+		fd, err := unix.Open(p, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer unix.Close(fd)
+		var st unix.Stat_t
+		if err := unix.Fstat(fd, &st); err != nil {
+			t.Fatal(err)
+		}
+		return &st
+	}
+	if !isOurPrivateDir(fstat(mkdirMode(t, d+"/ours", 0o700)), us) {
+		t.Fatal("our 0700 directory: want true")
+	}
+	if isOurPrivateDir(fstat(d+"/ours"), us+1) {
+		t.Fatal("our 0700 directory for another uid: want false")
+	}
+	for _, mode := range []os.FileMode{0o755, 0o500, 0o711, os.ModeSticky | 0o700} {
+		if isOurPrivateDir(fstat(mkdirMode(t, fmt.Sprintf("%s/m%o", d, mode), mode)), us) {
+			t.Errorf("a directory of mode %v: want false", mode)
+		}
+	}
+	if err := os.WriteFile(d+"/file", nil, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if isOurPrivateDir(fstat(d+"/file"), us) {
+		t.Error("a file of mode 0700: want false")
+	}
+	if us == 0 {
+		theirs := mkdirMode(t, d+"/theirs", 0o700)
+		if err := os.Chown(theirs, 65534, -1); err != nil {
+			t.Fatal(err)
+		}
+		if isOurPrivateDir(fstat(theirs), us) {
+			t.Error("another user's 0700 directory: want false")
+		}
+	}
+}
+
+// The check is made on what the route actually opened. A directory swapped in
+// between the mkdir and the open differs in its mode or its owner; such a
+// directory is stood in for by making the route's own mkdir produce one:
+//
+//   - mode: a child process with umask 0277 (the umask belongs to the whole
+//     process, hence the child) makes mkdir(0700) create mode 0500;
+//   - owner (root only): the route runs on a thread whose filesystem uid is
+//     65534 (setfsuid(2) is per thread), so the directory belongs to 65534
+//     while the effective uid stays 0.
+//
+// Either way the route must not use the directory: errUnusable, no symlink
+// created in it (it is left alone, not being known to be ours), and the order
+// goes on to the next place, here a safe one (the symlink).
+func TestADirectoryThatIsNotOurOwn0700IsNotUsed(t *testing.T) {
+	t.Parallel()
+	p, l := pastProc(t)
+	base := unsafePlace(t)
+	safe := tmpDir(t)
+	runChild(t, "TestChildHeldDirUnderAUmask", "/", "SOCKAT_PATH="+p, "SOCKAT_BASE="+base, "SOCKAT_SAFE="+safe)
+	assertOnlyAnUnusedHeldDir(t, base, 0o500, os.Geteuid())
+	l.SetDeadline(nowPlusGuard())
+	s, err := l.Accept()
+	if err != nil {
+		t.Fatalf("the child's dial through the safe place did not arrive: %v", err)
+	}
+	s.Close()
+
+	t.Run("owner", func(t *testing.T) {
+		if os.Geteuid() != 0 {
+			t.Skip("only root can create a directory as another user")
+		}
+		base := unsafePlace(t)
+		// The thread with filesystem uid 65534 must be able to reach the place
+		// (tmpDir is 0700).
+		if err := os.Chmod(filepath.Dir(base), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() {
+			// Never unlocked: the thread's filesystem uid is changed, so the
+			// thread is discarded with the goroutine.
+			runtime.LockOSThread()
+			if err := unix.Setfsuid(65534); err != nil {
+				done <- err
+				return
+			}
+			_, err := heldLinkRoute(base, p, "/proc/self/fd")
+			done <- err
+		}()
+		if err := <-done; !errors.Is(err, errUnusable) {
+			t.Fatalf("%v, want errUnusable", err)
+		}
+		assertOnlyAnUnusedHeldDir(t, base, 0o700, 65534)
+	})
+}
+
+func TestChildHeldDirUnderAUmask(t *testing.T) {
+	asChild(t)
+	syscall.Umask(0o277)
+	p, base, safe := os.Getenv("SOCKAT_PATH"), os.Getenv("SOCKAT_BASE"), os.Getenv("SOCKAT_SAFE")
+	// The order tries the unsafe place first; the fd-held form there being
+	// unusable, the dial goes on to the safe place.
+	c, r := dialLong(t, p, procCfg(base, safe))
+	if r != routeSymlinkFile {
+		t.Fatalf("dial: %s, want %s through the safe place", r, routeSymlinkFile)
+	}
+	c.Close()
+}
+
+// assertOnlyAnUnusedHeldDir checks that base holds exactly one directory of
+// the route's (sockat.*, mode perm, owned by owner), with nothing in it: no symlink was
+// created through a directory that failed the check.
+func assertOnlyAnUnusedHeldDir(t *testing.T, base string, perm os.FileMode, owner int) {
+	t.Helper()
+	es, err := os.ReadDir(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(es) != 1 || !strings.HasPrefix(es[0].Name(), linkPrefix) {
+		t.Fatalf("entries of %s: %v", base, es)
+	}
+	dir := base + "/" + es[0].Name()
+	fi, err := os.Lstat(dir)
+	if err != nil || !fi.IsDir() || fi.Mode().Perm() != perm {
+		t.Fatalf("%s: %v, %v", dir, fi.Mode(), err)
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && owner >= 0 && int(st.Uid) != owner {
+		t.Fatalf("%s: owner %d, want %d", dir, st.Uid, owner)
+	}
+	os.Chmod(dir, 0o700)
+	in, err := os.ReadDir(dir)
+	if err != nil || len(in) != 0 {
+		t.Fatalf("in %s: %v, %v (a symlink was created through it)", dir, in, err)
+	}
+}
+
+// A dial fails at once on a full backlog through the fd-held form too (the
+// spelling goes to net.DialUnix, whose connect does not wait), and every dial
+// that got in took the form; the place is empty afterwards.
+func TestADialThroughTheFdHeldFormFailsAtOnceOnAFullBacklog(t *testing.T) {
+	t.Parallel()
+	base := unsafePlace(t)
+	p, l := pastProc(t)
+	relisten(t, l, 1)
+	var full error
+	for queued := 0; full == nil; queued++ {
+		if queued == 16 {
+			t.Fatal("the backlog never filled")
+		}
+		type result struct {
+			ep  endpoint
+			r   route
+			err error
+		}
+		res := atOnce(t, "a dial to a full backlog", func() result {
+			ep, r, err := runLong(opDial, p, procCfg(base))
+			return result{ep, r, err}
+		})
+		if res.err != nil {
+			full = res.err
+			break
+		}
+		defer res.ep.Close()
+		if res.r != routeHeldLink {
+			t.Fatalf("dial: %s", res.r)
+		}
+	}
+	wantErrno(t, "dial to a full backlog", full, fullBacklog)
+	assertEmpty(t, base)
+}
+
+// The case that brought the fd-held form in (hyoui): under a seccomp filter
+// (no thread-cwd route), with no safe place for the symlink and a file name
+// too long for the /proc route, a dial reaches the socket. A child process
+// puts a filter on itself that kills on unshare(2), so this runs the same
+// whatever the filter the tests run under (Docker's default, or none).
+func TestUnderASeccompFilterADialReachesThroughAnUnsafePlace(t *testing.T) {
+	t.Parallel()
+	runChild(t, "TestChildHeldLinkUnderAKillingSeccompFilter", tmpDir(t), "SOCKAT_BASE="+unsafePlace(t))
+}
+
+func TestChildHeldLinkUnderAKillingSeccompFilter(t *testing.T) {
+	asChild(t)
+	installKillOnUnshareFilter(t)
+	base := os.Getenv("SOCKAT_BASE")
+	p, l := pastProc(t)
+	_, _, err := runLong(opDial, p, procCfg())
+	wantErrno(t, "dial with no place (the premise: nothing else reaches it)", err, syscall.ENAMETOOLONG)
+	c, r := dialLong(t, p, procCfg(base))
+	if r != routeHeldLink {
+		t.Fatalf("dial: %s", r)
+	}
+	ping(t, l, c)
+	assertEmpty(t, base)
+}

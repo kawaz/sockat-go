@@ -42,7 +42,17 @@ func posixRun(o op, path, dir, name string, opened *os.File, cfg *config) (endpo
 	}
 
 	for _, base := range cfg.tmpBases {
-		ep, r, err := symlinkRoute(o, base, path, dir, name)
+		var ep endpoint
+		var r route
+		var err error
+		if o == opDial && !safeBase(base) {
+			// A place others can write to: a directory of our own in it, held
+			// by its fd (Linux with /proc; errUnusable elsewhere).
+			ep, err = heldLinkRoute(base, path, cfg.procSelfFD)
+			r = routeHeldLink
+		} else {
+			ep, r, err = symlinkRoute(o, base, path, dir, name)
+		}
 		switch {
 		case err == nil:
 			return ep, r, nil
@@ -245,12 +255,9 @@ func symlinkRoute(o op, base, path, dir, name string) (endpoint, route, error) {
 	if toFile {
 		target = path
 	}
-	if !isAbs(target) {
-		cwd, err := syscall.Getwd()
-		if err != nil {
-			return nil, "", errUnusable
-		}
-		target = cwd + "/" + target
+	target, ok := absTarget(target)
+	if !ok {
+		return nil, "", errUnusable
 	}
 	link, err := createLink(base, target, randomName)
 	if err != nil {
@@ -264,6 +271,20 @@ func symlinkRoute(o op, base, path, dir, name string) (endpoint, route, error) {
 	}
 	ep, err := viaStd(o, via, false)
 	return ep, r, err
+}
+
+// absTarget is the caller's spelling made absolute against the cwd, for a
+// symlink to hold: the kernel then resolves the link as it resolves the
+// caller's path. false when the cwd cannot be read.
+func absTarget(target string) (string, bool) {
+	if isAbs(target) {
+		return target, true
+	}
+	cwd, err := syscall.Getwd()
+	if err != nil {
+		return "", false
+	}
+	return cwd + "/" + target, true
 }
 
 // safeBase reports whether base, followed through symlinks (macOS's /tmp is

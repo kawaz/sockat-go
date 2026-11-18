@@ -455,6 +455,11 @@ func TestAFailureThroughTheSymlinkIsReturnedAndNotRetried(t *testing.T) {
 // own (0700, 0755) are used. With only unsafe places there is no symlink
 // route. Run as root (docker), a place owned by another user is made too
 // (chown) and must be passed over, sticky or not.
+//
+// This is the case where there is no fd-held form for an unsafe place: macOS
+// and the other systems, and Linux without /proc (posixCfg makes /proc look
+// absent). With /proc, Linux dials through an unsafe place in that form
+// instead (heldlink_linux_test.go).
 func TestAnUnsafePlaceForTheSymlinkIsPassedOver(t *testing.T) {
 	t.Parallel()
 	d := tmpDir(t)

@@ -52,7 +52,7 @@ A longer path is tried on these routes, in this order per OS, and bound / connec
 - **/proc**: open the directory `O_PATH` and pass `/proc/self/fd/<fd>/<file name>`. Not usable without `/proc`, or for a file name that does not fit it (over about 90 bytes)
 - **bindat / connectat**: pass the file name relative to the directory fd
 - **relative path**: when the path relative to the cwd is short enough for the net package, pass that. Only the string is rewritten; the cwd is not changed
-- **symlink**: create a short symlink under `TMPDIR` or `/tmp` and pass the path through it: to the socket's directory for Listen, to the socket file for Dial. Created only where no other user can replace it, and removed right away
+- **symlink**: create a short symlink under `TMPDIR` or `/tmp` and pass the path through it: to the socket's directory for Listen, to the socket file for Dial. Created only where no other user can replace it, and removed right away. On Linux with `/proc`, Dial also uses a place others can write to: it creates a directory of its own (mode 0700) there, holds it by its fd, puts the symlink in it and passes `/proc/self/fd/<fd>/s`
 - **thread cwd**: a goroutine locked to its OS thread moves that thread's cwd (and no other's) into the directory and passes the file name; the thread is then discarded. Linux uses `unshare(CLONE_FS)` (not under a seccomp filter, such as Docker's default), macOS `__pthread_fchdir`
 
 None of the routes changes the process's cwd, so any goroutine may call them.
@@ -90,7 +90,7 @@ Only for a long path:
 - **A path that does not end with a file name** (`dir/`, `dir/.`, `dir/..`) is `EINVAL`, and nothing is created
 - **The directory is looked up first**: the /proc, relative, bindat and thread cwd routes look the directory up and then pass the file name. A rename or a repointed symlink in between is not seen
 - **Another goroutine's `os.Chdir`**: if the cwd changes during the relative route, the result is discarded and an error is returned
-- **A symlink can be left behind**: if the process dies between creating and removing it, a `sockat.XXXXXXXXXX` stays in the place it was made
+- **A symlink or directory can be left behind**: if the process dies between creating and removing it, a `sockat.XXXXXXXXXX` stays in the place it was made
 
 ## Documentation
 

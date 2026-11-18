@@ -287,25 +287,7 @@ func TestUnderASeccompFilterThatKillsOnUnshareTheProcessSurvives(t *testing.T) {
 
 func TestChildUnderAKillingSeccompFilter(t *testing.T) {
 	asChild(t)
-	filter := []unix.SockFilter{
-		// The system call number is the first field of struct seccomp_data.
-		{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: 0},
-		{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jt: 0, Jf: 1, K: unix.SYS_UNSHARE},
-		{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_KILL_PROCESS},
-		{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_ALLOW},
-	}
-	prog := unix.SockFprog{Len: uint16(len(filter)), Filter: &filter[0]}
-	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
-		t.Fatal(err)
-	}
-	// TSYNC puts the filter on every thread of the process, not only this one.
-	if _, _, e := unix.Syscall(unix.SYS_SECCOMP, unix.SECCOMP_SET_MODE_FILTER, unix.SECCOMP_FILTER_FLAG_TSYNC, uintptr(unsafe.Pointer(&prog))); e != 0 {
-		t.Fatal(e)
-	}
-	runtime.KeepAlive(filter)
-	if mode := seccompMode(t); mode != 2 {
-		t.Fatalf("PR_GET_SECCOMP = %d after installing the filter", mode)
-	}
+	installKillOnUnshareFilter(t)
 	checkThreadCwdUnusable(t)
 }
 
@@ -367,5 +349,32 @@ func TestAbstractNamesGoToTheNetPackageAsTheyAre(t *testing.T) {
 		if want == nil || err == nil || err.Error() != want.Error() {
 			t.Fatalf("%d bytes: %v, want the net package's %v", len(long), err, want)
 		}
+	}
+}
+
+// installKillOnUnshareFilter puts on this process a seccomp filter that
+// answers unshare(2) with SECCOMP_RET_KILL_PROCESS (as systemd's
+// SystemCallFilter= does by default) and allows every other call. Only for a
+// child process: a filter cannot be taken off again.
+func installKillOnUnshareFilter(t *testing.T) {
+	t.Helper()
+	filter := []unix.SockFilter{
+		// The system call number is the first field of struct seccomp_data.
+		{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: 0},
+		{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jt: 0, Jf: 1, K: unix.SYS_UNSHARE},
+		{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_KILL_PROCESS},
+		{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_ALLOW},
+	}
+	prog := unix.SockFprog{Len: uint16(len(filter)), Filter: &filter[0]}
+	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	// TSYNC puts the filter on every thread of the process, not only this one.
+	if _, _, e := unix.Syscall(unix.SYS_SECCOMP, unix.SECCOMP_SET_MODE_FILTER, unix.SECCOMP_FILTER_FLAG_TSYNC, uintptr(unsafe.Pointer(&prog))); e != 0 {
+		t.Fatal(e)
+	}
+	runtime.KeepAlive(filter)
+	if mode := seccompMode(t); mode != 2 {
+		t.Fatalf("PR_GET_SECCOMP = %d after installing the filter", mode)
 	}
 }

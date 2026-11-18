@@ -23,5 +23,6 @@ Status は各 DR ファイルの `Status:` 行が正本。
 | [DR-0007](DR-0007-long-path-listener-keeps-socket-file.md) | ✅ 実装済 | 長いパスの listener は Close でソケットファイルを消さない |
 | [DR-0008](DR-0008-dependency-and-go-version.md) | ✅ 実装済 | 依存は `golang.org/x/sys` だけ、Go は支援中の 2 版 |
 | [DR-0009](DR-0009-routes-not-exposed.md) | ✅ 実装済 | 経路は公開せず、試験はパッケージ内から `config` を差し替えて強制する |
+| [DR-0010](DR-0010-unsafe-base-held-by-fd.md) | ✅ 実装済 | `/proc` を使える Linux の Dial は、安全でない置き場に 0700 のディレクトリを作り fd で掴んで symlink を置く |
 
 言語によらない振る舞いの正本は [ハブの SPEC](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md)。

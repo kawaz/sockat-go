@@ -52,7 +52,7 @@ go get github.com/kawaz/sockat-go
 - **/proc**: ディレクトリを `O_PATH` で開き、`/proc/self/fd/<fd>/<ファイル名>` で渡す。`/proc` が無い時と、ファイル名がこれに収まらない時 (およそ 90 バイト超) は使えない
 - **bindat / connectat**: ディレクトリの fd を基準にファイル名で渡す
 - **相対パス**: cwd からの相対パスが標準に渡せる長さなら、それで渡す。文字列を書き直すだけで、cwd は変えない
-- **symlink**: `TMPDIR` か `/tmp` に短い symlink を作り、それを通して渡す。Listen はソケットのディレクトリを、Dial はソケットのファイルを指す。他人が差し替えられない置き場にだけ作り、すぐ消す
+- **symlink**: `TMPDIR` か `/tmp` に短い symlink を作り、それを通して渡す。Listen はソケットのディレクトリを、Dial はソケットのファイルを指す。他人が差し替えられない置き場にだけ作り、すぐ消す。`/proc` を使える Linux の Dial は、他人が書ける置き場でも、そこに自分専用のディレクトリ (0700) を作って fd で掴み、その中に symlink を置いて `/proc/self/fd/<fd>/s` で渡す
 - **スレッド cwd**: OS スレッドに固定した goroutine で、そのスレッドだけ cwd をディレクトリに移し、ファイル名で渡す。スレッドは使い終わったら捨てる。Linux は `unshare(CLONE_FS)` (seccomp の filter が掛かった環境では使わない。docker の既定等)、macOS は `__pthread_fchdir`
 
 どの経路もプロセスの cwd を変えないので、どの goroutine から呼んでもよい。
@@ -90,7 +90,7 @@ go get github.com/kawaz/sockat-go
 - **名前で終わらないパス** (`dir/`、`dir/.`、`dir/..`) は何も作らずに `EINVAL`
 - **ディレクトリを先に引く**: /proc・相対パス・bindat・スレッド cwd は、ディレクトリを引いてからファイル名で渡す。その間の rename や symlink の張り替えは反映されない
 - **他の goroutine の `os.Chdir`**: 相対パスの経路の途中で cwd が変わったら、結果を捨ててエラーを返す
-- **symlink が残りうる**: symlink を作ってから消すまでにプロセスが死ぬと、`sockat.XXXXXXXXXX` が置き場に残る
+- **symlink が残りうる**: symlink やディレクトリを作ってから消すまでにプロセスが死ぬと、`sockat.XXXXXXXXXX` が置き場に残る
 
 ## ドキュメント
 

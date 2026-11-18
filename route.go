@@ -53,6 +53,7 @@ const (
 	routeRelative    route = "relative"     // the path relative to the cwd
 	routeSymlinkDir  route = "symlink-dir"  // through a symlink to the directory (bind)
 	routeSymlinkFile route = "symlink-file" // through a symlink to the file (connect)
+	routeHeldLink    route = "held-link"    // a symlink in a directory of our own held by its fd (connect, Linux)
 	routeAt          route = "at"           // bindat(2) / connectat(2) (FreeBSD)
 	routeThreadCwd   route = "thread-cwd"   // a thread whose own cwd is the directory
 )

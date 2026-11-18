@@ -27,3 +27,6 @@ func openDir(dir string) (*os.File, error) {
 	}
 	return os.NewFile(uintptr(fd), dir), nil
 }
+
+// heldLinkRoute needs /proc: not here.
+func heldLinkRoute(string, string, string) (endpoint, error) { return nil, errUnusable }

@@ -44,6 +44,9 @@
 //   - symlink: a short symlink under $TMPDIR or failing that /tmp, removed
 //     right after the call: for Listen to the socket's directory, for Dial to
 //     the socket file. It is created only where no other user can replace it.
+//     On Linux with /proc, a Dial also uses a place others can write to: it
+//     creates a directory of its own (mode 0700) there, holds it by its fd,
+//     puts the symlink in it and passes /proc/self/fd/<fd>/s.
 //   - thread cwd: a goroutine locked to its own OS thread moves that thread's
 //     working directory (and no other's) into the socket's directory and binds
 //     / connects by the file name; the thread is then discarded. Linux uses
@@ -77,6 +80,7 @@
 //   - The relative route is exposed to another goroutine's os.Chdir: when the
 //     cwd changed during the call, the result is discarded and an error is
 //     returned.
-//   - A temporary symlink sockat.XXXXXXXXXX can be left behind under $TMPDIR
-//     or /tmp if the process dies between creating and removing it.
+//   - A temporary symlink or directory sockat.XXXXXXXXXX can be left behind
+//     under $TMPDIR or /tmp if the process dies between creating and removing
+//     it.
 package sockat

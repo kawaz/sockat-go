@@ -73,3 +73,6 @@ func threadChdir(dirfd int) error {
 	}
 	return syscallError("fchdir", e)
 }
+
+// heldLinkRoute needs /proc: not here.
+func heldLinkRoute(string, string, string) (endpoint, error) { return nil, errUnusable }

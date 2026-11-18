@@ -69,10 +69,14 @@ jobs:
       - uses: vmactions/netbsd-vm@v1
         with:
           usesh: true
-          prepare: /usr/sbin/pkg_add go
-          # pkgsrc installs each release under /usr/pkg/go1NN; take the newest.
+          # The official NetBSD build of the latest Go release (the pkgsrc
+          # mirrors the VM points at are not always reachable).
+          prepare: |
+            v=$(ftp -o - 'https://go.dev/VERSION?m=text' | head -1)
+            ftp -o /tmp/go.tar.gz "https://go.dev/dl/${v}.netbsd-amd64.tar.gz"
+            tar -xzf /tmp/go.tar.gz -C /usr/local
           run: |
-            export PATH="$(ls -d /usr/pkg/go1*/bin | tail -1):/usr/pkg/bin:$PATH"
+            export PATH=/usr/local/go/bin:$PATH
             go version
             go test -count=1 ./...
 

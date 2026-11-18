@@ -41,6 +41,33 @@ defer l.Close()
 - 確かめてから消すまでの一瞬に置き換えられると見分けられない (POSIX に inode を指定して消す手段が無い)
 - `ListenEx` の listener は Close でファイルを消さない (短いパスも)。消すのは `discard` だけ
 
+## 何かを失ってでも届かせる (`atanycost`)
+
+`sockat.Listen` が `ENAMETOOLONG` になる所 (上の環境や長いファイル名) でも届かせたい時だけ、別パッケージの `atanycost.Listen` を使う。import することが opt-in。
+
+```go
+import "github.com/kawaz/sockat-go/atanycost"
+
+l, res, err := atanycost.Listen(path) // l は *net.UnixListener
+if err != nil {
+	return err
+}
+if res.Level == atanycost.SharedSymlink {
+	log.Printf("%s: bound through a shared place (route %s, skipped %v)", path, res.Route, res.Skipped)
+}
+```
+
+- `sockat.Listen` と同じ経路を試し、`ENAMETOOLONG` の時だけ置き場の symlink (ソケットのディレクトリを指す、`<置き場>/sockat.XXXXXXXXXX/<ファイル名>`、bind の後すぐ消す) を試す。置き場は `XDG_RUNTIME_DIR`・`TMPDIR`・`/tmp` のうち、自分だけが書ける所を先に、無ければ共有の所 (sticky の `/tmp` 等)
+- `res.Level` は通った経路で失ったもの ([SPEC の「失ったものの段階」](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#失ったものの段階))。値に大小は無い (`Forked` と `SharedSymlink` はどちらも `Respelled` を含むが互いを含まない)。値は将来増えうる。知らない値は「標準ではない (何かを失った、中身は分からない)」とだけ読む
+- `res.Route` は通った経路の名前、`res.Skipped` はそれより前に試して使えなかった経路の並び (試した順) と理由。どちらも診断用 (ログ等) で、中身は約束しない
+
+| `Level` | 失ったもの |
+|---|---|
+| `None` | 無し (標準) |
+| `Respelled` | カーネルが覚えるアドレスが元のパスでない。Close でファイルが消えない |
+| `Forked` | Go には fork の経路が無いので来ない (他の言語と値をそろえるため) |
+| `SharedSymlink` | `Respelled` に加え、他の利用者が綴りを作り直せる (覚えている綴りで消すと、相手の選んだディレクトリのファイルを消させうる) |
+
 ## なぜ要るか
 
 標準の `net` は `sun_path` に収まらないパスを `EINVAL` で断る。ファイルシステムには上限が無いのに、深い一時ディレクトリ (macOS の `$TMPDIR` はそれだけで 50 バイト前後、`t.TempDir()` がさらに掘る。[golang/go#62614](https://github.com/golang/go/issues/62614)) にソケットを置くとすぐに当たる。上限が効くのは `bind(2)` / `connect(2)` に渡す引数の長さなので、sockat は同じ場所を指す短い綴りでカーネルに渡す。
@@ -56,31 +83,35 @@ defer l.Close()
 
 それを超えるパスは、自分専用のディレクトリ D を作って fd で掴み、その中にソケットのディレクトリを指す乱数の名前の symlink R を作り、D を基準に `R/<ファイル名>` で bind / connect する (中心の経路)。終わったら R と D を消す。
 
+経路は [SPEC の「経路の名前」](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#経路の名前)で呼ぶ。
+
 | OS | Listen | Dial |
 |---|---|---|
-| Linux / Android | スレッド cwd → /proc 版 | スレッド cwd → /proc 版 → 予備の経路 |
-| macOS | スレッド cwd | スレッド cwd → 予備の経路 |
-| FreeBSD | bindat | connectat → 予備の経路 |
+| Linux / Android | thread-cwd → proc | thread-cwd → proc → 予備の経路 |
+| macOS | thread-cwd | thread-cwd → 予備の経路 |
+| FreeBSD | at (bindat) | at (connectat) → 予備の経路 |
 | NetBSD / OpenBSD / illumos / その他の Unix | なし (`ENAMETOOLONG`) | 予備の経路だけ |
 | Windows | 対象外 | 対象外 |
 
-- **D の置き場**: `${TMPDIR:-/tmp}`、作れなければ `/tmp`、それも作れなければソケットのディレクトリ (名前は `.sockat.XXXXXXXXXX`)。置き場が深くても、他人が書ける所でも使える (D を名前でなく fd で辿り、作ってから開くまでのすり替えは持ち主と権限で弾く)。D をどこにも作れない時、Listen は D 無しの形で試す: ソケットのディレクトリに R (`.sockat.XXXXXXXXXX`) を作り、そのディレクトリの fd を基準に `.sockat.XXXXXXXXXX/<ファイル名>` で、同じ手段の順に bind する (ファイル名は Linux 88、macOS / FreeBSD 84 まで、/proc 版はおよそ 72)
-- **スレッド cwd**: OS スレッドに固定した使い捨ての goroutine で、そのスレッドだけ cwd を D に移し、`R/<ファイル名>` で渡す。スレッドは使い終わったら捨てる (Unlock せずに goroutine を終える)。Linux は `unshare(CLONE_FS)` (seccomp の filter が掛かった環境では使わない。docker の既定等)、macOS は `__pthread_fchdir`
-- **/proc 版**: `/proc/self/fd/<D の fd>/R/<ファイル名>` で渡す。スレッドを使わない
-- **bindat / connectat**: D の fd と `R/<ファイル名>` を渡す
+- **D の置き場**: `${TMPDIR:-/tmp}`、作れなければ `/tmp`、それも作れなければソケットのディレクトリ (名前は `.sockat.XXXXXXXXXX`)。置き場が深くても、他人が書ける所でも使える (D を名前でなく fd で辿り、作ってから開くまでのすり替えは持ち主と権限で弾く)。D をどこにも作れない時、Listen は D 無しの形 (thread-cwd-sockdir → proc-sockdir、FreeBSD は at-sockdir) で試す: ソケットのディレクトリに R (`.sockat.XXXXXXXXXX`) を作り、そのディレクトリの fd を基準に `.sockat.XXXXXXXXXX/<ファイル名>` で bind する (ファイル名は Linux 88、macOS / FreeBSD 84 まで、proc-sockdir はおよそ 72)
+- **thread-cwd**: OS スレッドに固定した使い捨ての goroutine で、そのスレッドだけ cwd を D に移し、`R/<ファイル名>` で渡す。スレッドは使い終わったら捨てる (Unlock せずに goroutine を終える)。Linux は `unshare(CLONE_FS)` (seccomp の filter が掛かった環境では使わない。docker の既定等)、macOS は `__pthread_fchdir`
+- **proc**: `/proc/self/fd/<D の fd>/R/<ファイル名>` で渡す。スレッドを使わない
+- **at**: `bindat(2)` / `connectat(2)` に D の fd と `R/<ファイル名>` を渡す
 
 Dial の予備の経路 (中心の経路が使えない時):
 
 | OS | 試す順番 |
 |---|---|
-| Linux / Android (`/proc` を使える) | /proc → (置き場ごとに) symlink か fd で掴む形 |
-| Linux / Android (`/proc` を使えない) | 相対パス → symlink |
-| macOS / NetBSD / OpenBSD / illumos / その他 | 相対パス → symlink |
-| FreeBSD | connectat (ソケットのディレクトリの fd とファイル名) |
+| Linux / Android (`/proc` を使える) | proc-direct → (置き場ごとに) symlink か proc-held |
+| Linux / Android (`/proc` を使えない) | relative → symlink |
+| macOS / NetBSD / OpenBSD / illumos / その他 | relative → symlink |
+| FreeBSD | at-direct |
 
-- **/proc**: ソケットのディレクトリを開き、`/proc/self/fd/<fd>/<ファイル名>` で渡す
-- **相対パス**: cwd からの相対パスが渡せる長さなら、それで渡す。文字列を書き直すだけで、cwd は変えない
-- **symlink**: `TMPDIR` か `/tmp` の、他人が差し替えられない置き場に、ソケットのファイルを指す短い symlink を作って渡し、すぐ消す。`/proc` を使える Linux では、他人が書ける置き場にも自分専用のディレクトリを作って fd で掴み、その中に symlink を置いて `/proc/self/fd/<fd>/s` で渡す (fd で掴む形)
+- **proc-direct**: ソケットのディレクトリを開き、`/proc/self/fd/<fd>/<ファイル名>` で渡す
+- **relative**: cwd からの相対パスが渡せる長さなら、それで渡す。文字列を書き直すだけで、cwd は変えない
+- **symlink**: `TMPDIR` か `/tmp` の、他人が差し替えられない置き場に、ソケットのファイルを指す短い symlink を作って渡し、すぐ消す
+- **proc-held**: `/proc` を使える Linux で、他人が書ける置き場に自分専用のディレクトリを作って fd で掴み、その中に symlink を置いて `/proc/self/fd/<fd>/s` で渡す
+- **at-direct**: `connectat(2)` にソケットのディレクトリの fd とファイル名を渡す
 
 どの経路もプロセスの cwd も呼び出し元のスレッドの cwd も変えないので、どの goroutine から呼んでもよい。
 
@@ -89,13 +120,15 @@ Dial の予備の経路 (中心の経路が使えない時):
 | 経路 | Go 版 | 理由 |
 |---|---|---|
 | fork (bind の最後の手、D 無しの fork、`connect_any` 系) | なし | Go の runtime では生の fork を使えない。そのため `connect_any` 系も無い |
-| 広げた sockaddr (macOS の Dial の予備) | なし | 自前のソケットを標準の型に渡すと、相手が広げた形で bind している時に `RemoteAddr()` が nil になる (`syscall` が `sockaddr_un` より長いアドレスを断る) |
+| widened (macOS の Dial の予備) | なし | 自前のソケットを標準の型に渡すと、相手が広げた形で bind している時に `RemoteAddr()` が nil になる (`syscall` が `sockaddr_un` より長いアドレスを断る) |
 
 **fork が無いので、次の環境では長いパスの Listen が `ENAMETOOLONG` になる:**
 
-- **NetBSD / OpenBSD / illumos**: 中心の経路の手段 (スレッド cwd、/proc、bindat) が無い。長いパスの Listen は全部 `ENAMETOOLONG`
+- **NetBSD / OpenBSD / illumos**: D を通す経路の手段 (thread-cwd、proc、at) が無い。長いパスの Listen は全部 `ENAMETOOLONG`
 - Linux で seccomp の filter が掛かり `/proc` も無い環境
 - macOS で `__pthread_fchdir` が使えない環境
+
+それでも届かせたい時は `atanycost.Listen` を使う (下の「何かを失ってでも届かせる」)。
 
 ### どこから届かなくなるか
 
@@ -103,7 +136,7 @@ Dial の予備の経路 (中心の経路が使えない時):
 
 | OS | Listen | Dial |
 |---|---|---|
-| Linux | ファイル名 > 96。seccomp の filter が掛かった環境ではおよそ 79 (/proc 版)、`/proc` も無ければ全部 | ファイル名 > 96 で、予備の経路 (/proc の綴りか、symlink か fd で掴む形) も使えない時 |
+| Linux | ファイル名 > 96。seccomp の filter が掛かった環境ではおよそ 79 (proc)、`/proc` も無ければ全部 | ファイル名 > 96 で、予備の経路 (proc-direct、symlink、proc-held) も使えない時 |
 | macOS | ファイル名 > 92 | ファイル名 > 92 で、相対パス > 103、symlink も使えない時 |
 | FreeBSD | ファイル名 > 92 | ファイル名 > 103 |
 | NetBSD / OpenBSD | 全部 | 相対パス > 103 で symlink も使えない時 |
@@ -120,7 +153,7 @@ Dial の予備の経路 (中心の経路が使えない時):
 長いパスでだけ違う点:
 
 - **listener の Close でソケットファイルを消さない**。標準 (と短いパス) は消す。長いパスの listener が覚えているアドレスはカーネルに渡した綴りなので、`SetUnlinkOnClose(true)` を呼ばない。消すなら `ListenEx` の `discard` を使う
-- **`Addr()` / `LocalAddr()` / `RemoteAddr()` は渡したパスを返さない**。カーネルに渡した綴り `R/<ファイル名>` (/proc 版は `/proc/self/fd/<fd>/R/<ファイル名>`) を返す。R はもう無いので、その綴りを消したり stat したりしても何にも当たらないが、他のプロセスに渡して繋がせる用途には使えない。元のパスは自分で持っておく
+- **`Addr()` / `LocalAddr()` / `RemoteAddr()` は渡したパスを返さない**。カーネルに渡した綴り `R/<ファイル名>` (proc は `/proc/self/fd/<fd>/R/<ファイル名>`) を返す。R はもう無いので、その綴りを消したり stat したりしても何にも当たらないが、他のプロセスに渡して繋がせる用途には使えない。元のパスは自分で持っておく
 - **名前で終わらないパス** (`dir/`、`dir/.`、`dir/..`) は何も作らずに `EINVAL`
 - **ディレクトリを先に引く**: 中心の経路は R を作る時にソケットのディレクトリを realpath で引く。予備の経路の /proc・相対パス・connectat はディレクトリを引いてからファイル名で渡す。その間の rename や symlink の張り替えは反映されない
 - **他の goroutine の `os.Chdir`**: 相対パスの経路 (Dial の予備) の途中で cwd が変わったら、結果を捨ててエラーを返す

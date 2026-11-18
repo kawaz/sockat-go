@@ -14,6 +14,7 @@
 | `sockat.Listen(path string)` | `(*net.UnixListener, error)` | `net.ListenUnix("unix", ...)` |
 | `sockat.Dial(path string)` | `(*net.UnixConn, error)` | `net.DialUnix("unix", nil, ...)` |
 | `sockat.ListenEx(path string)` | `(*net.UnixListener, discard func() error, error)` | (SPEC の後始末つきの bind) |
+| `atanycost.Listen(path string)` | `(*net.UnixListener, atanycost.Result, error)` | (SPEC の bind_any。別パッケージ、[DR-0012](DR-0012-listen-at-any-cost.md)) |
 
 - 名前は Go の `net` の語彙 (Listen / Dial) に合わせる
 - 戻り値は具体型。`net.Listener` / `net.Conn` にそのまま代入でき、`AcceptUnix` 等も使える

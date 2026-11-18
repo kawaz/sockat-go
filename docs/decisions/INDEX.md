@@ -24,6 +24,7 @@ Status は各 DR ファイルの `Status:` 行が正本。
 | [DR-0009](DR-0009-routes-not-exposed.md) | ✅ 実装済 | 経路は公開せず、試験はパッケージ内から `config` を差し替えて強制する |
 | [DR-0010](DR-0010-unsafe-base-held-by-fd.md) | ✅ 実装済 | `/proc` を使える Linux の Dial の予備の経路は、安全でない置き場に 0700 のディレクトリを作り fd で掴んで symlink を置く |
 | [DR-0011](DR-0011-central-route.md) | ✅ 実装済 | 長いパスは自分専用のディレクトリ D と乱数の symlink R を通す (中心の経路)。Listen は中心の経路だけ、Dial は予備の経路も |
+| [DR-0012](DR-0012-listen-at-any-cost.md) | ✅ 実装済 | 何かを失ってでも届く Listen は別パッケージ `atanycost` に置き、失ったものの段階 (`Loss`) を `Result` で返す |
 
 言語によらない振る舞いの正本は [ハブの SPEC](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md)。
 

@@ -20,6 +20,7 @@ sockat-go は、`sun_path` の上限を超えるパスでも Unix domain socket 
 | `os_*.go` | OS ごとの Dial の予備の経路 (`fallbackDial`)、ディレクトリと D の開き方、スレッド cwd の `threadChdir`、bindat / connectat |
 | `threadcwd*.go` | スレッドだけ cwd を D に移す手段 (使い捨ての goroutine) |
 | `raw.go` | 自前のソケットを `net.FileListener` / `FileConn` に渡す (FreeBSD の bindat) |
+| `anyroute.go` / `atanycost/` / `internal/anyhook/` | 何かを失ってでも届く Listen (`atanycost.Listen`、置き場の symlink、失ったものの段階)。経路は `sockat` の中にあり、`internal/anyhook` で渡す |
 | `path.go` | パスの分割・相対パスの計算 (ファイルシステムに触らない) |
 | `*_test.go` | 経路を強制するパッケージ内の試験 |
 

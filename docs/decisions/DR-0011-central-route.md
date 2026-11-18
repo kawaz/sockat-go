@@ -43,7 +43,8 @@ Dial の予備の経路:
   | macOS | `O_SEARCH \| O_DIRECTORY \| O_NOFOLLOW` (カーネルが `EISDIR` / `EINVAL` を返したら `O_RDONLY`) | `fchmod` |
 - D の中に、ソケットのディレクトリの realpath を指す乱数 10 文字の R を `symlinkat` で作る
 - D の fd を基準に `R/<ファイル名>` で bind / connect する
-- 確認が通った後に 0700 にそろえられなければ (umask 0477 の非 root で開き直しが `EACCES` 等)、その置き場では作れないとみなし、D を片付けて次へ。O_RDONLY で開く OS で開けない時は、確かめられないので触らずに残す
+- 作った直後の D を開けない時 (macOS の `O_SEARCH` で umask が持ち主の検索権限を削った等) は、名前を `fstatat(AT_SYMLINK_NOFOLLOW)` で引いて確認と同じ条件なら `unlinkat(AT_REMOVEDIR)` で消し (空のディレクトリしか消えない)、次の置き場へ (kawaz 裁定 D12-Q5)
+- 確認が通った後に 0700 にそろえられなければ (umask 0477 の非 root で開き直しが `EACCES` 等)、その置き場では作れないとみなし、D を片付けて次へ。
 - 片付け: R は作れた時だけ消す。D は確認が通り、名前の `(st_dev, st_ino)` が fd と一致する時だけ消す。確認に落ちた D は中身も含めて触らない
 
 - D をどこにも作れない時、Listen は D 無しの形で試す: ソケットのディレクトリに R (`.sockat.` + 乱数 10 文字、ソケットのディレクトリの realpath を指す) を作り、ソケットのディレクトリの fd を基準に `.sockat.XXXXXXXXXX/<ファイル名>` で、中心の経路と同じ手段の順 (スレッド cwd (FreeBSD は bindat) → /proc 版) に bind する。ソケットのディレクトリを開けない、綴りが収まらない、R を作れない時は `ENAMETOOLONG`。Dial は D 無しの形を使わず予備の経路へ

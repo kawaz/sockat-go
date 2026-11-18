@@ -405,11 +405,12 @@ func TestADOfAnotherOwnerIsNotUsed(t *testing.T) {
 // first; its mode is then set by opening it again by its name O_RDONLY. Under
 // a umask of 0477, mkdir(0700) gives 0300, and that second open fails for a
 // non-root user (EACCES): D has passed the check and so is known to be ours,
-// and it is removed rather than left behind. The central route then has no
-// place for D: a listen is ENAMETOOLONG and nothing is left in the place or in
-// the socket's directory, however many times it is called. As root, the
-// second open succeeds and the route is used, also leaving nothing. A umask
-// belongs to the whole process, hence a child.
+// and it is removed rather than left behind. With D made nowhere, a listen
+// takes the form without D (R made in the socket's directory, which a umask
+// does not keep from working: a symlink's mode is not used) and binds at the
+// path; nothing is left in the place or in the socket's directory, however
+// many times it is called. As root, the second open succeeds and D is used,
+// also leaving nothing. A umask belongs to the whole process, hence a child.
 func TestWithoutProcAUmaskTakingTheOwnersReadBitLeavesNoD(t *testing.T) {
 	t.Parallel()
 	if !threadCwdAvailable() {
@@ -427,15 +428,18 @@ func TestChildWithoutProcUnderUmask0477(t *testing.T) {
 	syscall.Umask(0o477)
 	for i := range 3 {
 		ep, r, err := runLong(opListen, p, cfg)
+		want := routeThreadCwdNoD
 		if os.Geteuid() == 0 {
-			if err != nil || r != routeThreadCwd {
-				t.Fatalf("as root, listen %d: %s, %v", i, r, err)
-			}
-			ep.Close()
-			os.Remove(p)
-		} else if !errors.Is(err, syscall.ENAMETOOLONG) {
-			t.Fatalf("listen %d: %s, %v, want ENAMETOOLONG", i, r, err)
+			want = routeThreadCwd
 		}
+		if err != nil || r != want {
+			t.Fatalf("listen %d: %s, %v, want %s", i, r, err, want)
+		}
+		if !isSocket(p) {
+			t.Fatalf("listen %d: no socket at the path", i)
+		}
+		ep.Close()
+		os.Remove(p)
 		assertEmpty(t, base)
 		assertNoSockatEntry(t, filepath.Dir(p))
 	}

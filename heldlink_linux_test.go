@@ -311,12 +311,13 @@ func TestCreateHeldDirSkipsTakenNamesAndGivesUpAfter16(t *testing.T) {
 
 // isOurPrivateDir is the check that a directory opened by name is the one
 // just created and not one swapped in for it by someone who can write to the
-// place: a directory, owned by the effective uid, of mode exactly 0700. Checked
-// on fstat of real entries: our 0700 directory passes; a directory of another
-// mode (0755, 0500, 0711, 01700), a file of mode 0700, and (as root, chown) a
-// 0700 directory of another user do not; nor does our directory for another
-// uid.
-func TestIsOurPrivateDirTakesOnlyOurOwn0700Directory(t *testing.T) {
+// place: a directory, owned by the effective uid, with no permission for
+// group and others (mkdir 0700 under any umask gives that; the route then
+// fchmods it to 0700). Checked on fstat of real entries: our 0700, 0500 and
+// 01700 directories pass; a directory with group or other bits (0755, 0711,
+// 0770), a file of mode 0700, and (as root, chown) a 0700 directory of another
+// user do not; nor does our directory for another uid.
+func TestIsOurPrivateDirTakesOnlyOurOwnPrivateDirectory(t *testing.T) {
 	t.Parallel()
 	d := tmpDir(t)
 	us := uint32(os.Geteuid())
@@ -339,7 +340,12 @@ func TestIsOurPrivateDirTakesOnlyOurOwn0700Directory(t *testing.T) {
 	if isOurPrivateDir(fstat(d+"/ours"), us+1) {
 		t.Fatal("our 0700 directory for another uid: want false")
 	}
-	for _, mode := range []os.FileMode{0o755, 0o500, 0o711, os.ModeSticky | 0o700} {
+	for _, mode := range []os.FileMode{0o500, os.ModeSticky | 0o700} {
+		if !isOurPrivateDir(fstat(mkdirMode(t, fmt.Sprintf("%s/ok%o", d, mode), mode)), us) {
+			t.Errorf("our directory of mode %v: want true", mode)
+		}
+	}
+	for _, mode := range []os.FileMode{0o755, 0o711, 0o770} {
 		if isOurPrivateDir(fstat(mkdirMode(t, fmt.Sprintf("%s/m%o", d, mode), mode)), us) {
 			t.Errorf("a directory of mode %v: want false", mode)
 		}
@@ -361,32 +367,39 @@ func TestIsOurPrivateDirTakesOnlyOurOwn0700Directory(t *testing.T) {
 	}
 }
 
-// The check is made on what the route actually opened. A directory swapped in
-// between the mkdir and the open differs in its mode or its owner; such a
-// directory is stood in for by making the route's own mkdir produce one:
-//
-//   - mode: a child process with umask 0277 (the umask belongs to the whole
-//     process, hence the child) makes mkdir(0700) create mode 0500;
-//   - owner (root only): the route runs on a thread whose filesystem uid is
-//     65534 (setfsuid(2) is per thread), so the directory belongs to 65534
-//     while the effective uid stays 0.
-//
-// Either way the route must not use the directory: errUnusable, no symlink
-// created in it (it is left alone, not being known to be ours), and the order
-// goes on to the next place, here a safe one (the symlink).
-func TestADirectoryThatIsNotOurOwn0700IsNotUsed(t *testing.T) {
+// A umask that takes the owner's bits (0277) makes mkdir(0700) create mode
+// 0500. That directory is still ours and private, so the route uses it
+// (fchmod to 0700 first) rather than failing every dial and leaving a
+// directory behind each time: the dial arrives through the fd-held form and
+// the place is empty afterwards. The umask belongs to the whole process,
+// hence the child.
+func TestAUmaskTakingTheOwnersBitsStillUsesTheHeldDirectory(t *testing.T) {
 	t.Parallel()
 	p, l := pastProc(t)
 	base := unsafePlace(t)
 	safe := tmpDir(t)
+	markUntouched(t, safe)
 	runChild(t, "TestChildHeldDirUnderAUmask", "/", "SOCKAT_PATH="+p, "SOCKAT_BASE="+base, "SOCKAT_SAFE="+safe)
-	assertOnlyAnUnusedHeldDir(t, base, 0o500, os.Geteuid())
+	assertEmpty(t, base)
+	assertUntouched(t, safe)
 	l.SetDeadline(nowPlusGuard())
 	s, err := l.Accept()
 	if err != nil {
-		t.Fatalf("the child's dial through the safe place did not arrive: %v", err)
+		t.Fatalf("the child's dial did not arrive: %v", err)
 	}
 	s.Close()
+}
+
+// The check is made on what the route actually opened. A directory swapped in
+// between the mkdir and the open differs in its owner (or has group / other
+// bits); such a directory is stood in for by making the route's own mkdir
+// produce one (root only): the route runs on a thread whose filesystem uid is
+// 65534 (setfsuid(2) is per thread), so the directory belongs to 65534 while
+// the effective uid stays 0. The route must not use it: errUnusable, no
+// symlink created in it, and it is left alone, not being known to be ours.
+func TestADirectoryThatIsNotOurOwnIsNotUsed(t *testing.T) {
+	t.Parallel()
+	p, _ := pastProc(t)
 
 	t.Run("owner", func(t *testing.T) {
 		if os.Geteuid() != 0 {
@@ -421,11 +434,11 @@ func TestChildHeldDirUnderAUmask(t *testing.T) {
 	asChild(t)
 	syscall.Umask(0o277)
 	p, base, safe := os.Getenv("SOCKAT_PATH"), os.Getenv("SOCKAT_BASE"), os.Getenv("SOCKAT_SAFE")
-	// The order tries the unsafe place first; the fd-held form there being
-	// unusable, the dial goes on to the safe place.
+	// The unsafe place comes first and its fd-held form is used despite the
+	// umask; the safe place after it is not reached.
 	c, r := dialLong(t, p, procCfg(base, safe))
-	if r != routeSymlinkFile {
-		t.Fatalf("dial: %s, want %s through the safe place", r, routeSymlinkFile)
+	if r != routeHeldLink {
+		t.Fatalf("dial: %s, want %s", r, routeHeldLink)
 	}
 	c.Close()
 }

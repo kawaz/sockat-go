@@ -100,8 +100,10 @@ const heldLinkName = "s"
 //  1. Create a directory sockat.XXXXXXXXXX of mode 0700 under base (names as
 //     for the symlink: a fresh one on EEXIST, linkAttempts at most).
 //  2. Open it O_DIRECTORY | O_NOFOLLOW and check with fstat(2) that what was
-//     opened is a directory, owned by the effective uid, of mode 0700. A
-//     directory swapped in between the mkdir and the open fails the check.
+//     opened is a directory, owned by the effective uid, with no permission
+//     for group and others (isOurPrivateDir). A directory swapped in between
+//     the mkdir and the open fails the check. Then fchmod(2) it to 0700, so a
+//     umask that takes the owner's bits (0277) does not fail every attempt.
 //  3. Create in it, through the fd, the symlink "s" to path (symlinkat(2)).
 //  4. Connect through <procSelfFD>/<fd>/s. The kernel follows the fd, not the
 //     name, so renaming the directory away does not matter; and the spelling
@@ -138,6 +140,9 @@ func heldLinkRoute(base, path, procSelfFD string) (endpoint, error) {
 		return nil, errUnusable
 	}
 	defer removeHeldDir(dirPath, &held)
+	if err := unix.Fchmod(dfd, 0o700); err != nil {
+		return nil, errUnusable
+	}
 	if err := unix.Symlinkat(target, dfd, heldLinkName); err != nil {
 		return nil, errUnusable
 	}
@@ -187,9 +192,10 @@ func createHeldDir(base string, nextName func() (string, error)) (string, error)
 }
 
 // isOurPrivateDir reports whether st (an fstat) is a directory owned by us
-// with mode 0700: the one created, and not one swapped in for it.
+// with no permission for group and others: the one created (mkdir 0700 under
+// any umask), and not one swapped in for it.
 func isOurPrivateDir(st *unix.Stat_t, us uint32) bool {
-	return st.Mode&unix.S_IFMT == unix.S_IFDIR && st.Uid == us && st.Mode&0o7777 == 0o700
+	return st.Mode&unix.S_IFMT == unix.S_IFDIR && st.Uid == us && st.Mode&0o077 == 0
 }
 
 // removeHeldDir removes the directory at dirPath when that name still names

@@ -5,7 +5,7 @@
 
 ## Context
 
-[ハブの SPEC](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md) は OS ごとの経路と試す順番を決め、その言語で作れない経路は飛ばして README に明示することを求める。Go では fork が使えず ([DR-0004](DR-0004-thread-cwd-route.md))、macOS の広げた sockaddr は使わない ([DR-0005](DR-0005-no-widened-sockaddr.md))。
+[ハブの SPEC](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md) は OS ごとの経路と試す順番を決め、その言語で作れない経路は飛ばして README に明示することを求める。Go では fork が使えず ([DR-0004](../DR-0004-thread-cwd-route.md))、macOS の広げた sockaddr は使わない ([DR-0005](../DR-0005-no-widened-sockaddr.md))。
 
 ## Decision
 

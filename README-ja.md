@@ -29,11 +29,15 @@ go get github.com/kawaz/sockat-go
 
 ```go
 l, discard, err := sockat.ListenEx(path) // l は *net.UnixListener
-defer discard()                          // ソケットのファイルを消す (l は閉じない)
+if err != nil {
+	return err
+}
+defer discard() // ソケットのファイルを消す (l は閉じない)
 defer l.Close()
 ```
 
-- `discard` は bind したファイルを覚えておき、そのパスが今も同じファイル (`(st_dev, st_ino)`) の時だけ消す。間に他のソケットに置き換わっていたら消さない
+- `discard` は bind した直後にファイルを覚えておき、そのパスが今も同じファイル (`(st_dev, st_ino)`) の時だけ消す。間に他のソケットに置き換わっていたら消さない。覚えられなければ `ListenEx` は listener を閉じてエラーを返す (ファイルは消さない)
+- 確かめてから消すまでの一瞬に置き換えられると見分けられない (POSIX に inode を指定して消す手段が無い)
 - `ListenEx` の listener は Close でファイルを消さない (短いパスも)。消すのは `discard` だけ
 
 ## なぜ要るか

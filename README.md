@@ -29,11 +29,15 @@ To remove the socket file later, use `sockat.ListenEx`:
 
 ```go
 l, discard, err := sockat.ListenEx(path) // l is a *net.UnixListener
-defer discard()                          // removes the socket file (does not close l)
+if err != nil {
+	return err
+}
+defer discard() // removes the socket file (does not close l)
 defer l.Close()
 ```
 
-- `discard` remembers the file it bound and removes it only while the path still names that same file (`(st_dev, st_ino)`); a socket that replaced it in the meantime is left alone
+- `discard` records the file right after the bind and removes it only while the path still names that same file (`(st_dev, st_ino)`); a socket that replaced it in the meantime is left alone. When the file cannot be recorded, `ListenEx` closes the listener and returns an error (the file is left)
+- A replacement in the instant between the check and the removal cannot be told apart (POSIX has no removal by inode)
 - The listener from `ListenEx` does not remove the file on Close (short paths included); only `discard` removes it
 
 ## Why

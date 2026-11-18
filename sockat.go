@@ -1,6 +1,7 @@
 package sockat
 
 import (
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -52,34 +53,57 @@ func Dial(path string) (*net.UnixConn, error) {
 
 // ListenEx is Listen, with a function that removes the socket file later.
 //
-// It remembers the socket file it bound (by its real path and (st_dev,
-// st_ino)); discard removes the file only while that path still names that
-// same file, so a socket that someone else has bound at the path since is left
-// alone. discard does not close the listener: close it yourself (before or
-// after). Its error is that of the removal; nil when the file is gone or is no
-// longer the one bound. Calling it again does nothing.
+// Right after the bind it records the socket file (by its real path and
+// (st_dev, st_ino)); discard removes the file only while that path still
+// names that same file, so a socket that someone else has bound at the path
+// since is left alone. Between discard's check and the removal, a replacement
+// cannot be told apart (POSIX has no removal by inode). When the file cannot
+// be recorded, the listener is closed, the file is left, and an error is
+// returned.
 //
-// The listener does not remove the socket file on Close (short paths
-// included), so the removal is discard's alone.
+// discard does not close the listener: close it yourself (before or after).
+// Its error is that of the removal; nil when the file is gone or is no longer
+// the one bound. Calling it again does nothing. The listener does not remove
+// the socket file on Close (short paths included), so the removal is
+// discard's alone.
 func ListenEx(path string) (l *net.UnixListener, discard func() error, err error) {
-	l, err = Listen(path)
+	if abstractName(path) {
+		// No file: nothing to record or remove.
+		l, err = Listen(path)
+		if err != nil {
+			return nil, nil, err
+		}
+		return l, func() error { return nil }, nil
+	}
+	// The real path is resolved before the bind, as the bind resolves it;
+	// the file's identity is read the moment the bind returns.
+	file, ferr := realFile(path)
+	ep, _, err := run(opListen, path)
 	if err != nil {
 		return nil, nil, err
 	}
+	l = ep.(*net.UnixListener)
 	l.SetUnlinkOnClose(false)
-	return l, discarder(path), nil
+	var id fileID
+	ok := ferr == nil
+	if ok {
+		id, ok = lstatID(file)
+	}
+	if !ok {
+		l.Close()
+		return nil, nil, opError(opListen, path, errNotRecorded)
+	}
+	return l, discarder(file, id), nil
 }
 
-// discarder returns ListenEx's discard for the socket file just bound at path.
-func discarder(path string) func() error {
+// errNotRecorded is ListenEx's error when the socket file it bound cannot be
+// looked up to be recorded.
+var errNotRecorded = errors.New("the socket file bound could not be recorded for its removal; the listener was closed and the file left")
+
+// discarder returns ListenEx's discard for the socket file recorded as file
+// and id.
+func discarder(file string, id fileID) func() error {
 	var once sync.Once
-	if abstractName(path) {
-		return func() error { return nil }
-	}
-	file, id, ok := boundFile(path)
-	if !ok {
-		return func() error { return nil }
-	}
 	return func() error {
 		var err error
 		once.Do(func() {
@@ -91,21 +115,19 @@ func discarder(path string) func() error {
 	}
 }
 
-// boundFile is the real path of the socket file at path (its directory
-// resolved, so a later change of the cwd or of a symlink on the way does not
-// retarget it) and its (st_dev, st_ino).
-func boundFile(path string) (string, fileID, bool) {
+// realFile is the socket file at path with its directory resolved to a real
+// path, so a later change of the cwd or of a symlink on the way does not
+// retarget it.
+func realFile(path string) (string, error) {
 	dir, name, err := splitPath(path)
 	if err != nil {
-		return "", fileID{}, false
+		return "", err
 	}
 	real, err := realDir(dir)
 	if err != nil {
-		return "", fileID{}, false
+		return "", err
 	}
-	file := filepath.Join(real, name)
-	id, ok := lstatID(file)
-	return file, id, ok
+	return filepath.Join(real, name), nil
 }
 
 // lstatID is (st_dev, st_ino) of path itself (a symlink is not followed).

@@ -14,7 +14,7 @@ Status は各 DR ファイルの `Status:` 行が正本。
 
 | DR | 状態 | 説明 |
 |---|---|---|
-| [DR-0001](DR-0001-public-api.md) | ✅ 実装済 | 公開 API は `Listen` / `Dial` の 2 つで、標準の具体型と `*net.OpError` を返す |
+| [DR-0001](DR-0001-public-api.md) | ✅ 実装済 | 公開 API は `Listen` / `ListenEx` / `Dial` で、標準の具体型と `*net.OpError` を返す (`ListenEx` は discard 関数も) |
 | [DR-0002](DR-0002-standard-handles-paths-it-accepts.md) | ✅ 実装済 | 標準が受け付けるパスと Linux の `@` は標準にそのまま渡す。NUL は長さによらず `EINVAL` |
 | [DR-0004](DR-0004-thread-cwd-route.md) | ✅ 実装済 | fork の代わりに、スレッドだけ cwd を移す経路を最後に試す |
 | [DR-0005](DR-0005-no-widened-sockaddr.md) | ✅ 実装済 | macOS の広げた sockaddr の経路は使わない (標準の型に渡すとアドレスの取得で落ちる) |

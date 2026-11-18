@@ -323,11 +323,31 @@ func TestAddressesOfALongPathCanBeRead(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer s.Close()
-		if l.Addr() == nil || l.Addr().String() == "" {
-			t.Fatalf("%d: the listener has no address", total)
+		// Each address must be a non-nil net.Addr whose String() works (a nil
+		// one panics there). The bound side (the listener, the accepted
+		// connection's local end, the dialed connection's remote end) must
+		// name something; the dialing side is unbound and may be empty.
+		addrs := []struct {
+			what  string
+			a     net.Addr
+			named bool
+		}{
+			{"listener", l.Addr(), true},
+			{"accepted local", s.LocalAddr(), true},
+			{"accepted remote", s.RemoteAddr(), false},
+			{"dialed local", c.LocalAddr(), false},
+			{"dialed remote", c.RemoteAddr(), true},
 		}
-		t.Logf("%d bytes: listener %v; conn local %v remote %v; accepted local %v remote %v",
-			total, l.Addr(), c.LocalAddr(), c.RemoteAddr(), s.LocalAddr(), s.RemoteAddr())
+		for _, x := range addrs {
+			if x.a == nil {
+				t.Fatalf("%d: %s address is nil", total, x.what)
+			}
+			str := x.a.String()
+			if x.named && (str == "" || str == "@") {
+				t.Fatalf("%d: %s address %q names nothing", total, x.what, str)
+			}
+			t.Logf("%d bytes: %s %q", total, x.what, str)
+		}
 	}
 }
 

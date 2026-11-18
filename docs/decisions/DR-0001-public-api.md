@@ -19,7 +19,7 @@
 - 戻り値は具体型。`net.Listener` / `net.Conn` にそのまま代入でき、`AcceptUnix` 等も使える
 - Dial は 1 つ。SPEC の「標準の connect が元から待たない言語」に当たるので `_nonblocking` を分けない
 - `connect_any` 系は出さない (fork の経路が無い言語は出さない、SPEC)
-- `ListenEx` の `discard` は、bind したソケットのファイルの realpath と `(st_dev, st_ino)` を覚え、そのパスが今も同じファイルの時だけ消す。listener は閉じない (利用者が閉じる)。返すのは消す時のエラーで、既に無い・別のファイルに置き換わっていて消さない時は nil。2 回目以降は何もしない。listener は短いパスも `SetUnlinkOnClose(false)` (消すのは discard だけ)
+- `ListenEx` は bind の直後にソケットのファイルの realpath と `(st_dev, st_ino)` を覚える (覚えられなければ listener を閉じ、ファイルは消さずにエラー)。`discard` はそのパスが今も同じファイルの時だけ消す。listener は閉じない (利用者が閉じる)。返すのは消す時のエラーで、既に無い・別のファイルに置き換わっていて消さない時は nil。2 回目以降は何もしない。listener は短いパスも `SetUnlinkOnClose(false)` (消すのは discard だけ)
   - 型を足さず関数を返すのは、`context.WithCancel` と同じ形で、listener を標準の型のまま渡せるから
 - エラーは標準と同じ形の `*net.OpError` (`Op` は `listen` / `dial`、`Addr` は呼び出し元のパス、`Err` は `*os.SyscallError`)。`errors.Is(err, syscall.ENOENT)` 等が効く。経路が渡した綴りはエラーに出さない
 

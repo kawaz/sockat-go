@@ -64,7 +64,7 @@ defer l.Close()
 | NetBSD / OpenBSD / illumos / その他の Unix | なし (`ENAMETOOLONG`) | 予備の経路だけ |
 | Windows | 対象外 | 対象外 |
 
-- **D の置き場**: `${TMPDIR:-/tmp}`、作れなければ `/tmp`、それも作れなければソケットのディレクトリ (名前は `.sockat.XXXXXXXXXX`)。置き場が深くても、他人が書ける所でも使える (D を名前でなく fd で辿り、作ってから開くまでのすり替えは持ち主と権限で弾く)
+- **D の置き場**: `${TMPDIR:-/tmp}`、作れなければ `/tmp`、それも作れなければソケットのディレクトリ (名前は `.sockat.XXXXXXXXXX`)。置き場が深くても、他人が書ける所でも使える (D を名前でなく fd で辿り、作ってから開くまでのすり替えは持ち主と権限で弾く)。D をどこにも作れない時、Listen は D 無しの形で試す: ソケットのディレクトリに R (`.sockat.XXXXXXXXXX`) を作り、そのディレクトリの fd を基準に `.sockat.XXXXXXXXXX/<ファイル名>` で、同じ手段の順に bind する (ファイル名は Linux 88、macOS / FreeBSD 84 まで、/proc 版はおよそ 72)
 - **スレッド cwd**: OS スレッドに固定した使い捨ての goroutine で、そのスレッドだけ cwd を D に移し、`R/<ファイル名>` で渡す。スレッドは使い終わったら捨てる (Unlock せずに goroutine を終える)。Linux は `unshare(CLONE_FS)` (seccomp の filter が掛かった環境では使わない。docker の既定等)、macOS は `__pthread_fchdir`
 - **/proc 版**: `/proc/self/fd/<D の fd>/R/<ファイル名>` で渡す。スレッドを使わない
 - **bindat / connectat**: D の fd と `R/<ファイル名>` を渡す

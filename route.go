@@ -53,6 +53,10 @@ const (
 	routeThreadCwd route = "thread-cwd" // a thread whose own cwd is D (Linux, macOS)
 	routeProcD     route = "proc-d"     // /proc/self/fd/<D>/R/<name> (Linux)
 	routeAt        route = "at"         // bindat(2) / connectat(2) on D (FreeBSD)
+	// The bind's form without D: .sockat.R/<name> relative to the socket's directory.
+	routeThreadCwdNoD route = "thread-cwd-nod"
+	routeProcNoD      route = "proc-nod"
+	routeAtNoD        route = "at-nod"
 	// The fallback routes of a dial.
 	routeProc        route = "proc"         // /proc/self/fd/<dirfd>/<name> (Linux)
 	routeRelative    route = "relative"     // the path relative to the cwd

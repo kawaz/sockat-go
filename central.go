@@ -103,29 +103,77 @@ func centralRoute(o op, dir string, sdir *os.File, name string, cfg *config) (en
 	}
 	d, err := makeD(cfg.dBases, sdir, real, proc, cfg.procSelfFD, randomPart, randomPart)
 	if err != nil {
+		if o == opListen {
+			return withoutD(o, sdir, real, name, thread, proc, cfg)
+		}
 		return nil, "", errUnusable
 	}
 	defer d.cleanup()
-	spelling := d.r + "/" + name
+	return byMeans(o, d.fd, d.r+"/"+name, thread, proc, cfg, centralRoutes)
+}
 
+// routes names the routes of the means, for D or without it.
+type routes struct{ at, thread, proc route }
+
+var (
+	centralRoutes = routes{routeAt, routeThreadCwd, routeProcD}
+	noDRoutes     = routes{routeAtNoD, routeThreadCwdNoD, routeProcNoD}
+)
+
+// byMeans binds / connects through spelling relative to the directory fd, by
+// the first means that can be used: bindat / connectat (FreeBSD), a thread
+// whose cwd is fd, /proc/self/fd/<fd>/<spelling>. errUnusable when none can.
+func byMeans(o op, fd int, spelling string, thread, proc bool, cfg *config, rs routes) (endpoint, route, error) {
 	if atSupported {
-		ep, err := atOp(o, d.fd, spelling)
-		return ep, routeAt, err
+		ep, err := atOp(o, fd, spelling)
+		return ep, rs.at, err
 	}
 	if thread {
-		ep, err := inThreadCwd(o, d.fd, spelling)
+		ep, err := inThreadCwd(o, fd, spelling)
 		if !errors.Is(err, errUnusable) {
-			return ep, routeThreadCwd, err
+			return ep, rs.thread, err
 		}
 	}
 	if proc {
-		via := cfg.procSelfFD + "/" + strconv.Itoa(d.fd) + "/" + spelling
+		via := cfg.procSelfFD + "/" + strconv.Itoa(fd) + "/" + spelling
 		if len(via) <= directMax {
 			ep, err := viaStd(o, via, false)
-			return ep, routeProcD, err
+			return ep, rs.proc, err
 		}
 	}
 	return nil, "", errUnusable
+}
+
+// noDPrefix is what R's name starts with when it is made in the socket's
+// directory (the form without D).
+const noDPrefix = "." + linkPrefix
+
+// withoutD binds when D can be made nowhere (SPEC "D 無しの形"): R, named
+// .sockat.XXXXXXXXXX and pointing to the socket's directory (real), is made in
+// the socket's directory itself, and the bind goes by .sockat.XXXXXXXXXX/<name>
+// relative to that directory's fd (sdir), by the same means as with D. R is
+// removed afterwards, so the spelling the kernel keeps names nothing later
+// either. errUnusable when sdir could not be opened, the spelling does not
+// fit, or R cannot be made.
+func withoutD(o op, sdir *os.File, real, name string, thread, proc bool, cfg *config) (endpoint, route, error) {
+	if sdir == nil {
+		return nil, "", errUnusable
+	}
+	spellingLen := len(noDPrefix) + rNameLen + 1 + len(name)
+	if spellingLen > directMax {
+		return nil, "", errUnusable
+	}
+	fd := int(sdir.Fd())
+	if !atSupported && !thread && len(cfg.procSelfFD)+len("/")+len(strconv.Itoa(fd))+len("/")+spellingLen > directMax {
+		return nil, "", errUnusable
+	}
+	part, err := createAt(randomPart, func(n string) error { return symlinkat(real, fd, noDPrefix+n) })
+	if err != nil {
+		return nil, "", errUnusable
+	}
+	r := noDPrefix + part
+	defer unix.Unlinkat(fd, r, 0)
+	return byMeans(o, fd, r+"/"+name, thread, proc, cfg, noDRoutes)
 }
 
 // realDir is dir as a real path (symlinks resolved, absolute), for R to point

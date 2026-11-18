@@ -887,3 +887,104 @@ func TestTheCentralRouteNeedsNoFdOfTheSocketsDirectory(t *testing.T) {
 		assertUntouched(t, mark)
 	}
 }
+
+// ----- the bind's form without D -----
+
+// When D can be made nowhere, a bind still goes through a symlink R of a
+// random name: made in the socket's directory itself (.sockat.XXXXXXXXXX,
+// pointing to that directory) and reached relative to the directory's fd, by
+// the same means as with D (thread cwd, /proc variant). The socket is created
+// at the path and works; R is removed, so the spelling the kernel keeps
+// (.sockat.XXXXXXXXXX/<name>, or the /proc form of it) names nothing later;
+// the socket's directory holds nothing of sockat's afterwards.
+func TestWithoutDABindGoesThroughRInTheSocketsDirectory(t *testing.T) {
+	t.Parallel()
+	ms := allMeans()
+	if len(ms) == 0 {
+		t.Skip("no means of the central route here")
+	}
+	for _, m := range ms {
+		p := nest(t, tmpDir(t), 300, "s.sock")
+		dir, name, _ := splitPath(p)
+		real, err := realDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sdir, err := openDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := m.cfg()
+		thread := cfg.threadCwd && threadCwdPossible()
+		proc := procFDUsableFor(sdir, cfg.procSelfFD)
+		ep, r, err := withoutD(opListen, sdir, real, name, thread, proc, cfg)
+		sdir.Close()
+		want := map[route]route{routeThreadCwd: routeThreadCwdNoD, routeProcD: routeProcNoD}[m.want]
+		if err != nil || r != want {
+			t.Fatalf("%s: %s, %v, want %s", m.name, r, err, want)
+		}
+		l := ep.(*net.UnixListener)
+		if !isSocket(p) {
+			t.Fatalf("%s: no socket at the path", m.name)
+		}
+		spelled := l.Addr().String()
+		if !regexp.MustCompile(`(^|/)\.sockat\.` + rPart + `/s\.sock$`).MatchString(spelled) {
+			t.Fatalf("%s: the kernel keeps %q", m.name, spelled)
+		}
+		c, err := Dial(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ping(t, l, c)
+		assertNoSockatEntry(t, dir)
+	}
+}
+
+// The form without D needs the socket's directory's fd and a spelling that
+// fits: with no fd of it (it could not be opened), or with a file name too
+// long for .sockat.XXXXXXXXXX/<name> (19 bytes more than the name), it cannot
+// be used and makes nothing.
+func TestWithoutDNeedsTheDirectorysFdAndASpellingThatFits(t *testing.T) {
+	t.Parallel()
+	ms := allMeans()
+	if len(ms) == 0 {
+		t.Skip("no means of the central route here")
+	}
+	m := ms[0]
+	dir := tmpDir(t)
+	real, err := realDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := m.cfg()
+	markUntouched(t, dir)
+	if _, _, err := withoutD(opListen, nil, real, "s.sock", true, true, cfg); !errors.Is(err, errUnusable) {
+		t.Fatalf("no fd: %v, want errUnusable", err)
+	}
+	sdir, err := openDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sdir.Close()
+	thread := cfg.threadCwd && threadCwdPossible()
+	proc := procFDUsableFor(sdir, cfg.procSelfFD)
+	long := strings.Repeat("n", directMax-len(noDPrefix)-rNameLen) // one byte over
+	if _, _, err := withoutD(opListen, sdir, real, long, thread, proc, cfg); !errors.Is(err, errUnusable) {
+		t.Fatalf("%d-byte name: %v, want errUnusable", len(long), err)
+	}
+	assertUntouched(t, dir)
+	fits := long[1:]
+	ep, _, err := withoutD(opListen, sdir, real, fits, thread, proc, cfg)
+	if m.want == routeProcD {
+		// The /proc form is longer still: this name only fits the thread cwd.
+		if !errors.Is(err, errUnusable) {
+			t.Fatalf("%d-byte name by /proc: %v, want errUnusable", len(fits), err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("%d-byte name: %v", len(fits), err)
+	}
+	ep.Close()
+	assertNoSockatEntry(t, dir)
+}

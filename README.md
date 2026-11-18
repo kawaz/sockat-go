@@ -64,7 +64,7 @@ A longer path is bound / connected through a directory D of sockat's own, held b
 | NetBSD / OpenBSD / illumos / other Unix | none (`ENAMETOOLONG`) | fallback routes only |
 | Windows | not supported | not supported |
 
-- **Where D goes**: `${TMPDIR:-/tmp}`, failing that `/tmp`, failing that the socket's directory (named `.sockat.XXXXXXXXXX`). A deep place or one others can write to works too (D is followed by its fd, not its name, and a directory swapped in before it is opened is refused by its owner and mode)
+- **Where D goes**: `${TMPDIR:-/tmp}`, failing that `/tmp`, failing that the socket's directory (named `.sockat.XXXXXXXXXX`). A deep place or one others can write to works too (D is followed by its fd, not its name, and a directory swapped in before it is opened is refused by its owner and mode). When D can be made nowhere, Listen tries the form without D: R (`.sockat.XXXXXXXXXX`) is made in the socket's directory itself and the bind goes by `.sockat.XXXXXXXXXX/<file name>` relative to that directory's fd, by the same means in the same order (file names up to 88 bytes on Linux, 84 on macOS / FreeBSD, about 72 for the /proc variant)
 - **thread cwd**: a throwaway goroutine locked to its OS thread moves that thread's cwd (and no other's) into D and passes `R/<file name>`; the thread is then discarded (the goroutine ends without unlocking). Linux uses `unshare(CLONE_FS)` (not under a seccomp filter, such as Docker's default), macOS `__pthread_fchdir`
 - **/proc variant**: pass `/proc/self/fd/<D's fd>/R/<file name>`, without a thread
 - **bindat / connectat**: pass D's fd and `R/<file name>`

@@ -130,12 +130,16 @@ func centralRoute(o op, dir string, sdir *os.File, name string, cfg *config) (en
 
 // realDir is dir as a real path (symlinks resolved, absolute), for R to point
 // to: the kernel then reaches the socket's directory as dir names it now.
+//
+// dir is made absolute first and then resolved component by component, so
+// every component is looked up: on macOS getcwd(3) still reports the path of
+// a cwd that was removed, which resolving "." alone would take as real.
 func realDir(dir string) (string, error) {
-	real, err := filepath.EvalSymlinks(dir)
+	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return "", err
 	}
-	return filepath.Abs(real)
+	return filepath.EvalSymlinks(abs)
 }
 
 // held is a D made by makeD, with R in it.

@@ -405,3 +405,45 @@ func TestADirectoryPartThatIsAFileIsENOTDIR(t *testing.T) {
 	}
 	assertUntouched(t, base)
 }
+
+// The real path of the socket's directory can fail to resolve although stat
+// finds it: a process whose cwd was removed can still stat "." but not get its
+// path. A long relative path there ("./" + a long file name) must fail with
+// that error (ENOENT), decided before anything else: not ENAMETOOLONG, and
+// nothing made in the place for D. The cwd belongs to the whole process,
+// hence a child, whose cwd the test removes.
+func TestADirectoryWhoseRealPathCannotBeResolvedIsThatError(t *testing.T) {
+	t.Parallel()
+	base := tmpDir(t)
+	cwd := tmpDir(t) + "/gone"
+	if err := os.Mkdir(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	markUntouched(t, base)
+	runChild(t, "TestChildRealPathOfARemovedCwd", cwd, "SOCKAT_BASE="+base)
+	assertUntouched(t, base)
+}
+
+func TestChildRealPathOfARemovedCwd(t *testing.T) {
+	asChild(t)
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(cwd); err != nil {
+		t.Fatal(err)
+	}
+	os.Unsetenv("PWD")
+	if _, err := os.Stat("."); err != nil {
+		t.Skipf("stat of a removed cwd fails here too (%v): the case does not arise", err)
+	}
+	cfg := configFromTmpdir(os.Getenv("SOCKAT_BASE"))
+	cfg.dBases = []string{os.Getenv("SOCKAT_BASE")}
+	p := "./" + strings.Repeat("n", directMax)
+	for _, o := range []op{opListen, opDial} {
+		_, _, err := runLong(o, p, cfg)
+		if !errors.Is(err, syscall.ENOENT) {
+			t.Fatalf("%s: %v, want ENOENT", o.netName(), err)
+		}
+	}
+}

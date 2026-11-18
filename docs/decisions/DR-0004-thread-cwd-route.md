@@ -9,12 +9,12 @@ SPEC の最後の経路は、ディレクトリに `fchdir` した子を fork �
 
 ## Decision
 
-- `runtime.LockOSThread` した goroutine で、そのスレッドだけ cwd をソケットのディレクトリに移し、ファイル名で標準を呼ぶ。スレッドは sockat が起こした goroutine のもので、呼び出し元のスレッドには触らない
-  - Linux: `unshare(CLONE_FS)` → `fchdir`。ディレクトリは /proc の経路で開いた `O_PATH` の fd。seccomp の filter が掛かっている時 (`prctl(PR_GET_SECCOMP)` が 0 でない) は `unshare` を呼ばない
-  - macOS: `__pthread_fchdir` (syscall 349、libSystem の `pthread_fchdir_np` の中身)。ディレクトリは `O_SEARCH` で開く (受け付けないカーネルなら `O_RDONLY`)
+- `runtime.LockOSThread` した使い捨ての goroutine で、そのスレッドだけ cwd を中心の経路の D ([DR-0011](DR-0011-central-route.md)) に移し、`R/<ファイル名>` で標準を呼ぶ。スレッドは sockat が起こした goroutine のもので、呼び出し元のスレッドには触らない
+  - Linux: `unshare(CLONE_FS)` → `fchdir`。seccomp の filter が掛かっている時 (`prctl(PR_GET_SECCOMP)` が 0 でない) は `unshare` を呼ばない
+  - macOS: `__pthread_fchdir` (syscall 349、libSystem の `pthread_fchdir_np` の中身)
 - goroutine は Unlock せずに終える。runtime はそのスレッドを捨て、他の goroutine に渡さない。新しいスレッドは locked なスレッドからは作られないので、cwd は他のスレッドに移らない
-- Listen も Dial も最後に試す
-- 使えないとみなす時: Linux で seccomp の filter が掛かっている・`prctl` か `unshare` が失敗した、macOS で `ENOSYS`。その時は `ENAMETOOLONG`。`unshare` の後の `fchdir` の失敗は本当の失敗として返す
+- 中心の経路の最初の手段として、Listen も Dial も試す ([DR-0011](DR-0011-central-route.md))
+- 使えないとみなす時: Linux で seccomp の filter が掛かっている・`prctl` か `unshare` が失敗した、macOS で `ENOSYS`。その時は中心の経路の次の手段 (/proc 版) へ進む。`unshare` の後の `fchdir` の失敗は本当の失敗として返す
 - NetBSD / OpenBSD / illumos にはスレッド単位の cwd が無いので、この経路は無い
 
 実測 (macOS 26.5、Linux の docker arm64 で root と uid 1000、go 1.27):

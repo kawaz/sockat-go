@@ -6,18 +6,19 @@ sockat-go は、`sun_path` の上限を超えるパスでも Unix domain socket 
 
 ## 必読
 
-- [docs/decisions/](docs/decisions/INDEX.md) — Go 版の設計 (公開 API、経路の順番、スレッド cwd、macOS の広げた sockaddr を使わない理由、長いパスの listener)。経路に手を入れる前に読む
+- [docs/decisions/](docs/decisions/INDEX.md) — Go 版の設計 (公開 API、中心の経路と試す順番、スレッド cwd、macOS の広げた sockaddr を使わない理由、長いパスの listener)。経路に手を入れる前に読む
 - [README-ja.md](README-ja.md) — 利用者に約束している振る舞い (標準と違う点、どこから届かなくなるか)
 
 ## 構成
 
 | パス | 中身 |
 |---|---|
-| `doc.go` / `sockat.go` | package doc と公開 API (`Listen` / `Dial`) |
+| `doc.go` / `sockat.go` | package doc と公開 API (`Listen` / `ListenEx` / `Dial`) |
 | `route.go` | `run` (短いパスの判定、NUL、abstract)、`viaStd`、エラーの形、`config` |
-| `posix.go` | 相対パス → symlink → スレッド cwd の順 (FreeBSD 以外) |
-| `os_*.go` | OS ごとの `runLong`、ディレクトリの開き方、スレッド cwd の `threadChdir`、自前ソケット |
-| `threadcwd*.go` | スレッドだけ cwd を移す経路 |
+| `central.go` | 長いパスの入口 (`runLong`) と中心の経路 (D と R、手段の順、片付け) |
+| `posix.go` | Dial の予備の経路 (相対パス → symlink / fd で掴む形、FreeBSD 以外) |
+| `os_*.go` | OS ごとの Dial の予備の経路 (`fallbackDial`)、ディレクトリと D の開き方、スレッド cwd の `threadChdir`、bindat / connectat |
+| `threadcwd*.go` | スレッドだけ cwd を D に移す手段 (使い捨ての goroutine) |
 | `raw.go` | 自前のソケットを `net.FileListener` / `FileConn` に渡す (FreeBSD の bindat) |
 | `path.go` | パスの分割・相対パスの計算 (ファイルシステムに触らない) |
 | `*_test.go` | 経路を強制するパッケージ内の試験 |
@@ -26,7 +27,8 @@ sockat-go は、`sun_path` の上限を超えるパスでも Unix domain socket 
 
 - **振る舞いを変える時は、先にハブの SPEC を直す。** sockat-go の docs と実装はその後に追従させる
 - **標準が受け付けるパスには何も足さない。** `net.ListenUnix` / `net.DialUnix` をそのまま呼ぶ (DR-0002。例外は NUL の `EINVAL`)
-- **経路の本当の失敗は次の経路でやり直さない。** 次へ進むのは経路自体が使えない時だけ (DR-0003)
+- **経路の本当の失敗は次の経路でやり直さない。** 次へ進むのは経路自体が使えない時だけ (DR-0011)
+- **bind は中心の経路だけ。** 綴りが後で無関係なファイルに当たる経路 (/proc の D を通さない形、相対パス、ファイル名だけ) を bind に使わない (DR-0011)
 - **スレッド cwd の goroutine は `UnlockOSThread` しない。** cwd が変わったスレッドは goroutine と一緒に捨てる (DR-0004)
 - **長いパスの listener は `SetUnlinkOnClose(false)`。** 覚えているアドレスは綴りなので (DR-0007)
 - **経路は公開 API に出さない。** 試験はパッケージ内で各経路の関数を呼ぶ (DR-0009)

@@ -12,6 +12,7 @@ Go の標準の listener は Close でソケットファイルを消す (`SetUnl
 - 短いパスは標準のまま (Close で消える)
 - 長いパスの listener は `SetUnlinkOnClose(false)` にし、消さない
 - README の「長いパスで標準と違う点」と `Listen` の doc に書く。長いパスの listener に `SetUnlinkOnClose(true)` を呼ばないことも書く
+- 後でファイルを消したい利用者には `ListenEx(path) (*net.UnixListener, discard func() error, error)` を出す ([DR-0001](DR-0001-public-api.md))。`ListenEx` の listener は短いパスも `SetUnlinkOnClose(false)` にし、消すのは `discard` だけにする
 
 ## 理由
 

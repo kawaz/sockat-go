@@ -25,6 +25,17 @@ go get github.com/kawaz/sockat-go
 - Errors are `*net.OpError`s, as from the net package; `errors.Is(err, syscall.ENOENT)` and the like work
 - The only dependency is `golang.org/x/sys`. Go: the two supported releases (1.26 and later)
 
+To remove the socket file later, use `sockat.ListenEx`:
+
+```go
+l, discard, err := sockat.ListenEx(path) // l is a *net.UnixListener
+defer discard()                          // removes the socket file (does not close l)
+defer l.Close()
+```
+
+- `discard` remembers the file it bound and removes it only while the path still names that same file (`(st_dev, st_ino)`); a socket that replaced it in the meantime is left alone
+- The listener from `ListenEx` does not remove the file on Close (short paths included); only `discard` removes it
+
 ## Why
 
 The net package refuses a path that does not fit `sun_path` with `EINVAL`. The file system has no such limit, but a socket in a deep temporary directory (macOS's `$TMPDIR` alone is about 50 bytes, and `t.TempDir()` nests further; [golang/go#62614](https://github.com/golang/go/issues/62614)) runs into it quickly. The limit is on the argument passed to `bind(2)` / `connect(2)`, so sockat hands the kernel a short spelling that names the same place.
@@ -38,44 +49,60 @@ Handed to the net package as is:
 | Linux / Android / illumos | up to 107 bytes |
 | macOS / FreeBSD / NetBSD / OpenBSD | up to 103 bytes |
 
-A longer path is tried on these routes, in this order per OS, and bound / connected on the first route that can be used.
+A longer path is bound / connected through a directory D of sockat's own, held by its fd, with a symlink R of a random name in it pointing to the socket's directory: the path passed is `R/<file name>` relative to D (the central route). R and D are removed afterwards.
 
-| OS | Order tried (Listen and Dial alike) |
+| OS | Listen | Dial |
+|---|---|---|
+| Linux / Android | thread cwd → /proc variant | thread cwd → /proc variant → fallback routes |
+| macOS | thread cwd | thread cwd → fallback routes |
+| FreeBSD | bindat | connectat → fallback route |
+| NetBSD / OpenBSD / illumos / other Unix | none (`ENAMETOOLONG`) | fallback routes only |
+| Windows | not supported | not supported |
+
+- **Where D goes**: `${TMPDIR:-/tmp}`, failing that `/tmp`, failing that the socket's directory (named `.sockat.XXXXXXXXXX`). A deep place or one others can write to works too (D is followed by its fd, not its name, and a directory swapped in before it is opened is refused by its owner and mode)
+- **thread cwd**: a throwaway goroutine locked to its OS thread moves that thread's cwd (and no other's) into D and passes `R/<file name>`; the thread is then discarded (the goroutine ends without unlocking). Linux uses `unshare(CLONE_FS)` (not under a seccomp filter, such as Docker's default), macOS `__pthread_fchdir`
+- **/proc variant**: pass `/proc/self/fd/<D's fd>/R/<file name>`, without a thread
+- **bindat / connectat**: pass D's fd and `R/<file name>`
+
+The fallback routes of Dial (when the central route cannot be used):
+
+| OS | Order tried |
 |---|---|
-| Linux / Android (`/proc` usable) | /proc |
-| Linux / Android (`/proc` not usable) | relative path → symlink → thread cwd |
-| FreeBSD | bindat / connectat |
-| macOS | relative path → symlink → thread cwd |
-| NetBSD / OpenBSD / illumos / other Unix | relative path → symlink |
-| Windows | not supported |
+| Linux / Android (`/proc` usable) | /proc → (per place) symlink or the fd-held form |
+| Linux / Android (`/proc` not usable) | relative path → symlink |
+| macOS / NetBSD / OpenBSD / illumos / other | relative path → symlink |
+| FreeBSD | connectat (the socket's directory fd and the file name) |
 
-- **/proc**: open the directory `O_PATH` and pass `/proc/self/fd/<fd>/<file name>`. Not usable without `/proc`, or for a file name that does not fit it (over about 90 bytes)
-- **bindat / connectat**: pass the file name relative to the directory fd
-- **relative path**: when the path relative to the cwd is short enough for the net package, pass that. Only the string is rewritten; the cwd is not changed
-- **symlink**: create a short symlink under `TMPDIR` or `/tmp` and pass the path through it: to the socket's directory for Listen, to the socket file for Dial. Created only where no other user can replace it, and removed right away. On Linux with `/proc`, Dial also uses a place others can write to: it creates a directory of its own (mode 0700) there, holds it by its fd, puts the symlink in it and passes `/proc/self/fd/<fd>/s`
-- **thread cwd**: a goroutine locked to its OS thread moves that thread's cwd (and no other's) into the directory and passes the file name; the thread is then discarded. Linux uses `unshare(CLONE_FS)` (not under a seccomp filter, such as Docker's default), macOS `__pthread_fchdir`
+- **/proc**: open the socket's directory and pass `/proc/self/fd/<fd>/<file name>`
+- **relative path**: when the path relative to the cwd is short enough, pass that. Only the string is rewritten; the cwd is not changed
+- **symlink**: create a short symlink to the socket file in `TMPDIR` or `/tmp` where no other user can replace it, pass it, and remove it right away. On Linux with `/proc`, a place others can write to is used too: a directory of sockat's own is created there and held by its fd, the symlink goes in it and `/proc/self/fd/<fd>/s` is passed (the fd-held form)
 
-None of the routes changes the process's cwd, so any goroutine may call them.
+No route changes the process's cwd or the calling thread's, so any goroutine may call them.
 
 ### Routes that differ from the specification
 
 | Route | sockat-go | Why |
 |---|---|---|
-| fork | none | Go's runtime cannot fork bare. Hence no `connect_any` either |
-| widened sockaddr (macOS) | none | Handing sockat's own socket to the net package's types, `syscall` refuses an address longer than `sockaddr_un`: `net.FileListener` fails with `EINVAL` for a bound one, and a connected one gets a nil `RemoteAddr()` when the peer is bound in the widened form |
-| thread cwd | Linux / macOS only | NetBSD / OpenBSD / illumos have no per-thread working directory |
+| fork (bind's last resort, the fork without D, `connect_any`) | none | Go's runtime cannot fork bare. Hence no `connect_any` either |
+| widened sockaddr (macOS, Dial's fallback) | none | Handing sockat's own socket to the net package's types, a connected one gets a nil `RemoteAddr()` when the peer is bound in the widened form (`syscall` refuses an address longer than `sockaddr_un`) |
+
+**Without fork, Listen gets `ENAMETOOLONG` for a long path here:**
+
+- **NetBSD / OpenBSD / illumos**: there is no means for the central route (thread cwd, /proc, bindat). Every long-path Listen is `ENAMETOOLONG`
+- Linux under a seccomp filter without `/proc`
+- macOS where `__pthread_fchdir` cannot be used
 
 ### Where a path stops being reachable
 
-When a path over the limit gets `ENAMETOOLONG` (numbers are bytes).
+When a path over the limit gets `ENAMETOOLONG` (with the directory there and D creatable; numbers are bytes).
 
 | OS | Listen | Dial |
 |---|---|---|
-| Linux | file name > 107. Under a seccomp filter: the file name does not fit the `/proc` spelling, the relative path > 107, and the file name > 84 or no symlink can be made | file name > 107 and no symlink can be made. Under a seccomp filter: neither the `/proc` spelling nor the relative path fits, and no symlink can be made |
-| FreeBSD | file name > 103 | file name > 103 |
-| macOS | file name > 103 | file name > 103 and no symlink can be made |
-| NetBSD / OpenBSD | relative path > 103, and file name > 80 or no symlink can be made | relative path > 103 and no symlink can be made |
-| illumos | relative path > 107, and file name > 84 or no symlink can be made | relative path > 107 and no symlink can be made |
+| Linux | file name > 96. Under a seccomp filter about 79 (/proc variant), and every long path without `/proc` | file name > 96 and no fallback route (the /proc spelling, a symlink or the fd-held form) can be used |
+| macOS | file name > 92 | file name > 92, the relative path > 103 and no symlink can be made |
+| FreeBSD | file name > 92 | file name > 103 |
+| NetBSD / OpenBSD | every long path | relative path > 103 and no symlink can be made |
+| illumos | every long path | relative path > 107 and no symlink can be made |
 
 In an ordinary environment where a symlink can be made in `/tmp`, Dial reaches a path whatever the directory depth and the file name length.
 
@@ -87,12 +114,12 @@ A path longer than `PATH_MAX` (1024 bytes on macOS, 4096 on Linux) cannot be ope
 
 Only for a long path:
 
-- **The listener does not remove the socket file on Close.** The net package (and a short path) does. The address a long-path listener holds is the spelling handed to the kernel, so do not call `SetUnlinkOnClose(true)` on it; remove the file by the path you passed with `os.Remove` (unlink has no length limit)
-- **`Addr()` / `LocalAddr()` / `RemoteAddr()` do not report the path you passed.** They report the spelling handed to the kernel (a relative path, `/proc/self/fd/...`, a path through a symlink that no longer exists, a bare file name). Keep the path you passed
+- **The listener does not remove the socket file on Close.** The net package (and a short path) does. The address a long-path listener holds is the spelling handed to the kernel, so do not call `SetUnlinkOnClose(true)` on it; to remove the file, use `ListenEx`'s `discard`
+- **`Addr()` / `LocalAddr()` / `RemoteAddr()` do not report the path you passed.** They report the spelling handed to the kernel, `R/<file name>` (`/proc/self/fd/<fd>/R/<file name>` for the /proc variant). R is gone, so removing or stat-ing that spelling hits nothing, but it cannot be handed to another process to connect to. Keep the path you passed
 - **A path that does not end with a file name** (`dir/`, `dir/.`, `dir/..`) is `EINVAL`, and nothing is created
-- **The directory is looked up first**: the /proc, relative, bindat and thread cwd routes look the directory up and then pass the file name. A rename or a repointed symlink in between is not seen
-- **Another goroutine's `os.Chdir`**: if the cwd changes during the relative route, the result is discarded and an error is returned
-- **A symlink or directory can be left behind**: if the process dies between creating and removing it, a `sockat.XXXXXXXXXX` stays in the place it was made
+- **The directory is looked up first**: the central route resolves the socket's directory to a real path when it creates R; Dial's fallback /proc, relative and connectat routes look the directory up and then pass the file name. A rename or a repointed symlink in between is not seen
+- **Another goroutine's `os.Chdir`**: if the cwd changes during the relative route (Dial's fallback), the result is discarded and an error is returned
+- **Leftovers**: if the process dies before removing them, a `sockat.XXXXXXXXXX` (D, a symlink) stays in the place, and a `.sockat.XXXXXXXXXX` (D) in the socket's directory
 
 ## Documentation
 

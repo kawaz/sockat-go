@@ -13,11 +13,14 @@
 |---|---|---|
 | `sockat.Listen(path string)` | `(*net.UnixListener, error)` | `net.ListenUnix("unix", ...)` |
 | `sockat.Dial(path string)` | `(*net.UnixConn, error)` | `net.DialUnix("unix", nil, ...)` |
+| `sockat.ListenEx(path string)` | `(*net.UnixListener, discard func() error, error)` | (SPEC の後始末つきの bind) |
 
 - 名前は Go の `net` の語彙 (Listen / Dial) に合わせる
 - 戻り値は具体型。`net.Listener` / `net.Conn` にそのまま代入でき、`AcceptUnix` 等も使える
 - Dial は 1 つ。SPEC の「標準の connect が元から待たない言語」に当たるので `_nonblocking` を分けない
 - `connect_any` 系は出さない (fork の経路が無い言語は出さない、SPEC)
+- `ListenEx` の `discard` は、bind したソケットのファイルの realpath と `(st_dev, st_ino)` を覚え、そのパスが今も同じファイルの時だけ消す。listener は閉じない (利用者が閉じる)。返すのは消す時のエラーで、既に無い・別のファイルに置き換わっていて消さない時は nil。2 回目以降は何もしない。listener は短いパスも `SetUnlinkOnClose(false)` (消すのは discard だけ)
+  - 型を足さず関数を返すのは、`context.WithCancel` と同じ形で、listener を標準の型のまま渡せるから
 - エラーは標準と同じ形の `*net.OpError` (`Op` は `listen` / `dial`、`Addr` は呼び出し元のパス、`Err` は `*os.SyscallError`)。`errors.Is(err, syscall.ENOENT)` 等が効く。経路が渡した綴りはエラーに出さない
 
 ## 理由
@@ -34,6 +37,8 @@
 | `DialContext` を足す | Unix domain の connect は呼び出しの中で終わるので、待つものが無い |
 
 ## 判断の出所
+
+- `ListenEx` の形 (関数を返す、discard は消すだけ): ハブ D12-Q4 の統括推し、kawaz の裁定待ち 2026-11-19 (名前は仮)
 
 - 名前と戻り値の型: 実装側の判断 2026-11-18
 - Dial を 1 つにすること: ハブの裁定 (HB-Q2) 2026-11-18

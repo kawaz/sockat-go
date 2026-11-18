@@ -1,6 +1,6 @@
 # DR-0003: 長いパスの経路と試す順番
 
-- Status: Accepted
+- Status: Superseded by DR-0011
 - Date: 2026-11-18
 
 ## Context

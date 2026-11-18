@@ -79,6 +79,8 @@ go get github.com/kawaz/sockat-go
 
 `/tmp` に symlink を作れる普通の環境では、Dial はディレクトリの深さにもファイル名の長さにもよらず届く。
 
+パス全体が `PATH_MAX` (macOS 1024、Linux 4096 バイト) を超えるパスは、他のシステムコールでも開けないので sockat の責務外で、`ENAMETOOLONG` になる。
+
 ## 標準と違う点
 
 - **NUL を含むパスは長さによらず `EINVAL`**。標準は NUL で黙って切り詰め、別のパスに bind する。先頭が NUL か `@` の Linux の abstract socket の名前は、標準にそのまま渡す

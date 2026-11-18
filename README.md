@@ -79,6 +79,8 @@ When a path over the limit gets `ENAMETOOLONG` (numbers are bytes).
 
 In an ordinary environment where a symlink can be made in `/tmp`, Dial reaches a path whatever the directory depth and the file name length.
 
+A path longer than `PATH_MAX` (1024 bytes on macOS, 4096 on Linux) cannot be opened by any other system call either; it is outside what sockat handles and gets `ENAMETOOLONG`.
+
 ## What differs from the net package
 
 - **A path containing a NUL is `EINVAL`, whatever its length.** The net package silently cuts it short there and binds some other path. An abstract socket name on Linux (a leading NUL or `@`) is handed to the net package as is

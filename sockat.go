@@ -108,7 +108,10 @@ func discarder(file string, id fileID) func() error {
 		var err error
 		once.Do(func() {
 			if now, ok := lstatID(file); ok && now == id {
-				err = os.Remove(file)
+				// Gone in the meantime is as good as removed.
+				if err = os.Remove(file); errors.Is(err, os.ErrNotExist) {
+					err = nil
+				}
 			}
 		})
 		return err

@@ -20,8 +20,9 @@ import (
 
 // runLong is the routes for a path longer than directMax.
 //
-// The socket's directory is looked up (stat) first, so a missing one is
-// ENOENT before anything else is decided or made. It is then opened for the
+// The socket's directory is looked up (stat, then its real path) first, so a
+// missing one is ENOENT, one that is not a directory ENOTDIR, and a failure to
+// resolve it its own error, before anything else is decided or made. It is then opened for the
 // routes that need its fd (the socket's directory as a place for D, Dial's
 // /proc and connectat fallbacks); when it cannot be opened (no read
 // permission where directories are opened O_RDONLY), sdir is nil and those
@@ -39,6 +40,11 @@ func runLong(o op, path string, cfg *config) (endpoint, route, error) {
 	}
 	if uint32(st.Mode)&unix.S_IFMT != unix.S_IFDIR {
 		return nil, "", syscallError("stat", unix.ENOTDIR)
+	}
+	// Its real path is looked up now too: an error there is returned as it
+	// is, rather than coming out as ENAMETOOLONG once no route could be used.
+	if _, err := realDir(dir); err != nil {
+		return nil, "", err
 	}
 	sdir, err := openDir(dir)
 	if err != nil {

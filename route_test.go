@@ -381,3 +381,27 @@ func TestALeadingNULIsEINVALWhereThereAreNoAbstractNames(t *testing.T) {
 		t.Fatal("a leading '@' in a file name did not name a file")
 	}
 }
+
+// A long path whose directory part is a file, not a directory, is ENOTDIR,
+// decided by looking the directory up first: not ENAMETOOLONG (which a failure
+// later in the order would give), and nothing is made in the places for D.
+// (The other early error, a directory whose real path cannot be resolved
+// although stat finds it, cannot be set up in a test.)
+func TestADirectoryPartThatIsAFileIsENOTDIR(t *testing.T) {
+	t.Parallel()
+	base := tmpDir(t)
+	f := nest(t, tmpDir(t), 300, "f")
+	if err := os.WriteFile(f, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := f + "/s.sock"
+	cfg := configFromTmpdir(base)
+	cfg.dBases = []string{base}
+	markUntouched(t, base)
+	for _, o := range []op{opListen, opDial} {
+		if _, _, err := runLong(o, p, cfg); !errors.Is(err, syscall.ENOTDIR) {
+			t.Fatalf("%s: %v, want ENOTDIR", o.netName(), err)
+		}
+	}
+	assertUntouched(t, base)
+}

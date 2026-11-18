@@ -3,6 +3,8 @@ package sockat
 import (
 	"crypto/rand"
 	"errors"
+	"os"
+	"syscall"
 )
 
 // linkPrefix is what the symlink name starts with, so a link left behind by a
@@ -35,4 +37,43 @@ func randomName() (string, error) {
 		name = append(name, alphabet[int(b)%len(alphabet)])
 	}
 	return string(name), nil
+}
+
+// createLink creates a symlink under base pointing to target, named by
+// nextName (called once per try; its error ends the attempt), and returns its
+// path.
+//
+// symlink(2) fails with EEXIST instead of replacing an existing entry, which
+// is the O_EXCL of symlinks: the link that is created is always one nobody
+// else had, and a name already taken (by anyone) is skipped for the next one.
+// Any other error ends the attempt.
+func createLink(base, target string, nextName func() (string, error)) (string, error) {
+	for range linkAttempts {
+		name, err := nextName()
+		if err != nil {
+			return "", err
+		}
+		link := underBase(base, name)
+		err = os.Symlink(target, link)
+		if err == nil {
+			return link, nil
+		}
+		if !errors.Is(err, syscall.EEXIST) {
+			return "", err
+		}
+	}
+	return "", errNoFreeName
+}
+
+// underBase spells the entry name of the directory base as base followed by
+// it, without cleaning base (a lexical clean would resolve ".." differently
+// from the kernel where base goes through a symlink).
+func underBase(base, name string) string {
+	for len(base) > 1 && base[len(base)-1] == '/' {
+		base = base[:len(base)-1]
+	}
+	if base == "/" {
+		return "/" + name
+	}
+	return base + "/" + name
 }

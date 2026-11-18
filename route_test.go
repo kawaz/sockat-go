@@ -33,7 +33,7 @@ func TestDirectMaxIsSunPathLessTheNUL(t *testing.T) {
 // with the net package, and no path it refuses is handed to it. The boundary
 // is checked against net.ListenUnix itself: it binds a path of directMax
 // bytes and refuses one byte more. Then run sends the directMax-byte path to
-// the net package unchanged (routeDirect) and the one a byte longer down the
+// the net package unchanged (routeStandard) and the one a byte longer down the
 // routes (anything else), with the socket at the given path either way (on
 // the systems where a listen of a long path has no route, the listen is
 // ENAMETOOLONG and only the dial goes down the routes).
@@ -64,13 +64,13 @@ func TestAPathTheNetPackageAcceptsGoesToItAndOneByteMoreDoesNot(t *testing.T) {
 	at = nest(t, d, directMax, "s.sock")
 	ep, r, err := run(opListen, at)
 	ll := must{t}.listener(ep, err)
-	if r != routeDirect {
-		t.Fatalf("%d bytes: %s, want %s", directMax, r, routeDirect)
+	if r != routeStandard {
+		t.Fatalf("%d bytes: %s, want %s", directMax, r, routeStandard)
 	}
 	ep, r, err = run(opDial, at)
 	cc := must{t}.conn(ep, err)
-	if r != routeDirect {
-		t.Fatalf("%d bytes: %s, want %s", directMax, r, routeDirect)
+	if r != routeStandard {
+		t.Fatalf("%d bytes: %s, want %s", directMax, r, routeStandard)
 	}
 	ping(t, ll, cc)
 
@@ -78,7 +78,7 @@ func TestAPathTheNetPackageAcceptsGoesToItAndOneByteMoreDoesNot(t *testing.T) {
 	if longListen() {
 		ep, r, err = run(opListen, over)
 		ll = must{t}.listener(ep, err)
-		if r == routeDirect {
+		if r == routeStandard {
 			t.Fatalf("%d bytes went to the net package", directMax+1)
 		}
 		if !isSocket(over) {
@@ -89,7 +89,7 @@ func TestAPathTheNetPackageAcceptsGoesToItAndOneByteMoreDoesNot(t *testing.T) {
 	}
 	ep, r, err = run(opDial, over)
 	cc = must{t}.conn(ep, err)
-	if r == routeDirect {
+	if r == routeStandard {
 		t.Fatalf("%d bytes went to the net package", directMax+1)
 	}
 	ping(t, ll, cc)
@@ -216,8 +216,8 @@ func TestAMissingDirectoryIsENOENTEvenWhenTheNameFitsNoSockaddr(t *testing.T) {
 
 // A file name of 254 bytes (NAME_MAX is 255) directly under a short directory.
 //
-//   - Listen: the central route puts the file name in the sockaddr behind R/
-//     (and /proc/self/fd/<D>/ in its /proc form), and 254 bytes fits none:
+//   - Listen: the routes through D put the file name in the sockaddr behind R/
+//     (and /proc/self/fd/<D>/ in proc), and 254 bytes fits none:
 //     ENAMETOOLONG, the error of a bind to a path too long for sun_path, and
 //     nothing is created.
 //   - Dial (except FreeBSD, whose connectat takes the name as bindat does): the

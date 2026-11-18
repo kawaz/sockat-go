@@ -4,6 +4,9 @@ package sockat
 
 import "runtime"
 
+// hasThreadCwd: this system has per-thread working directories.
+const hasThreadCwd = true
+
 // inThreadCwd binds (and listens) or connects through spelling, relative to
 // the directory dirfd, from a thread whose own working directory is dirfd
 // (threadChdir). No other thread's cwd changes, the caller's included.

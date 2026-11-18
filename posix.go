@@ -39,7 +39,7 @@ func posixFallbackDial(path, dir string, withRelative bool, cfg *config) (endpoi
 		var err error
 		if !safeBase(base) {
 			ep, err = heldLinkRoute(base, path, cfg.procSelfFD)
-			r = routeHeldLink
+			r = routeProcHeld
 		} else {
 			ep, r, err = symlinkRoute(base, path)
 		}
@@ -202,7 +202,7 @@ func symlinkRoute(base, path string) (endpoint, route, error) {
 	}
 	defer os.Remove(link)
 	ep, err := viaStd(opDial, link, false)
-	return ep, routeSymlinkFile, err
+	return ep, routeSymlink, err
 }
 
 // absTarget is the caller's spelling made absolute against the cwd, for a
@@ -250,43 +250,4 @@ func onlyWeCanReplace(mode, owner, us uint32) bool {
 	const groupOrOtherWrite = 0o022
 	ours := owner == us || owner == 0
 	return (mode&sticky != 0 && ours) || (owner == us && mode&groupOrOtherWrite == 0)
-}
-
-// createLink creates a symlink under base pointing to target, named by
-// nextName (called once per try; its error ends the attempt), and returns its
-// path.
-//
-// symlink(2) fails with EEXIST instead of replacing an existing entry, which
-// is the O_EXCL of symlinks: the link that is created is always one nobody
-// else had, and a name already taken (by anyone) is skipped for the next one.
-// Any other error ends the attempt.
-func createLink(base, target string, nextName func() (string, error)) (string, error) {
-	for range linkAttempts {
-		name, err := nextName()
-		if err != nil {
-			return "", err
-		}
-		link := underBase(base, name)
-		err = os.Symlink(target, link)
-		if err == nil {
-			return link, nil
-		}
-		if !errors.Is(err, syscall.EEXIST) {
-			return "", err
-		}
-	}
-	return "", errNoFreeName
-}
-
-// underBase spells the entry name of the directory base as base followed by
-// it, without cleaning base (a lexical clean would resolve ".." differently
-// from the kernel where base goes through a symlink).
-func underBase(base, name string) string {
-	for len(base) > 1 && base[len(base)-1] == '/' {
-		base = base[:len(base)-1]
-	}
-	if base == "/" {
-		return "/" + name
-	}
-	return base + "/" + name
 }

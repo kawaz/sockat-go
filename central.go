@@ -76,37 +76,59 @@ const rNameLen = 10
 //	|---------------------------|---------------------|----------------|
 //	| bindat / connectat on D   | FreeBSD             | routeAt        |
 //	| a thread whose cwd is D   | Linux, macOS        | routeThreadCwd |
-//	| /proc/self/fd/<D>/R/<name>| Linux with /proc    | routeProcD     |
+//	| /proc/self/fd/<D>/R/<name>| Linux with /proc    | routeProc     |
 //
 // What can be told without making anything (the length, a seccomp filter,
 // /proc) is checked first; nothing is made when no means can be used.
 // errUnusable when the route cannot be used (nothing left behind).
 func centralRoute(o op, dir string, sdir *os.File, name string, cfg *config) (endpoint, route, error) {
-	spellingLen := rNameLen + 1 + len(name)
-	if spellingLen > directMax {
-		return nil, "", errUnusable
-	}
 	thread := cfg.threadCwd && threadCwdPossible()
 	proc := procFDUsableFor(sdir, cfg.procSelfFD)
-	if !atSupported && !thread && !proc {
+	real, err := realDir(dir)
+	if err != nil {
+		return nil, "", errUnusable
+	}
+	ep, r, err := throughD(o, sdir, real, name, thread, proc, cfg)
+	if errors.Is(err, errNoD) {
+		if o == opListen {
+			return withoutD(o, sdir, real, name, thread, proc, cfg)
+		}
+		return nil, "", errUnusable
+	}
+	return ep, r, err
+}
+
+// errNoD means that D could be made in no place (the form without D comes
+// next for a bind).
+var errNoD = errors.New("sockat: no place for D")
+
+// throughD is the routes through D: what can be told without making anything
+// (the length, the means) first, then D, then the means in order. errNoD when
+// D could be made nowhere; errUnusable when the routes cannot be used.
+func throughD(o op, sdir *os.File, real, name string, thread, proc bool, cfg *config) (endpoint, route, error) {
+	spellingLen := rNameLen + 1 + len(name)
+	if spellingLen > directMax {
+		cfg.trace.skipMeans(centralRoutes, "spelling too long")
 		return nil, "", errUnusable
 	}
 	// With the /proc variant as the only means, its spelling must fit even
 	// with a one-digit fd (the shortest it can be); D's real fd is checked
 	// again once D is made.
-	if !atSupported && !thread && len(cfg.procSelfFD)+len("/0/")+spellingLen > directMax {
+	if !atSupported && !thread && proc && len(cfg.procSelfFD)+len("/0/")+spellingLen > directMax {
+		proc = false
+		cfg.trace.skipThread(centralRoutes, cfg)
+		cfg.trace.add(routeProc, "spelling too long")
 		return nil, "", errUnusable
 	}
-	real, err := realDir(dir)
-	if err != nil {
+	if !atSupported && !thread && !proc {
+		cfg.trace.skipThread(centralRoutes, cfg)
+		cfg.trace.skipProc(centralRoutes)
 		return nil, "", errUnusable
 	}
 	d, err := makeD(cfg.dBases, sdir, real, proc, cfg.procSelfFD, randomPart, randomPart)
 	if err != nil {
-		if o == opListen {
-			return withoutD(o, sdir, real, name, thread, proc, cfg)
-		}
-		return nil, "", errUnusable
+		cfg.trace.skipMeans(centralRoutes, "no place for D")
+		return nil, "", errNoD
 	}
 	defer d.cleanup()
 	return byMeans(o, d.fd, d.r+"/"+name, thread, proc, cfg, centralRoutes)
@@ -116,8 +138,8 @@ func centralRoute(o op, dir string, sdir *os.File, name string, cfg *config) (en
 type routes struct{ at, thread, proc route }
 
 var (
-	centralRoutes = routes{routeAt, routeThreadCwd, routeProcD}
-	noDRoutes     = routes{routeAtNoD, routeThreadCwdNoD, routeProcNoD}
+	centralRoutes = routes{routeAt, routeThreadCwd, routeProc}
+	noDRoutes     = routes{routeAtSockdir, routeThreadCwdSockdir, routeProcSockdir}
 )
 
 // byMeans binds / connects through spelling relative to the directory fd, by
@@ -133,15 +155,21 @@ func byMeans(o op, fd int, spelling string, thread, proc bool, cfg *config, rs r
 		if !errors.Is(err, errUnusable) {
 			return ep, rs.thread, err
 		}
+		cfg.trace.add(rs.thread, "thread cwd refused")
+	} else {
+		cfg.trace.skipThread(rs, cfg)
 	}
-	if proc {
-		via := cfg.procSelfFD + "/" + strconv.Itoa(fd) + "/" + spelling
-		if len(via) <= directMax {
-			ep, err := viaStd(o, via, false)
-			return ep, rs.proc, err
-		}
+	if !proc {
+		cfg.trace.skipProc(rs)
+		return nil, "", errUnusable
 	}
-	return nil, "", errUnusable
+	via := cfg.procSelfFD + "/" + strconv.Itoa(fd) + "/" + spelling
+	if len(via) > directMax {
+		cfg.trace.add(rs.proc, "spelling too long")
+		return nil, "", errUnusable
+	}
+	ep, err := viaStd(o, via, false)
+	return ep, rs.proc, err
 }
 
 // noDPrefix is what R's name starts with when it is made in the socket's
@@ -157,18 +185,28 @@ const noDPrefix = "." + linkPrefix
 // fit, or R cannot be made.
 func withoutD(o op, sdir *os.File, real, name string, thread, proc bool, cfg *config) (endpoint, route, error) {
 	if sdir == nil {
+		cfg.trace.skipMeans(noDRoutes, "socket directory not opened")
 		return nil, "", errUnusable
 	}
 	spellingLen := len(noDPrefix) + rNameLen + 1 + len(name)
 	if spellingLen > directMax {
+		cfg.trace.skipMeans(noDRoutes, "spelling too long")
 		return nil, "", errUnusable
 	}
 	fd := int(sdir.Fd())
-	if !atSupported && !thread && len(cfg.procSelfFD)+len("/")+len(strconv.Itoa(fd))+len("/")+spellingLen > directMax {
+	if !atSupported && !thread && proc && len(cfg.procSelfFD)+len("/")+len(strconv.Itoa(fd))+len("/")+spellingLen > directMax {
+		cfg.trace.skipThread(noDRoutes, cfg)
+		cfg.trace.add(routeProcSockdir, "spelling too long")
+		return nil, "", errUnusable
+	}
+	if !atSupported && !thread && !proc {
+		cfg.trace.skipThread(noDRoutes, cfg)
+		cfg.trace.skipProc(noDRoutes)
 		return nil, "", errUnusable
 	}
 	part, err := createAt(randomPart, func(n string) error { return symlinkat(real, fd, noDPrefix+n) })
 	if err != nil {
+		cfg.trace.skipMeans(noDRoutes, "R not made")
 		return nil, "", errUnusable
 	}
 	r := noDPrefix + part
@@ -265,7 +303,15 @@ func makeDIn(baseFD int, prefix, real string, proc bool, procSelfFD string,
 		fd, err = unix.Openat(baseFD, name, dOpenFlagsRetry, 0)
 	}
 	if err != nil {
-		// What is at the name now is not known to be ours: left alone.
+		// D cannot be opened (a umask taking the owner's bits, where it is
+		// opened O_SEARCH / O_RDONLY). When the name still looks like the D
+		// made (the check of an opened D, by lstat), it is removed: removing
+		// with AT_REMOVEDIR takes only an empty directory, so a directory
+		// swapped in meanwhile with something in it is not lost.
+		var st unix.Stat_t
+		if unix.Fstatat(baseFD, name, &st, unix.AT_SYMLINK_NOFOLLOW) == nil && isOurPrivateDir(&st, uint32(os.Geteuid())) {
+			unix.Unlinkat(baseFD, name, unix.AT_REMOVEDIR)
+		}
 		return nil, err
 	}
 	h := &held{baseFD: baseFD, name: name, fd: fd}
@@ -348,4 +394,55 @@ func openDirFD(dir string) (int, error) {
 	}
 	defer f.Close()
 	return unix.FcntlInt(f.Fd(), unix.F_DUPFD_CLOEXEC, 0)
+}
+
+// trace records the routes tried and found unusable, in order, for
+// atanycost's Result (diagnostics only). A nil trace records nothing.
+type trace struct{ skipped []skipped }
+
+// skipped is a route found unusable and why.
+type skipped struct {
+	name   route
+	reason string
+}
+
+func (t *trace) add(r route, reason string) {
+	if t != nil {
+		t.skipped = append(t.skipped, skipped{r, reason})
+	}
+}
+
+// skipThread records the thread-cwd means of rs as unusable, where the system
+// has it: turned off (the tests), or under a seccomp filter.
+func (t *trace) skipThread(rs routes, cfg *config) {
+	if atSupported || !hasThreadCwd {
+		return
+	}
+	reason := "seccomp filter"
+	if !cfg.threadCwd {
+		reason = "thread cwd off"
+	}
+	t.add(rs.thread, reason)
+}
+
+// skipProc records the /proc means of rs as unusable, where the system has it.
+func (t *trace) skipProc(rs routes) {
+	if !atSupported && hasProc {
+		t.add(rs.proc, "/proc unusable")
+	}
+}
+
+// skipMeans records every means of rs the system has as unusable for reason.
+func (t *trace) skipMeans(rs routes, reason string) {
+	switch {
+	case atSupported:
+		t.add(rs.at, reason)
+	default:
+		if hasThreadCwd {
+			t.add(rs.thread, reason)
+		}
+		if hasProc {
+			t.add(rs.proc, reason)
+		}
+	}
 }

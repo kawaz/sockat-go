@@ -19,20 +19,20 @@ import (
 // ways are the macOS routes, each with its own socket path and the route
 // order's inputs that force it. Every spelling goes in the plain sockaddr.
 //
-//	| way        | path                          | inputs                         | listen     | dial         |
-//	|------------|-------------------------------|--------------------------------|------------|--------------|
-//	| direct     | directMax bytes               | (the public order)             | direct     | direct       |
-//	| thread-cwd | 600 bytes under /tmp          | D in a place of its own        | thread-cwd | thread-cwd   |
-//	| relative   | directMax bytes below the cwd | no means (fallback), no place  | (listenAt) | relative     |
-//	| symlink    | 600 bytes under /tmp          | no means (fallback), a place   | (listenAt) | symlink-file |
+//	| way        | path                          | inputs                         | listen     | dial       |
+//	|------------|-------------------------------|--------------------------------|------------|------------|
+//	| standard   | directMax bytes               | (the public order)             | standard   | standard   |
+//	| thread-cwd | 600 bytes under /tmp          | D in a place of its own        | thread-cwd | thread-cwd |
+//	| relative   | directMax bytes below the cwd | no means (fallback), no place  | (listenAt) | relative   |
+//	| symlink    | 600 bytes under /tmp          | no means (fallback), a place   | (listenAt) | symlink    |
 func ways(t *testing.T) []way {
 	t.Helper()
 	d, dbase, short := tmpDir(t), tmpDir(t), tmpDir(t)
 	return []way{
-		{"direct", nest(t, d+"/direct", directMax, "s.sock"), nil, routeDirect, routeDirect},
+		{"standard", nest(t, d+"/direct", directMax, "s.sock"), nil, routeStandard, routeStandard},
 		{"thread-cwd", nest(t, d+"/thread", 600, "s.sock"), centralCfg(dbase), routeThreadCwd, routeThreadCwd},
 		{"relative", belowCwdPath(t, directMax, "s.sock"), fallbackCfg(), "", routeRelative},
-		{"symlink", nest(t, d+"/symlink", 600, "s.sock"), fallbackCfg(short), "", routeSymlinkFile},
+		{"symlink", nest(t, d+"/symlink", 600, "s.sock"), fallbackCfg(short), "", routeSymlink},
 	}
 }
 
@@ -148,7 +148,7 @@ func unreadable(t *testing.T, dir string) {
 
 // The socket's directory is opened O_SEARCH, which needs only search
 // permission, as a bind / connect by the path itself does: in a directory of
-// mode 0300 the central route listens and dials (with no other place for D,
+// mode 0300 the routes through D listen and dials (with no other place for D,
 // D is made in that directory, which write and search permission allow).
 // Opening it O_RDONLY would make the long path fail where a short one in the
 // same directory works.
@@ -159,7 +159,7 @@ func unreadable(t *testing.T, dir string) {
 // to searchOrReadOnly:
 //
 //   - EISDIR and EINVAL give an fd that serves as the socket's directory: D is
-//     made in it and the thread-cwd means listens and dials through D;
+//     made in it and thread-cwd listens and dials through D;
 //   - that fd really comes from O_RDONLY: for the 0300 directory it is now
 //     EACCES (and that is the error returned);
 //   - any other answer is the real outcome and is returned without trying

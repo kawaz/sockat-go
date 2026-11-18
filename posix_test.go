@@ -2,18 +2,18 @@
 
 package sockat
 
-// The fallback routes of a dial (posixFallbackDial), for when the central
-// route cannot be used: every system but FreeBSD; on Linux the /proc spelling
+// The fallback routes of a dial (posixFallbackDial), for when the routes through D
+// cannot be used: every system but FreeBSD; on Linux the /proc spelling
 // comes first when /proc is there (os_linux_test.go). In order: the path
 // relative to the cwd (when /proc is not used), then for each place for the
 // symlink (TMPDIR, then /tmp) a short symlink to the socket file when the place
-// is safe, or on Linux with /proc the fd-held form when it is not
+// is safe, or on Linux with /proc proc-held when it is not
 // (heldlink_linux_test.go). A connect leaves no spelling behind with the peer
 // (the connecting socket is not bound), so these spellings need no random
 // part; a listen never takes them.
 //
 // The tests force the fallback with fallbackCfg: no thread cwd and no /proc,
-// so the central route has no means and is not even attempted. The listener
+// so the routes through D have no means and are not even attempted. The listener
 // at a long path is made by listenAt (bound at a short path and renamed), so
 // these tests need no route of a listen and run on every system.
 
@@ -34,15 +34,15 @@ import (
 // never read.
 const noProc = "/nonexistent/proc/self/fd"
 
-// fallbackCfg is the route order's inputs with the central route out of
+// fallbackCfg is the route order's inputs with the routes through D out of
 // reach (no thread cwd, /proc made to look absent, so no means at all) and
 // bases as the places for a dial's symlink.
 func fallbackCfg(bases ...string) *config {
 	return &config{tmpBases: bases, procSelfFD: noProc, threadCwd: false}
 }
 
-// centralCfg is the route order's inputs for the central route: D placed in
-// dBases (then the socket's directory), the thread-cwd means on, /proc looked
+// centralCfg is the route order's inputs for the routes through D: D placed in
+// dBases (then the socket's directory), thread-cwd on, /proc looked
 // for where it is (Linux), and no place for a fallback symlink.
 func centralCfg(dBases ...string) *config {
 	return &config{dBases: dBases, procSelfFD: "/proc/self/fd", threadCwd: true}
@@ -221,7 +221,7 @@ func TestATakenSymlinkNameIsSkippedForTheNextOne(t *testing.T) {
 
 // When every name tried is taken, createLink gives up after 16 tries
 // (linkAttempts) with errNoFreeName, rather than looping forever on a place
-// that refuses every name; the symlink route then counts that place as
+// that refuses every name; symlink then counts that place as
 // unusable. Nothing is touched.
 func TestRunningOutOfSymlinkNamesEndsAfter16Tries(t *testing.T) {
 	t.Parallel()
@@ -331,7 +331,7 @@ func TestADialFarFromTheCwdGoesThroughATemporarySymlink(t *testing.T) {
 	l := listenAt(t, p)
 	base := tmpDir(t)
 	c, r := dialLong(t, p, fallbackCfg(base))
-	if r != routeSymlinkFile {
+	if r != routeSymlink {
 		t.Fatalf("dial: %s", r)
 	}
 	assertEmpty(t, base)
@@ -340,14 +340,14 @@ func TestADialFarFromTheCwdGoesThroughATemporarySymlink(t *testing.T) {
 
 // The link to the socket file is spelled <place>/sockat.XXXXXXXXXX whatever
 // the file name, so a dial reaches a file name of any length (here 200 bytes,
-// past every sockaddr and past what the central route carries).
+// past every sockaddr and past what the routes through D carry).
 func TestADialThroughTheSymlinkReachesAnyFileName(t *testing.T) {
 	t.Parallel()
 	base := tmpDir(t)
 	p := nest(t, tmpDir(t), 600, strings.Repeat("n", 200))
 	l := listenAt(t, p)
 	c, r := dialLong(t, p, fallbackCfg(base))
-	if r != routeSymlinkFile {
+	if r != routeSymlink {
 		t.Fatalf("dial: %s", r)
 	}
 	ping(t, l, c)
@@ -381,7 +381,7 @@ func TestTheLinkResolvesThePathAsTheKernelDoes(t *testing.T) {
 	l := listenAt(t, atReal)
 	decoyL := listenAt(t, decoy)
 	c, r := dialLong(t, spelled, fallbackCfg(base))
-	if r != routeSymlinkFile {
+	if r != routeSymlink {
 		t.Fatalf("dial: %s", r)
 	}
 	ping(t, l, c)
@@ -441,7 +441,7 @@ func TestAFailureThroughTheSymlinkIsReturnedAndNotRetried(t *testing.T) {
 // ENAMETOOLONG. Run as root (docker), a place owned by another user is made
 // too (chown) and must be passed over, sticky or not.
 //
-// This is the case where there is no fd-held form for an unsafe place: macOS
+// This is the case where there is no proc-held for an unsafe place: macOS
 // and the other systems, and Linux without /proc (fallbackCfg makes /proc
 // look absent). With /proc, Linux dials through an unsafe place in that form
 // instead (heldlink_linux_test.go).
@@ -459,7 +459,7 @@ func TestAnUnsafePlaceForTheSymlinkIsPassedOver(t *testing.T) {
 		q := fmt.Sprintf("%s/bad%o.sock", dir, mode)
 		l := listenAt(t, q)
 		c, r := dialLong(t, q, fallbackCfg(pl, good))
-		if r != routeSymlinkFile {
+		if r != routeSymlink {
 			t.Fatalf("%o: dial %s", mode, r)
 		}
 		ping(t, l, c)
@@ -471,7 +471,7 @@ func TestAnUnsafePlaceForTheSymlinkIsPassedOver(t *testing.T) {
 		q := fmt.Sprintf("%s/ok%o.sock", dir, mode.Perm())
 		l := listenAt(t, q)
 		c, r := dialLong(t, q, fallbackCfg(pl))
-		if r != routeSymlinkFile {
+		if r != routeSymlink {
 			t.Fatalf("%v: dial %s", mode, r)
 		}
 		ping(t, l, c)
@@ -499,7 +499,7 @@ func TestAnUnsafePlaceForTheSymlinkIsPassedOver(t *testing.T) {
 			q := fmt.Sprintf("%s/theirs%o.sock", dir, mode.Perm())
 			listenAt(t, q)
 			_, r := dialLong(t, q, fallbackCfg(pl, good))
-			if r != routeSymlinkFile {
+			if r != routeSymlink {
 				t.Fatalf("%v: dial %s", mode, r)
 			}
 			assertUntouched(t, pl)
@@ -522,7 +522,7 @@ func TestAPlaceWhereTheSymlinkCannotBeCreatedMovesOnToTheNext(t *testing.T) {
 	good := tmpDir(t)
 	for _, bad := range []string{"/nonexistent", file} {
 		c, r := dialLong(t, p, fallbackCfg(bad, good))
-		if r != routeSymlinkFile {
+		if r != routeSymlink {
 			t.Fatalf("%s: dial %s", bad, r)
 		}
 		ping(t, l, c)
@@ -544,7 +544,7 @@ func TestTheSymlinkGoesUnderTheFirstPlaceWhereItFits(t *testing.T) {
 	first, second := tmpDir(t), tmpDir(t)
 	markUntouched(t, long)
 	c, r := dialLong(t, p, fallbackCfg(long, first))
-	if r != routeSymlinkFile {
+	if r != routeSymlink {
 		t.Fatalf("dial: %s", r)
 	}
 	ping(t, l, c)
@@ -573,7 +573,7 @@ func TestADeepTmpdirFallsBackToTmp(t *testing.T) {
 	cfg := configFromTmpdir(long)
 	cfg.procSelfFD, cfg.threadCwd = noProc, false
 	c, r := dialLong(t, p, cfg)
-	if r != routeSymlinkFile {
+	if r != routeSymlink {
 		t.Fatalf("dial: %s", r)
 	}
 	ping(t, l, c)
@@ -613,7 +613,7 @@ func TestADeepTmpdirInTheEnvironmentFallsBackToTmp(t *testing.T) {
 	mkdirMode(t, long, 0o700)
 	markUntouched(t, long)
 	out := runChild(t, "TestChildDialFromEnv", "/", "TMPDIR="+long, "SOCKAT_PATH="+p)
-	if got := readChildReport(t, out); got != string(routeSymlinkFile) {
+	if got := readChildReport(t, out); got != string(routeSymlink) {
 		t.Fatalf("route %s\n%s", got, out)
 	}
 	l.SetDeadline(nowPlusGuard())
@@ -632,12 +632,12 @@ func TestChildDialFromEnv(t *testing.T) {
 	childReport("%s", r)
 }
 
-// With no route left for a dial (no central route, no relative spelling, the
+// With no route left for a dial (no routes through D, no relative spelling, the
 // only place for the symlink too long), a path is ENAMETOOLONG, the error of a
 // connect to a path too long for sun_path, and nothing happens: no connection
 // reaches the listener, nothing is created in the place or next to the
 // socket. A real failure stays what it is: a missing directory is ENOENT. A
-// listen with the central route out of reach is ENAMETOOLONG too: a listen has
+// listen with the routes through D out of reach is ENAMETOOLONG too: a listen has
 // no fallback routes.
 func TestWithNoRouteLeftAPathIsENAMETOOLONGAndNothingIsMade(t *testing.T) {
 	t.Parallel()

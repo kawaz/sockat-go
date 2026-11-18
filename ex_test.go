@@ -20,7 +20,7 @@ import (
 )
 
 // exPaths are a short path (the net package itself) and a long one (the
-// central route), each in a directory of its own. The long one only where a
+// routes through D), each in a directory of its own. The long one only where a
 // listen of a long path has a route (not on NetBSD, OpenBSD, illumos).
 func exPaths(t *testing.T) []string {
 	t.Helper()

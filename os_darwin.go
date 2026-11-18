@@ -92,3 +92,6 @@ func setPrivate(_ int, _ string, fd int, _ *unix.Stat_t, _ bool, _ string) error
 // dOpenFlagsRetry is how D is opened when the kernel refuses O_SEARCH on a
 // directory (EISDIR / EINVAL), as openDir does for the socket's directory.
 const dOpenFlagsRetry = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+
+// hasProc: no /proc routes here.
+const hasProc = false

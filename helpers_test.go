@@ -458,7 +458,7 @@ func listenAt(t *testing.T, p string) *net.UnixListener {
 }
 
 // longListen reports whether a listen of a long path has a route here: the
-// central route has a means (a thread cwd on Linux and macOS, /proc on Linux,
+// routes through D have a means (a thread cwd on Linux and macOS, /proc on Linux,
 // bindat on FreeBSD). NetBSD, OpenBSD and illumos have none, and Go has no
 // fork: there a listen of a long path is ENAMETOOLONG.
 func longListen() bool {
@@ -484,4 +484,17 @@ func listenPublic(t *testing.T, p string) *net.UnixListener {
 	}
 	t.Cleanup(func() { l.Close() })
 	return l
+}
+
+// assertTouched checks that something was created in or removed from dir
+// since markUntouched: D was made there (and removed again).
+func assertTouched(t *testing.T, dir string) {
+	t.Helper()
+	fi, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.ModTime().Equal(untouched) {
+		t.Fatalf("nothing was made in %s", dir)
+	}
 }

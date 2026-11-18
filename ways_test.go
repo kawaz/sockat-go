@@ -6,7 +6,7 @@ package sockat
 // same checks. The routes are listed per system by ways (os_linux_test.go,
 // os_darwin_test.go): each way is one socket path and the route order's inputs
 // chosen so that a dial there takes one known route, and a listen too where
-// the route is one a listen takes (the central route and the path itself). A
+// the route is one a listen takes (the routes through D and the path itself). A
 // dial's fallback routes are not a listen's: there the listener is made by
 // listenAt. One way is a socket near the cwd (the relative spelling), so the
 // tests that go through every way run in a child process whose cwd is a
@@ -52,7 +52,7 @@ func (w way) sibling(first byte) string {
 	return dir + "/" + string(first) + name[1:]
 }
 
-// usable reports whether the way can run here: the thread-cwd means only
+// usable reports whether the way can run here: thread-cwd only
 // where the system allows a thread a cwd of its own.
 func (w way) usable() bool {
 	return threadCwdAvailable() || (w.listen != routeThreadCwd && w.dial != routeThreadCwd)
@@ -271,12 +271,12 @@ func TestAFailureOnEveryRouteIsReturnedAndNotRetried(t *testing.T) {
 }
 
 // No route changes the cwd of the process: the relative spelling only reads
-// it, the thread-cwd means changes the cwd of one thread, which is then
+// it, thread-cwd changes the cwd of one thread, which is then
 // discarded, and the others never look at it. Watcher goroutines compare
 // getcwd(3) and (st_dev, st_ino) of "." with the starting values the whole
 // time workers listen and dial on every route, each on its own set of paths.
 // Afterwards a burst of goroutines locked to threads checks the same: had a
-// thread whose cwd the thread-cwd means changed been handed back to the
+// thread whose cwd thread-cwd changed been handed back to the
 // runtime, a goroutine scheduled on it would find that cwd (D, removed by
 // then).
 func TestNoRouteChangesTheProcessCwd(t *testing.T) {

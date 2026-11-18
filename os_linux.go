@@ -18,7 +18,7 @@ func fallbackDial(path, dir, name string, sdir *os.File, cfg *config) (endpoint,
 	if proc {
 		if via, ok := procSpelling(sdir, name, cfg.procSelfFD); ok {
 			ep, err := viaStd(opDial, via, false)
-			return ep, routeProc, err
+			return ep, routeProcDirect, err
 		}
 	}
 	return posixFallbackDial(path, dir, !proc, cfg)
@@ -248,3 +248,6 @@ func removeHeldDir(dirPath string, held *unix.Stat_t) {
 
 // dOpenFlagsRetry: no second way of opening D here.
 const dOpenFlagsRetry = 0
+
+// hasProc: /proc may be there.
+const hasProc = true

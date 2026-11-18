@@ -201,7 +201,7 @@ func TestAsSpellingKeepsALeadingAtFromReadingAsAbstract(t *testing.T) {
 // the symlink once rather than twice. It compares spellings component by
 // component: "/tmp/" and "/tmp" are the same spelling, "/private/tmp" is not
 // (on macOS it names the same directory, but its length differs, and the
-// length is what decides whether the symlink route fits).
+// length is what decides whether symlink fits).
 func TestSameComponentsComparesSpellings(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -226,7 +226,7 @@ func TestSameComponentsComparesSpellings(t *testing.T) {
 
 // The places tried, from TMPDIR:
 //
-//   - for D (the central route): ${TMPDIR:-/tmp}, a relative TMPDIR too (D's
+//   - for D (the routes through D): ${TMPDIR:-/tmp}, a relative TMPDIR too (D's
 //     place is opened once and held by its fd, so the cwd does not matter
 //     later), then /tmp; the socket's directory comes after them in makeD;
 //   - for a dial's fallback symlink: TMPDIR when it is an absolute path (the

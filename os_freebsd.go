@@ -45,7 +45,7 @@ func fallbackDial(_, _, name string, sdir *os.File, _ *config) (endpoint, route,
 		return nil, "", errUnusable
 	}
 	ep, err := atOp(opDial, int(sdir.Fd()), name)
-	return ep, routeConnectAt, err
+	return ep, routeAtDirect, err
 }
 
 // openDir opens dir O_RDONLY | O_DIRECTORY.
@@ -83,3 +83,6 @@ func setPrivate(_ int, _ string, fd int, _ *unix.Stat_t, _ bool, _ string) error
 
 // dOpenFlagsRetry: no second way of opening D here.
 const dOpenFlagsRetry = 0
+
+// hasProc: no /proc routes here.
+const hasProc = false

@@ -2,6 +2,9 @@
 
 package sockat
 
+// hasThreadCwd: no per-thread working directories here.
+const hasThreadCwd = false
+
 // threadCwdPossible: no per-thread working directories here.
 func threadCwdPossible() bool { return false }
 

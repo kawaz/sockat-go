@@ -48,21 +48,22 @@ type endpoint interface{ Close() error }
 type route string
 
 const (
-	routeDirect route = "direct" // the path itself, through the standard library
-	// The central route: R/<name> relative to D.
+	// The names are SPEC's ("経路の名前").
+	routeStandard route = "standard" // the path itself, through the standard library
+	// Through D: R/<name> relative to D.
 	routeThreadCwd route = "thread-cwd" // a thread whose own cwd is D (Linux, macOS)
-	routeProcD     route = "proc-d"     // /proc/self/fd/<D>/R/<name> (Linux)
+	routeProc      route = "proc"       // /proc/self/fd/<D>/R/<name> (Linux)
 	routeAt        route = "at"         // bindat(2) / connectat(2) on D (FreeBSD)
-	// The bind's form without D: .sockat.R/<name> relative to the socket's directory.
-	routeThreadCwdNoD route = "thread-cwd-nod"
-	routeProcNoD      route = "proc-nod"
-	routeAtNoD        route = "at-nod"
+	// A bind's form without D: .sockat.R/<name> relative to the socket's directory.
+	routeThreadCwdSockdir route = "thread-cwd-sockdir"
+	routeProcSockdir      route = "proc-sockdir"
+	routeAtSockdir        route = "at-sockdir"
 	// The fallback routes of a dial.
-	routeProc        route = "proc"         // /proc/self/fd/<dirfd>/<name> (Linux)
-	routeRelative    route = "relative"     // the path relative to the cwd
-	routeSymlinkFile route = "symlink-file" // through a symlink to the file
-	routeHeldLink    route = "held-link"    // a symlink in a directory of our own held by its fd (Linux)
-	routeConnectAt   route = "connectat"    // connectat(2) on the socket's directory (FreeBSD)
+	routeProcDirect route = "proc-direct" // /proc/self/fd/<dirfd>/<name> (Linux)
+	routeProcHeld   route = "proc-held"   // /proc/self/fd/<D>/s, s a symlink to the file (Linux)
+	routeRelative   route = "relative"    // the path relative to the cwd
+	routeSymlink    route = "symlink"     // a symlink in a place: to the file (dial), to the directory (ListenAny)
+	routeAtDirect   route = "at-direct"   // connectat(2) on the socket's directory (FreeBSD)
 )
 
 // directMax is the longest path the standard library accepts: sun_path less
@@ -90,18 +91,27 @@ var errCwdChanged = errors.New("the current directory changed while binding / co
 // A NUL anywhere else is EINVAL, whatever the length: the standard library
 // would cut the path short there and bind / connect some other path.
 func run(o op, path string) (endpoint, route, error) {
+	return runWith(o, path, nil)
+}
+
+// runWith is run with the environment's inputs given as cfg (the tests pass
+// their own); nil reads them from the environment, and only for a long path.
+func runWith(o op, path string, cfg *config) (endpoint, route, error) {
 	if abstractName(path) {
 		ep, err := viaStd(o, path, true)
-		return ep, routeDirect, err
+		return ep, routeStandard, err
 	}
 	if strings.IndexByte(path, 0) >= 0 {
 		return nil, "", opError(o, path, fmt.Errorf("socket path must not contain a NUL byte: %w", syscall.EINVAL))
 	}
 	if len(path) <= directMax {
 		ep, err := viaStd(o, path, true)
-		return ep, routeDirect, err
+		return ep, routeStandard, err
 	}
-	ep, r, err := runLong(o, path, configFromEnv())
+	if cfg == nil {
+		cfg = configFromEnv()
+	}
+	ep, r, err := runLong(o, path, cfg)
 	if err != nil {
 		return nil, "", opError(o, path, err)
 	}
@@ -203,6 +213,12 @@ type config struct {
 	// procSelfFD is where the kernel lists the fds of the process (Linux).
 	// The tests point it elsewhere to stand in for a system without /proc.
 	procSelfFD string
+	// anyBases is where ListenAny's symlink may go, in the order tried
+	// within each kind of place: XDG_RUNTIME_DIR, TMPDIR (when set to absolute
+	// paths), then /tmp.
+	anyBases []string
+	// trace, when set (atanycost), records the routes found unusable.
+	trace *trace
 	// threadCwd is whether to try the thread-cwd route. Always true outside
 	// the tests, which turn it off to stand in for a system that refuses it
 	// (a seccomp filter on unshare(2), for example).
@@ -228,7 +244,30 @@ func configFromTmpdir(tmpdir string) *config {
 	if tmpdir != "" && !sameComponents(tmpdir, "/tmp") {
 		dBases = []string{tmpdir, "/tmp"}
 	}
-	return &config{dBases: dBases, tmpBases: bases, procSelfFD: "/proc/self/fd", threadCwd: true}
+	runtimeDir, _ := os.LookupEnv("XDG_RUNTIME_DIR")
+	return &config{dBases: dBases, tmpBases: bases, anyBases: anyBasesFrom(runtimeDir, tmpdir),
+		procSelfFD: "/proc/self/fd", threadCwd: true}
+}
+
+// anyBasesFrom is ListenAny's places for the symlink: XDG_RUNTIME_DIR and
+// TMPDIR when absolute, then /tmp, each spelling once.
+func anyBasesFrom(runtimeDir, tmpdir string) []string {
+	var bases []string
+	for _, b := range []string{runtimeDir, tmpdir, "/tmp"} {
+		if !isAbs(b) {
+			continue
+		}
+		dup := false
+		for _, seen := range bases {
+			if sameComponents(seen, b) {
+				dup = true
+			}
+		}
+		if !dup {
+			bases = append(bases, b)
+		}
+	}
+	return bases
 }
 
 // sameComponents reports whether a and b are the same spelling component by

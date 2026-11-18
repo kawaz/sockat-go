@@ -42,3 +42,6 @@ func setPrivate(_ int, _ string, fd int, _ *unix.Stat_t, _ bool, _ string) error
 
 // dOpenFlagsRetry: no second way of opening D here.
 const dOpenFlagsRetry = 0
+
+// hasProc: no /proc routes here.
+const hasProc = false

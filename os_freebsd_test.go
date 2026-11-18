@@ -1,6 +1,6 @@
 package sockat
 
-// FreeBSD: the central route through bindat(2) / connectat(2) relative to D's
+// FreeBSD: the routes through D through bindat(2) / connectat(2) relative to D's
 // fd (no thread needed), and a dial's fallback, connectat(2) relative to the
 // socket's directory. Compiled for FreeBSD on every change; run on a FreeBSD
 // machine (CI) only.
@@ -24,7 +24,7 @@ func freebsdCfg(dBases ...string) *config {
 // ENAMETOOLONG for a listen and a connectat relative to the socket's
 // directory for a dial (up to 103 bytes; past that ENAMETOOLONG). A missing
 // directory is ENOENT from opening it.
-func TestTheCentralRouteTakesBindatAndConnectat(t *testing.T) {
+func TestAtAndAtDirectBindAndConnect(t *testing.T) {
 	t.Parallel()
 	base := tmpDir(t)
 	for _, total := range []int{directMax + 1, 300, 1000} {
@@ -51,14 +51,14 @@ func TestTheCentralRouteTakesBindatAndConnectat(t *testing.T) {
 	}
 	over := d + "/" + strings.Repeat("o", directMax-10)
 	_, _, err = runLong(opListen, over, freebsdCfg(base))
-	wantErrno(t, "listen past the central route", err, syscall.ENAMETOOLONG)
+	wantErrno(t, "listen past at", err, syscall.ENAMETOOLONG)
 	if err := syscall.Rename(fits, over); err != nil {
 		t.Fatal(err)
 	}
 	ep, r, err = runLong(opDial, over, freebsdCfg(base))
 	c := must{t}.conn(ep, err)
-	if r != routeConnectAt {
-		t.Fatalf("dial past the central route: %s", r)
+	if r != routeAtDirect {
+		t.Fatalf("dial past at: %s", r)
 	}
 	ping(t, l, c)
 	for _, o := range []op{opListen, opDial} {

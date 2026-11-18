@@ -2,7 +2,7 @@
 
 package sockat
 
-// The central route (centralRoute): a directory D of our own, made in a place
+// The routes through D (centralRoute): a directory D of our own, made in a place
 // (cfg.dBases, then the socket's directory as ".sockat.XXXXXXXXXX"), held by
 // its fd and checked with fstat, with a symlink R of a random name in it
 // pointing to the socket's directory; the bind / connect goes by R/<name>
@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -43,9 +44,9 @@ type means struct {
 // rPart is R's name: ten letters or digits.
 const rPart = `[A-Za-z0-9]{10}`
 
-// allMeans are the means of the central route this system can use here: the
+// allMeans are the means of the routes through D this system can use here: the
 // thread cwd where a thread may have a cwd of its own (not under a seccomp
-// filter on Linux), and on Linux the /proc form (the thread cwd turned off).
+// filter on Linux), and on Linux proc (the thread cwd turned off).
 func allMeans() []means {
 	var ms []means
 	if threadCwdAvailable() {
@@ -53,7 +54,7 @@ func allMeans() []means {
 			regexp.MustCompile(`^` + rPart + `/s\.sock$`)})
 	}
 	if runtime.GOOS == "linux" {
-		ms = append(ms, means{"proc", routeProcD, func(b ...string) *config {
+		ms = append(ms, means{"proc", routeProc, func(b ...string) *config {
 			c := centralCfg(b...)
 			c.threadCwd = false
 			return c
@@ -77,20 +78,7 @@ func assertNoSockatEntry(t *testing.T, dir string) {
 	}
 }
 
-// assertTouched checks that something was created in or removed from dir
-// since markUntouched: D was made there (and removed again).
-func assertTouched(t *testing.T, dir string) {
-	t.Helper()
-	fi, err := os.Stat(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fi.ModTime().Equal(untouched) {
-		t.Fatalf("nothing was made in %s", dir)
-	}
-}
-
-// Forced by each means, the central route listens and dials at the path (600
+// Forced by each means, the routes through D listen and dials at the path (600
 // bytes, so the path itself fits no sockaddr): the socket file is at the
 // path, the two talk, they are the net package's types in working order, and
 // the server sees this process as the peer (no other process is involved).
@@ -98,11 +86,11 @@ func assertTouched(t *testing.T, dir string) {
 // or in the socket's directory afterwards: neither D nor R, after the listen
 // and after each dial. The kernel keeps R/<name> (or
 // /proc/self/fd/<D>/R/<name>) as the listener's address.
-func TestTheCentralRouteListensAndDialsAtThePath(t *testing.T) {
+func TestTheRoutesThroughDListenAndDialAtThePath(t *testing.T) {
 	t.Parallel()
 	ms := allMeans()
 	if len(ms) == 0 {
-		t.Skip("no means of the central route here")
+		t.Skip("no route through D here")
 	}
 	for _, m := range ms {
 		t.Run(m.name, func(t *testing.T) {
@@ -146,12 +134,12 @@ func TestTheCentralRouteListensAndDialsAtThePath(t *testing.T) {
 	}
 }
 
-// A listen / dial through the central route that fails is the result: the
+// A listen / dial through the routes through D that fails is the result: the
 // kernel's error (EADDRINUSE for an existing file, ENOENT for a missing
 // socket, ECONNREFUSED for a socket nobody listens on) comes back as it is,
 // R and D are removed after the failure too, and a dial does not go on to
 // its fallback routes (a place for a fallback symlink stays untouched).
-func TestACentralRouteFailureIsReturnedAndLeavesNothing(t *testing.T) {
+func TestAFailureThroughDIsReturnedAndLeavesNothing(t *testing.T) {
 	t.Parallel()
 	for _, m := range allMeans() {
 		t.Run(m.name, func(t *testing.T) {
@@ -202,17 +190,17 @@ func TestAMissingDirectoryIsENOENTBeforeDIsMade(t *testing.T) {
 	assertUntouched(t, base)
 }
 
-// The spelling R/<name> is 11 bytes and the file name, so the central route
+// The spelling R/<name> is 11 bytes and the file name, so the routes through D
 // carries a file name of directMax - 11 bytes (96 on Linux, 92 on macOS) and
 // no more. One byte more is told before anything is made (the place keeps its
 // mtime): a listen is then ENAMETOOLONG (Go has no fork, the SPEC's next way
 // for a bind), and a dial goes on to its fallback routes (here the symlink
 // under a safe place).
-func TestTheCentralRouteCarriesAFileNameOfDirectMaxLess11Bytes(t *testing.T) {
+func TestTheRoutesThroughDCarryAFileNameOfDirectMaxLess11Bytes(t *testing.T) {
 	t.Parallel()
 	ms := allMeans()
 	if len(ms) == 0 || ms[0].want != routeThreadCwd {
-		t.Skip("the thread-cwd means is refused here (the /proc form is shorter)")
+		t.Skip("thread-cwd is refused here (proc is shorter)")
 	}
 	m := ms[0]
 	base, fb := tmpDir(t), tmpDir(t)
@@ -239,7 +227,7 @@ func TestTheCentralRouteCarriesAFileNameOfDirectMaxLess11Bytes(t *testing.T) {
 	}
 	ol := listenAt(t, over)
 	c, r = dialLong(t, over, cfg)
-	if r != routeSymlinkFile {
+	if r != routeSymlink {
 		t.Fatalf("dial a %d-byte name: %s", directMax-10, r)
 	}
 	ping(t, ol, c)
@@ -248,10 +236,10 @@ func TestTheCentralRouteCarriesAFileNameOfDirectMaxLess11Bytes(t *testing.T) {
 }
 
 // Without any means (the thread cwd turned off, and on Linux /proc made to
-// look absent: procSelfFD an empty directory) the central route is not
+// look absent: procSelfFD an empty directory) the routes through D are not
 // attempted and nothing is made in the place: a listen of a long path is
 // ENAMETOOLONG, a dial takes its fallback routes. Where only the thread cwd
-// is off, Linux takes the /proc form (TestTheCentralRouteListensAndDialsAtThePath,
+// is off, Linux takes proc (TestTheRoutesThroughDListenAndDialAtThePath,
 // "proc").
 func TestWithoutAnyMeansAListenIsENAMETOOLONGAndADialFallsBack(t *testing.T) {
 	t.Parallel()
@@ -268,7 +256,7 @@ func TestWithoutAnyMeansAListenIsENAMETOOLONGAndADialFallsBack(t *testing.T) {
 	wantErrno(t, "listen", err, syscall.ENAMETOOLONG)
 	l := listenAt(t, p)
 	c, r := dialLong(t, p, cfg)
-	if r != routeSymlinkFile {
+	if r != routeSymlink {
 		t.Fatalf("dial: %s", r)
 	}
 	ping(t, l, c)
@@ -277,13 +265,13 @@ func TestWithoutAnyMeansAListenIsENAMETOOLONGAndADialFallsBack(t *testing.T) {
 
 // Through the real environment's inputs (configFromTmpdir), the means taken is
 // the system's: the thread cwd where a thread may have a cwd of its own, else
-// on Linux the /proc form (Docker's default seccomp profile, a filter, rules
+// on Linux proc (Docker's default seccomp profile, a filter, rules
 // the thread cwd out).
 func TestTheRealInputsTakeTheSystemsMeans(t *testing.T) {
 	t.Parallel()
 	ms := allMeans()
 	if len(ms) == 0 {
-		t.Skip("no means of the central route here")
+		t.Skip("no route through D here")
 	}
 	p := nest(t, tmpDir(t), 600, "s.sock")
 	cfg := configFromTmpdir("")
@@ -299,13 +287,13 @@ func TestTheRealInputsTakeTheSystemsMeans(t *testing.T) {
 // The spelling the kernel keeps for a bound socket (the listener's Addr,
 // getsockname) may be unlinked or stat'ed later by code that takes it for the
 // path (a library cleaning up after a server, or a user's
-// os.Remove(l.Addr().String())). Through the central route it names nothing
+// os.Remove(l.Addr().String())). Through the routes through D it names nothing
 // anywhere: R is gone.
 //
 //   - With the thread cwd the spelling is R/<name>, resolved against whatever
 //     cwd: a file named like the socket in the cwd (where a bare-name spelling
 //     would lead) is not hit by unlink or stat.
-//   - With the /proc form it is /proc/self/fd/<D>/R/<name>: once D's fd number
+//   - With proc it is /proc/self/fd/<D>/R/<name>: once D's fd number
 //     is reused for another directory holding a file of the socket's name
 //     (where /proc/self/fd/<n>/<name> would lead), unlink and stat do not hit
 //     it either.
@@ -332,7 +320,7 @@ func TestTheSpellingTheKernelKeepsNamesNothing(t *testing.T) {
 			l, _ := listenLong(t, p, m.cfg(tmpDir(t)))
 			spelling := l.Addr().String()
 			decoys := []string{decoy}
-			if m.want == routeProcD {
+			if m.want == routeProc {
 				decoys = append(decoys, reuseFDWithDecoy(t, spelling))
 			}
 			if _, err := os.Stat(spelling); !errors.Is(err, os.ErrNotExist) {
@@ -405,7 +393,7 @@ func TestDGoesInTheFirstPlaceItCanBeMade(t *testing.T) {
 	t.Parallel()
 	ms := allMeans()
 	if len(ms) == 0 {
-		t.Skip("no means of the central route here")
+		t.Skip("no route through D here")
 	}
 	m := ms[0]
 	p := nest(t, tmpDir(t), 600, "s.sock")
@@ -446,7 +434,7 @@ func TestWithNoPlaceGivenDGoesInTheSocketsDirectory(t *testing.T) {
 	t.Parallel()
 	ms := allMeans()
 	if len(ms) == 0 {
-		t.Skip("no means of the central route here")
+		t.Skip("no route through D here")
 	}
 	m := ms[0]
 	p := nest(t, tmpDir(t), 600, "s.sock")
@@ -463,7 +451,7 @@ func TestWithNoPlaceGivenDGoesInTheSocketsDirectory(t *testing.T) {
 	assertNoSockatEntry(t, dir)
 
 	sdir := openTestDir(t, dir)
-	h, err := makeD([]string{"/nonexistent"}, sdir, dir, m.want == routeProcD, "/proc/self/fd", randomPart, randomPart)
+	h, err := makeD([]string{"/nonexistent"}, sdir, dir, m.want == routeProc, "/proc/self/fd", randomPart, randomPart)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -487,7 +475,7 @@ func TestARelativePlaceForDIsUsed(t *testing.T) {
 	}
 	ms := allMeans()
 	if len(ms) == 0 {
-		t.Skip("no means of the central route here")
+		t.Skip("no route through D here")
 	}
 	if err := os.Mkdir("rel", 0o700); err != nil {
 		t.Fatal(err)
@@ -515,7 +503,7 @@ func TestWhenDCanBeMadeNowhereAListenIsENAMETOOLONGAndADialFallsBack(t *testing.
 	}
 	ms := allMeans()
 	if len(ms) == 0 {
-		t.Skip("no means of the central route here")
+		t.Skip("no route through D here")
 	}
 	fb := tmpDir(t)
 	p := nest(t, tmpDir(t), 600, "s.sock")
@@ -532,9 +520,9 @@ func TestWhenDCanBeMadeNowhereAListenIsENAMETOOLONGAndADialFallsBack(t *testing.
 	wantErrno(t, "listen", err, syscall.ENAMETOOLONG)
 	// The first fallback: /proc/self/fd/<dirfd>/<name> on Linux, the symlink
 	// under the safe place on macOS.
-	want := routeSymlinkFile
+	want := routeSymlink
 	if runtime.GOOS == "linux" {
-		want = routeProc
+		want = routeProcDirect
 	}
 	c, r := dialLong(t, p, cfg)
 	if r != want {
@@ -698,12 +686,12 @@ func TestRIsARandomSymlinkToTheRealSocketDirectory(t *testing.T) {
 
 // D's mode is set to 0700 whatever the umask: under a umask taking the
 // owner's bits (0277 makes mkdir(0700) give 0500, 0477 gives 0300) D is still
-// opened (for search only, or O_PATH with /proc) and the central route works,
+// opened (for search only, or O_PATH with /proc) and the routes through D work,
 // leaving nothing. A umask belongs to the whole process, hence a child.
 //
 // Linux without /proc under 0477 and not root, where D cannot be set to 0700,
 // is TestWithoutProcAUmaskTakingTheOwnersReadBitLeavesNoD.
-func TestTheCentralRouteWorksUnderAUmaskTakingTheOwnersBits(t *testing.T) {
+func TestTheRoutesThroughDWorkUnderAUmaskTakingTheOwnersBits(t *testing.T) {
 	t.Parallel()
 	for _, mask := range []string{"0277", "0477"} {
 		t.Run(mask, func(t *testing.T) {
@@ -720,7 +708,7 @@ func TestChildCentralUnderAUmask(t *testing.T) {
 	}
 	ms := allMeans()
 	if len(ms) == 0 {
-		t.Skip("no means of the central route here")
+		t.Skip("no route through D here")
 	}
 	base := tmpDir(t)
 	p := nest(t, tmpDir(t), 600, "s.sock")
@@ -749,14 +737,14 @@ func TestChildCentralUnderAUmask(t *testing.T) {
 
 // ----- the thread cwd -----
 
-// The thread-cwd means changes the cwd of a thread of its own only: the
+// Thread-cwd changes the cwd of a thread of its own only: the
 // caller's thread keeps the cwd it has, also when the caller gave its thread a
 // cwd of its own (as SPEC warns, resetting a thread's cwd with
 // pthread_fchdir_np(-1) would undo that). Checked on a goroutine locked to a
 // thread whose own cwd is a chosen directory: after a listen and a dial
 // through the route, (st_dev, st_ino) of "." on that thread is still that
 // directory's. The thread is left locked, so the runtime discards it.
-func TestTheThreadCwdMeansLeavesTheCallersThreadCwdAlone(t *testing.T) {
+func TestThreadCwdLeavesTheCallersThreadCwdAlone(t *testing.T) {
 	t.Parallel()
 	if !threadCwdAvailable() {
 		t.Skip("this system refuses a thread a cwd of its own")
@@ -799,13 +787,13 @@ func TestTheThreadCwdMeansLeavesTheCallersThreadCwdAlone(t *testing.T) {
 	}
 }
 
-// The thread a call ran on is discarded, not kept: 200 dials through the thread-cwd means leave the process with about as many threads
+// The thread a call ran on is discarded, not kept: 200 dials through thread-cwd leave the process with about as many threads
 // as before (a thread kept parked per call would add 200). Counted in
 // /proc/self/task on Linux, in a child process so other tests' threads do not
 // count. Whether a discarded thread could be handed out again is checked by
 // TestNoRouteChangesTheProcessCwd (a goroutine on it would find D, gone, as
 // its cwd).
-func TestTheThreadCwdMeansDoesNotKeepThreads(t *testing.T) {
+func TestThreadCwdDoesNotKeepThreads(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS != "linux" {
 		t.Skip("threads are counted in /proc/self/task")
@@ -848,16 +836,16 @@ func TestChildThreadCount(t *testing.T) {
 
 // The socket's directory may be one this process cannot open (no read
 // permission where directories are opened O_RDONLY): runLong then hands the
-// central route no fd of it (sdir nil). The route needs none — R points to the
+// routes through D no fd of it (sdir nil). The route needs none — R points to the
 // directory by its real path, and D goes in the places given — so it still
 // binds and connects at the path, leaving nothing; only the socket's
 // directory as a place for D is not tried, and with no other place D can be
 // made nowhere (errUnusable, nothing made).
-func TestTheCentralRouteNeedsNoFdOfTheSocketsDirectory(t *testing.T) {
+func TestTheRoutesThroughDNeedNoFdOfTheSocketsDirectory(t *testing.T) {
 	t.Parallel()
 	ms := allMeans()
 	if len(ms) == 0 {
-		t.Skip("no means of the central route here")
+		t.Skip("no route through D here")
 	}
 	base := tmpDir(t)
 	p := nest(t, tmpDir(t), 300, "s.sock")
@@ -895,13 +883,13 @@ func TestTheCentralRouteNeedsNoFdOfTheSocketsDirectory(t *testing.T) {
 // pointing to that directory) and reached relative to the directory's fd, by
 // the same means as with D (thread cwd, /proc variant). The socket is created
 // at the path and works; R is removed, so the spelling the kernel keeps
-// (.sockat.XXXXXXXXXX/<name>, or the /proc form of it) names nothing later;
+// (.sockat.XXXXXXXXXX/<name>, or proc of it) names nothing later;
 // the socket's directory holds nothing of sockat's afterwards.
-func TestWithoutDABindGoesThroughRInTheSocketsDirectory(t *testing.T) {
+func TestTheSockdirRoutesBindThroughRInTheSocketsDirectory(t *testing.T) {
 	t.Parallel()
 	ms := allMeans()
 	if len(ms) == 0 {
-		t.Skip("no means of the central route here")
+		t.Skip("no route through D here")
 	}
 	for _, m := range ms {
 		p := nest(t, tmpDir(t), 300, "s.sock")
@@ -919,7 +907,7 @@ func TestWithoutDABindGoesThroughRInTheSocketsDirectory(t *testing.T) {
 		proc := procFDUsableFor(sdir, cfg.procSelfFD)
 		ep, r, err := withoutD(opListen, sdir, real, name, thread, proc, cfg)
 		sdir.Close()
-		want := map[route]route{routeThreadCwd: routeThreadCwdNoD, routeProcD: routeProcNoD}[m.want]
+		want := map[route]route{routeThreadCwd: routeThreadCwdSockdir, routeProc: routeProcSockdir}[m.want]
 		if err != nil || r != want {
 			t.Fatalf("%s: %s, %v, want %s", m.name, r, err, want)
 		}
@@ -944,11 +932,11 @@ func TestWithoutDABindGoesThroughRInTheSocketsDirectory(t *testing.T) {
 // fits: with no fd of it (it could not be opened), or with a file name too
 // long for .sockat.XXXXXXXXXX/<name> (19 bytes more than the name), it cannot
 // be used and makes nothing.
-func TestWithoutDNeedsTheDirectorysFdAndASpellingThatFits(t *testing.T) {
+func TestTheSockdirRoutesNeedTheDirectorysFdAndASpellingThatFits(t *testing.T) {
 	t.Parallel()
 	ms := allMeans()
 	if len(ms) == 0 {
-		t.Skip("no means of the central route here")
+		t.Skip("no route through D here")
 	}
 	m := ms[0]
 	dir := tmpDir(t)
@@ -975,8 +963,8 @@ func TestWithoutDNeedsTheDirectorysFdAndASpellingThatFits(t *testing.T) {
 	assertUntouched(t, dir)
 	fits := long[1:]
 	ep, _, err := withoutD(opListen, sdir, real, fits, thread, proc, cfg)
-	if m.want == routeProcD {
-		// The /proc form is longer still: this name only fits the thread cwd.
+	if m.want == routeProc {
+		// Proc is longer still: this name only fits the thread cwd.
 		if !errors.Is(err, errUnusable) {
 			t.Fatalf("%d-byte name by /proc: %v, want errUnusable", len(fits), err)
 		}
@@ -987,4 +975,95 @@ func TestWithoutDNeedsTheDirectorysFdAndASpellingThatFits(t *testing.T) {
 	}
 	ep.Close()
 	assertNoSockatEntry(t, dir)
+}
+
+// A D that cannot be opened right after it is made: a umask taking the owner's
+// search bit (0177 makes mkdir(0700) give 0600) keeps an O_SEARCH open from
+// working (macOS; Linux opens D O_PATH, which needs no permission on D, so
+// there it is opened and used). The D just made is then looked at by its name
+// and, being a directory of ours with no group / other permission, removed
+// (AT_REMOVEDIR takes only an empty directory), and the next place is tried:
+// every place in turn here, the socket's directory last. With D made nowhere,
+// a listen takes thread-cwd-sockdir (R in the socket's directory; a symlink's
+// mode is not used); a dial goes on to its fallbacks (symlink here). Nothing
+// is left in any place or in the socket's directory, call after call, and
+// the places were tried (their mtime moved). A umask belongs to the whole
+// process, hence a child.
+func TestADThatCannotBeOpenedIsRemoved(t *testing.T) {
+	t.Parallel()
+	if !threadCwdAvailable() {
+		t.Skip("thread-cwd is refused here (the routes without it open D O_PATH)")
+	}
+	runChild(t, "TestChildUnopenableD", tmpDir(t))
+}
+
+func TestChildUnopenableD(t *testing.T) {
+	asChild(t)
+	b1, b2, safe := tmpDir(t), tmpDir(t), tmpDir(t)
+	p := nest(t, tmpDir(t), 600, "s.sock")
+	dir := filepath.Dir(p)
+	cfg := centralCfg(b1, b2)
+	cfg.tmpBases = []string{safe}
+	listenWant, dialWant := routeThreadCwd, routeThreadCwd
+	if runtime.GOOS == "darwin" {
+		listenWant, dialWant = routeThreadCwdSockdir, routeSymlink
+	}
+	syscall.Umask(0o177)
+	for i := range 3 {
+		for _, b := range []string{b1, b2, dir} {
+			markUntouched(t, b)
+		}
+		l, r := listenLong(t, p, cfg)
+		if r != listenWant {
+			t.Fatalf("listen %d: %s, want %s", i, r, listenWant)
+		}
+		if runtime.GOOS == "darwin" {
+			assertTouched(t, b1)
+			assertTouched(t, b2)
+		}
+		// The umask applies to the socket file too (0600): a connect needs
+		// write permission, which 0600 has.
+		c, r := dialLong(t, p, cfg)
+		if r != dialWant {
+			t.Fatalf("dial %d: %s, want %s", i, r, dialWant)
+		}
+		ping(t, l, c)
+		l.Close()
+		os.Remove(p)
+		for _, b := range []string{b1, b2, safe} {
+			assertEmpty(t, b)
+		}
+		assertNoSockatEntry(t, dir)
+	}
+
+	// What ListenAny reports for it: thread-cwd-sockdir, after thread-cwd
+	// found no place for D (macOS; on Linux D is made and thread-cwd taken).
+	ep, out, err := listenAny(p, cfg)
+	l := must{t}.listener(ep, err)
+	var names []route
+	for _, sk := range out.skipped {
+		names = append(names, sk.name)
+	}
+	wantSkipped := []route(nil)
+	if runtime.GOOS == "darwin" {
+		wantSkipped = []route{routeThreadCwd}
+	}
+	if out.route != listenWant || out.loss != lossRespelled || !slices.Equal(names, wantSkipped) {
+		t.Fatalf("listen any: %+v, want %s after %v", out, listenWant, wantSkipped)
+	}
+	l.Close()
+	os.Remove(p)
+
+	// makeDIn itself: the error comes back and the place is left empty.
+	if runtime.GOOS == "darwin" {
+		fd, err := unix.Open(b1, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer unix.Close(fd)
+		if _, err := makeDIn(fd, linkPrefix, dir, false, "", randomPart, randomPart); err == nil {
+			t.Fatal("makeDIn under umask 0177: want an error")
+		}
+		assertEmpty(t, b1)
+	}
 }

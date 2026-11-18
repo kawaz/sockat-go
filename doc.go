@@ -21,7 +21,8 @@
 //	c, err := sockat.Dial("/a/very/long/directory/.../server.sock")
 //
 // To remove the socket file later, use [ListenEx], which also returns a
-// discard function.
+// discard function. To reach a path even where Listen gives up (at the cost of
+// what is listed there), use package github.com/kawaz/sockat-go/atanycost.
 //
 // # How a long path is reached
 //

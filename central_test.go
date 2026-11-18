@@ -18,6 +18,7 @@ package sockat
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -842,5 +843,47 @@ func TestChildThreadCount(t *testing.T) {
 	}
 	if after := count(); after > before+16 {
 		t.Fatalf("%d threads after 200 dials, %d before", after, before)
+	}
+}
+
+// The socket's directory may be one this process cannot open (no read
+// permission where directories are opened O_RDONLY): runLong then hands the
+// central route no fd of it (sdir nil). The route needs none — R points to the
+// directory by its real path, and D goes in the places given — so it still
+// binds and connects at the path, leaving nothing; only the socket's
+// directory as a place for D is not tried, and with no other place D can be
+// made nowhere (errUnusable, nothing made).
+func TestTheCentralRouteNeedsNoFdOfTheSocketsDirectory(t *testing.T) {
+	t.Parallel()
+	ms := allMeans()
+	if len(ms) == 0 {
+		t.Skip("no means of the central route here")
+	}
+	base := tmpDir(t)
+	p := nest(t, tmpDir(t), 300, "s.sock")
+	dir, name, _ := splitPath(p)
+	for _, m := range ms {
+		cfg := m.cfg(base)
+		os.Remove(p)
+		ep, r, err := centralRoute(opListen, dir, nil, name, cfg)
+		if err != nil || r != m.want {
+			t.Fatalf("%s: listen %s, %v", m.name, r, err)
+		}
+		l := ep.(*net.UnixListener)
+		cep, r, err := centralRoute(opDial, dir, nil, name, cfg)
+		if err != nil || r != m.want {
+			t.Fatalf("%s: dial %s, %v", m.name, r, err)
+		}
+		ping(t, l, cep.(*net.UnixConn))
+		assertEmpty(t, base)
+		assertNoSockatEntry(t, dir)
+
+		cfg.dBases = nil
+		mark := dir
+		markUntouched(t, mark)
+		if _, _, err := centralRoute(opListen, dir, nil, "t.sock", cfg); !errors.Is(err, errUnusable) {
+			t.Fatalf("%s: with no place and no fd of the socket's directory: %v, want errUnusable", m.name, err)
+		}
+		assertUntouched(t, mark)
 	}
 }

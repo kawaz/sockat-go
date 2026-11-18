@@ -14,7 +14,7 @@ import (
 // the file (safe places) or the fd-held form (others); without /proc, the
 // path relative to the cwd, then symlinks in safe places.
 func fallbackDial(path, dir, name string, sdir *os.File, cfg *config) (endpoint, route, error) {
-	proc := procFDUsableFor(sdir, cfg.procSelfFD)
+	proc := sdir != nil && procFDUsableFor(sdir, cfg.procSelfFD)
 	if proc {
 		if via, ok := procSpelling(sdir, name, cfg.procSelfFD); ok {
 			ep, err := viaStd(opDial, via, false)
@@ -25,8 +25,12 @@ func fallbackDial(path, dir, name string, sdir *os.File, cfg *config) (endpoint,
 }
 
 // procFDUsableFor reports whether <procSelfFD>/<fd of dir> can be looked up,
-// that is, whether /proc is there.
+// that is, whether /proc is there. With no dir (the socket's directory could
+// not be opened), an fd of / stands in.
 func procFDUsableFor(dir *os.File, procSelfFD string) bool {
+	if dir == nil {
+		return procFDUsable("/", procSelfFD)
+	}
 	_, err := os.Stat(procSelfFD + "/" + strconv.Itoa(int(dir.Fd())))
 	return err == nil
 }

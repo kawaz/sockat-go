@@ -20,20 +20,32 @@ import (
 
 // runLong is the routes for a path longer than directMax.
 //
-// The socket's directory is opened first, so a missing one is ENOENT before
-// anything else is decided or made. Then the central route; when it cannot be
-// used, a listen ends with ENAMETOOLONG (Go has no fork route, the last resort
-// of the SPEC) and a dial goes on to the system's fallback routes.
+// The socket's directory is looked up (stat) first, so a missing one is
+// ENOENT before anything else is decided or made. It is then opened for the
+// routes that need its fd (the socket's directory as a place for D, Dial's
+// /proc and connectat fallbacks); when it cannot be opened (no read
+// permission where directories are opened O_RDONLY), sdir is nil and those
+// routes cannot be used. Then the central route; when it cannot be used, a
+// listen ends with ENAMETOOLONG (Go has no fork route, the last resort of the
+// SPEC) and a dial goes on to the system's fallback routes.
 func runLong(o op, path string, cfg *config) (endpoint, route, error) {
 	dir, name, err := splitPath(path)
 	if err != nil {
 		return nil, "", err
 	}
+	var st unix.Stat_t
+	if err := unix.Stat(dir, &st); err != nil {
+		return nil, "", syscallError("stat", err)
+	}
+	if uint32(st.Mode)&unix.S_IFMT != unix.S_IFDIR {
+		return nil, "", syscallError("stat", unix.ENOTDIR)
+	}
 	sdir, err := openDir(dir)
 	if err != nil {
-		return nil, "", err
+		sdir = nil
+	} else {
+		defer sdir.Close()
 	}
-	defer sdir.Close()
 	ep, r, err := centralRoute(o, dir, sdir, name, cfg)
 	if !errors.Is(err, errUnusable) {
 		return ep, r, err
@@ -131,7 +143,7 @@ type held struct {
 }
 
 // makeD makes D, with R in it pointing to real, in the first place it can,
-// trying bases in order and then the socket's directory (sdir, where D is
+// trying bases in order and then the socket's directory (sdir, unless nil, where D is
 // named ".sockat.XXXXXXXXXX"). A place where a step fails is passed over;
 // what was made there is removed first, except a directory that failed the
 // check, which is not known to be ours.
@@ -173,6 +185,9 @@ func makeD(bases []string, sdir *os.File, real string, proc bool, procSelfFD str
 			return h, nil
 		}
 		places = append(places, p)
+	}
+	if sdir == nil {
+		return nil, errUnusable
 	}
 	return try(place{fd: int(sdir.Fd()), own: false, prefix: "." + linkPrefix})
 }

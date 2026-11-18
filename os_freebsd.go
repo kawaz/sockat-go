@@ -41,6 +41,9 @@ func atOp(o op, dirfd int, spelling string) (endpoint, error) {
 // fallbackDial is a dial's fallback route on FreeBSD: connectat(2) on the
 // socket's directory with the file name.
 func fallbackDial(_, _, name string, sdir *os.File, _ *config) (endpoint, route, error) {
+	if sdir == nil {
+		return nil, "", errUnusable
+	}
 	ep, err := atOp(opDial, int(sdir.Fd()), name)
 	return ep, routeConnectAt, err
 }

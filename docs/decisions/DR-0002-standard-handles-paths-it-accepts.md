@@ -1,4 +1,4 @@
-# DR-0002: 標準が受け付けるパスは標準にそのまま渡す。NUL は長さによらず EINVAL
+# DR-0002: 標準が受け付けるパスと abstract の名前は標準にそのまま渡す。それ以外の NUL は長さによらず EINVAL
 
 - Status: Accepted
 - Date: 2026-11-18
@@ -10,9 +10,9 @@ Go の標準 (`syscall.SockaddrUnix`) は、macOS / BSD で 103 バイト、Linu
 ## Decision
 
 - 標準が受け付ける長さ (`len(unix.RawSockaddrUnix{}.Path) - 1`) 以内は `net.ListenUnix` / `net.DialUnix` をそのまま呼ぶ。何も足さない (環境変数も読まない)
-- Linux / illumos で `@` で始まるパスは、長さによらず標準に渡す
+- Linux / illumos で abstract socket の名前 (先頭が NUL、または Go の記法の `@`) は、長さによらず標準にそのまま渡す。NUL の検査もしない
 - 経路が作る綴り (相対パス、ファイル名だけ) が `@` で始まる時は `./` を前に付ける
-- NUL を含むパスは、長さによらず何も作らずに `EINVAL`
+- それ以外で NUL を含むパスは、長さによらず何も作らずに `EINVAL`
 
 ## 理由
 
@@ -29,5 +29,4 @@ Go の標準 (`syscall.SockaddrUnix`) は、macOS / BSD で 103 バイト、Linu
 
 ## 判断の出所
 
-- NUL を長さによらず引数の誤りにすること: kawaz 裁定 (HB-Q5) 2026-11-18
-- `@` の扱い: 実装側の判断 2026-11-18 (統括に共有済み)
+- 先頭以外の NUL を長さによらず引数の誤りにし、abstract (先頭が NUL、Go の `@`) は標準に渡すこと: kawaz 裁定 (HB-Q5、ハブの DR-0006) 2026-11-18

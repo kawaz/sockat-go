@@ -81,12 +81,18 @@ var errCwdChanged = errors.New("the current directory changed while binding / co
 // run binds (and listens) or connects to path, trying the routes in order.
 //
 // A path the standard library accepts goes to it as is, before anything else
-// is looked at (the environment included).
+// is looked at (the environment included). So does an abstract socket name.
+// A NUL anywhere else is EINVAL, whatever the length: the standard library
+// would cut the path short there and bind / connect some other path.
 func run(o op, path string) (endpoint, route, error) {
+	if abstractName(path) {
+		ep, err := viaStd(o, path, true)
+		return ep, routeDirect, err
+	}
 	if strings.IndexByte(path, 0) >= 0 {
 		return nil, "", opError(o, path, fmt.Errorf("socket path must not contain a NUL byte: %w", syscall.EINVAL))
 	}
-	if len(path) <= directMax || abstractName(path) {
+	if len(path) <= directMax {
 		ep, err := viaStd(o, path, true)
 		return ep, routeDirect, err
 	}
@@ -98,11 +104,12 @@ func run(o op, path string) (endpoint, route, error) {
 }
 
 // abstractName reports whether the standard library reads path as the name
-// of an abstract socket (a leading '@' on Linux and illumos). Such a name has
-// no place in the file system, so no route applies; the standard library
-// alone decides, whatever the length.
+// of an abstract socket (a leading NUL, or Go's '@' for it, on Linux and
+// illumos). Such a name has no place in the file system, so no route applies
+// and the NUL check does not either; the standard library alone decides,
+// whatever the length.
 func abstractName(path string) bool {
-	return abstractNames && strings.HasPrefix(path, "@")
+	return abstractNames && (strings.HasPrefix(path, "@") || strings.HasPrefix(path, "\x00"))
 }
 
 // viaStd binds (and listens) or connects through the standard library with

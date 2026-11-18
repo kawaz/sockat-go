@@ -27,7 +27,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -48,23 +47,23 @@ func tmpDir(t *testing.T) string {
 	return d
 }
 
-// belowCwd is a fresh, randomly named directory below the working directory of
-// the test process (`<cwd>/tmp.local/s-*`), for tests that need a
-// socket near the cwd so that its spelling relative to the cwd is short. The go
-// command runs a package's tests with the package directory as the cwd. It
-// returns the directory as an absolute path starting with the cwd as getcwd(3)
-// reports it, and its spelling relative to the cwd.
+// belowCwd is a fresh, randomly named directory below the working directory
+// of the process, for tests that need a socket near the cwd so that its
+// spelling relative to the cwd is short. It is only for a child process whose
+// cwd is itself a temporary directory (inTmpCwd): the test process's own cwd
+// is the package directory, which may be read-only (the module cache under
+// `go test all`). It returns the directory as an absolute path starting with
+// the cwd as getcwd(3) reports it, and its spelling relative to the cwd.
 func belowCwd(t *testing.T) (abs, rel string) {
 	t.Helper()
+	if os.Getenv(childEnv) == "" {
+		t.Fatal("belowCwd: only in a child process whose cwd is a temporary directory (inTmpCwd)")
+	}
 	cwd, err := syscall.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := filepath.Join(cwd, "tmp.local")
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	d, err := os.MkdirTemp(root, "s-")
+	d, err := os.MkdirTemp(cwd, "s-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,6 +331,21 @@ func runChild(t *testing.T, name, dir string, env ...string) string {
 		t.Fatalf("child %s did not run\n%s", name, out)
 	}
 	return string(out)
+}
+
+// inTmpCwd runs the calling test again in a child process whose cwd is a fresh
+// directory under /tmp, and reports whether this is that child: the test body
+// runs only there (`if !inTmpCwd(t) { return }`). For tests that need sockets
+// near the cwd (the relative spelling): the cwd belongs to the whole process,
+// so it is chosen for a child rather than changed here, and the package
+// directory, which may be read-only, is never written to.
+func inTmpCwd(t *testing.T) bool {
+	t.Helper()
+	if os.Getenv(childEnv) == t.Name() {
+		return true
+	}
+	runChild(t, t.Name(), tmpDir(t))
+	return false
 }
 
 // asChild skips the test unless this process is the child runChild started

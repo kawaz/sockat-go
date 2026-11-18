@@ -126,10 +126,11 @@ func TestOnlyAShortPathsListenerRemovesItsSocketFileOnClose(t *testing.T) {
 // Long paths of several sizes, through the public API with the real
 // environment: the socket is at the given path, a client reaching it by the
 // same path talks to that listener, and both are the net package's types in
-// full working order. The sizes cross every boundary a route has: directMax
-// + 1, 150 (past sun_path on every system), 253 / 254 (the widened sockaddr's
-// limit on macOS) and 600 (past everything but the routes that never put the
-// directory in the sockaddr).
+// full working order. The sizes run from directMax + 1 through 150 (past
+// sun_path on every system) and 253 / 254 (where SPEC's widened sockaddr on
+// macOS would end; sockat-go does not use it, so nothing may change there) to
+// 600 (past everything but the routes that never put the directory in the
+// sockaddr).
 func TestLongPathsListenAtTheGivenPathAndAcceptConnections(t *testing.T) {
 	t.Parallel()
 	for _, total := range []int{directMax + 1, 150, 253, 254, 300, 600} {
@@ -330,5 +331,36 @@ func TestAddressesOfALongPathCanBeRead(t *testing.T) {
 		}
 		t.Logf("%d bytes: listener %v; conn local %v remote %v; accepted local %v remote %v",
 			total, l.Addr(), c.LocalAddr(), c.RemoteAddr(), s.LocalAddr(), s.RemoteAddr())
+	}
+}
+
+// Where the net package has no abstract socket names (macOS and the BSDs),
+// a leading NUL is a NUL like any other: EINVAL whatever the length, and
+// nothing is created (the net package would cut the path at the NUL, here to
+// the empty path, or to the bytes before a later NUL). A leading '@' is an
+// ordinary byte there and names a file.
+func TestALeadingNULIsEINVALWhereThereAreNoAbstractNames(t *testing.T) {
+	t.Parallel()
+	if abstractNames {
+		t.Skip("the net package reads a leading NUL as an abstract name here (TestAbstractNamesGoToTheNetPackageAsTheyAre)")
+	}
+	d := tmpDir(t)
+	markUntouched(t, d)
+	for _, p := range []string{"\x00", "\x00s.sock", "\x00" + d + "/s.sock", "\x00" + strings.Repeat("a", 200)} {
+		_, err := Listen(p)
+		wantOpError(t, fmt.Sprintf("listen %q", p), opListen, p, err, syscall.EINVAL)
+		_, err = Dial(p)
+		wantOpError(t, fmt.Sprintf("dial %q", p), opDial, p, err, syscall.EINVAL)
+	}
+	assertUntouched(t, d)
+
+	at := d + "/@s.sock"
+	l, err := Listen(at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	if !isSocket(at) {
+		t.Fatal("a leading '@' in a file name did not name a file")
 	}
 }

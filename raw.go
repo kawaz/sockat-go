@@ -1,4 +1,4 @@
-//go:build darwin || ios || freebsd
+//go:build freebsd
 
 package sockat
 
@@ -11,9 +11,9 @@ import (
 )
 
 // rawOp binds (and listens) or connects a fresh socket with call, which
-// makes the bind / connect system call with an address built by hand (one the
-// standard library cannot build: macOS's widened sockaddr, FreeBSD's
-// bindat / connectat), and hands the socket over to the net package.
+// makes the bind / connect system call the standard library does not have
+// (FreeBSD's bindat / connectat), and hands the socket over to the net
+// package.
 func rawOp(o op, call func(sock int) error) (endpoint, error) {
 	sock, err := newSocket()
 	if err != nil {
@@ -66,7 +66,7 @@ func adopt(o op, f *os.File) (endpoint, error) {
 	}
 }
 
-// somaxconn reads the listen backlog the net package uses on the BSDs: the
+// somaxconn reads the listen backlog the net package uses on FreeBSD: the
 // sysctl name, capped to what fits the kernel's 16-bit field, or SOMAXCONN.
 func somaxconn(name string) int {
 	n, err := unix.SysctlUint32(name)

@@ -58,8 +58,9 @@ test *ARGS: check
 
 # Linux の試験を docker で回す (macOS の手元から Linux の経路を確かめる)
 #
-# 既定の seccomp では unshare(2) が断られ、スレッド cwd の経路が使えない。
-# seccomp=unconfined でも回して、その経路が通ることも確かめる。
+# 既定の seccomp では filter が掛かっているので unshare(2) を呼ばず、スレッド
+# cwd の経路は使えない。seccomp=unconfined でも回して、その経路が通ることも
+# 確かめる。
 [doc("Linux の試験を docker (golang:1) で回す。既定の seccomp と unconfined の両方")]
 [script]
 test-linux *ARGS:

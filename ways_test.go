@@ -3,9 +3,12 @@
 package sockat
 
 // Every route of the system, each forced by its inputs and run through the
-// same checks. The routes are listed per system by ways (linux_test.go,
-// darwin_test.go): each way is one socket path and the route order's inputs
-// chosen so that a listen and a dial there take one known route.
+// same checks. The routes are listed per system by ways (os_linux_test.go,
+// os_darwin_test.go): each way is one socket path and the route order's inputs
+// chosen so that a listen and a dial there take one known route. One way is a
+// socket near the cwd (the relative spelling), so the tests that go through
+// every way run in a child process whose cwd is a temporary directory
+// (inTmpCwd).
 
 import (
 	"net"
@@ -91,6 +94,9 @@ func (w way) bases() []string {
 // symlink.
 func TestEveryRouteListensAndDialsAtThePath(t *testing.T) {
 	t.Parallel()
+	if !inTmpCwd(t) {
+		return
+	}
 	for _, w := range ways(t) {
 		t.Run(w.name, func(t *testing.T) {
 			if !w.usable() {
@@ -146,6 +152,9 @@ func relisten(t *testing.T, l *net.UnixListener, n int) {
 // it stays full; every dial that got in took the way's route.
 func TestADialFailsAtOnceOnAFullBacklogOnEveryRoute(t *testing.T) {
 	t.Parallel()
+	if !inTmpCwd(t) {
+		return
+	}
 	for _, w := range ways(t) {
 		t.Run(w.name, func(t *testing.T) {
 			if !w.usable() {
@@ -194,7 +203,7 @@ func TestADialFailsAtOnceOnAFullBacklogOnEveryRoute(t *testing.T) {
 // order (and the symlink route itself, before a further place). A base added
 // after the way's own places is never used by them, so it must stay untouched
 // when their call fails.
-var earlierThanSymlink = []route{routeProc, routeRelative, routeWide, routeWideRelative, routeSymlinkDir, routeSymlinkFile, routeSymlinkWide}
+var earlierThanSymlink = []route{routeProc, routeRelative, routeSymlinkDir, routeSymlinkFile}
 
 // On every route, a listen / dial that fails is the result: the kernel's
 // error for the path (EADDRINUSE for an existing file, ENOENT for a missing
@@ -205,6 +214,9 @@ var earlierThanSymlink = []route{routeProc, routeRelative, routeWide, routeWideR
 // way's path, so they take the same route.
 func TestAFailureOnEveryRouteIsReturnedAndNotRetried(t *testing.T) {
 	t.Parallel()
+	if !inTmpCwd(t) {
+		return
+	}
 	for _, w := range ways(t) {
 		t.Run(w.name, func(t *testing.T) {
 			if !w.usable() {
@@ -260,6 +272,9 @@ func TestAFailureOnEveryRouteIsReturnedAndNotRetried(t *testing.T) {
 // runtime, a goroutine scheduled on it would see the socket's directory.
 func TestNoRouteChangesTheProcessCwd(t *testing.T) {
 	t.Parallel()
+	if !inTmpCwd(t) {
+		return
+	}
 	cwd, err := syscall.Getwd()
 	if err != nil {
 		t.Fatal(err)

@@ -8,9 +8,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// spellingMax is the longest spelling a sockaddr carries here.
-const spellingMax = directMax
-
 // runLong is the routes for a path longer than directMax on the Unix systems
 // without a dirfd-relative primitive or per-thread working directories
 // (NetBSD, OpenBSD, illumos, ...): the POSIX order (posixRun).

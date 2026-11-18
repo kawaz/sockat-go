@@ -1,14 +1,14 @@
 package sockat
 
-// macOS: the widened sockaddr (Dial only), O_SEARCH for the thread-cwd route's
-// directory, and the macOS list of ways.
+// macOS: O_SEARCH for the thread-cwd route's directory, why the widened
+// sockaddr is not used, and the macOS list of ways.
 
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"testing"
 	"unsafe"
@@ -16,196 +16,121 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// ways are the seven macOS routes, each with its own socket path and the route
-// order's inputs that force it:
+// ways are the four macOS routes, each with its own socket path and the route
+// order's inputs that force it. Every spelling goes in the plain sockaddr.
 //
-//	| way           | path                         | inputs              | listen     | dial          |
-//	|---------------|------------------------------|---------------------|------------|---------------|
-//	| direct        | directMax bytes              | (the public order)  | direct     | direct        |
-//	| relative      | directMax bytes below the cwd | no place            | relative   | relative      |
-//	| wide          | 200 bytes under /tmp         | no place            | thread-cwd | wide          |
-//	| wide-relative | 240 bytes below the cwd      | no place            | thread-cwd | wide-relative |
-//	| symlink       | 600 bytes under /tmp         | a short place       | symlink-dir | symlink-file |
-//	| symlink-wide  | 600 bytes under /tmp         | a 150-byte place    | thread-cwd | symlink-wide  |
-//	| thread-cwd    | 600 bytes under /tmp         | no place, no widening | thread-cwd | thread-cwd |
-//
-// A listen never uses the widened sockaddr, so where a dial goes wide the
-// listen falls through to the thread-cwd route.
+//	| way        | path                          | inputs             | listen      | dial         |
+//	|------------|-------------------------------|--------------------|-------------|--------------|
+//	| direct     | directMax bytes               | (the public order) | direct      | direct       |
+//	| relative   | directMax bytes below the cwd | no place           | relative    | relative     |
+//	| symlink    | 600 bytes under /tmp          | a short place      | symlink-dir | symlink-file |
+//	| thread-cwd | 600 bytes under /tmp          | no place           | thread-cwd  | thread-cwd   |
 func ways(t *testing.T) []way {
 	t.Helper()
 	d, short := tmpDir(t), tmpDir(t)
-	long := nest(t, tmpDir(t), 150, "base")
-	mkdirMode(t, long, 0o700)
-	rel := belowCwdPath(t, directMax, "s.sock")
-	wrel := belowCwdPath(t, 240, "s.sock")
-	if len(wrel) <= wideMax {
-		t.Fatalf("the premise: %d bytes fit the widened sockaddr", len(wrel))
-	}
 	return []way{
 		{"direct", nest(t, d+"/direct", directMax, "s.sock"), nil, routeDirect, routeDirect},
-		{"relative", rel, posixCfg(), routeRelative, routeRelative},
-		{"wide", nest(t, d+"/wide", 200, "s.sock"), posixCfg(), routeThreadCwd, routeWide},
-		{"wide-relative", wrel, posixCfg(), routeThreadCwd, routeWideRelative},
+		{"relative", belowCwdPath(t, directMax, "s.sock"), posixCfg(), routeRelative, routeRelative},
 		{"symlink", nest(t, d+"/symlink", 600, "s.sock"), posixCfg(short), routeSymlinkDir, routeSymlinkFile},
-		{"symlink-wide", nest(t, d+"/symlinkwide", 600, "s.sock"), posixCfg(long), routeThreadCwd, routeSymlinkWide},
-		{"thread-cwd", nest(t, d+"/thread", 600, "s.sock"), plainCfg(), routeThreadCwd, routeThreadCwd},
+		{"thread-cwd", nest(t, d+"/thread", 600, "s.sock"), posixCfg(), routeThreadCwd, routeThreadCwd},
 	}
 }
 
-// XNU takes a socket address of up to SOCK_MAXADDRLEN (255) bytes, so the
-// widened form (sun_len and the address length set to 2 + the path length,
-// no NUL) carries 255 - 2 = 253 bytes of path. Pinned against the running
-// kernel: a dial to a 253-byte path reaches the listener there (and the route
-// order picks the widened form for it); 254 bytes is ENAMETOOLONG before the
-// kernel is asked.
-func TestTheWidenedSockaddrCarries253BytesForADial(t *testing.T) {
-	t.Parallel()
-	if wideMax != 253 {
-		t.Fatalf("wideMax = %d, want 253", wideMax)
-	}
-	d := tmpDir(t)
-	p := nest(t, d, 253, "s.sock")
-	l, _ := listenLong(t, p, posixCfg())
-	c := must{t}.conn(wideOp(opDial, p))
-	ping(t, l, c)
-	c, r := dialLong(t, p, posixCfg())
-	if r != routeWide {
-		t.Fatalf("dial through the order: %s", r)
-	}
-	ping(t, l, c)
-
-	q := nest(t, d, 254, "s.sock")
-	_, err := wideOp(opDial, q)
-	wantErrno(t, "254 bytes", err, syscall.ENAMETOOLONG)
+// widened is a sockaddr_un for path in the widened form XNU takes: sun_len and
+// the address length 2 + the path length (past sizeof(struct sockaddr_un) for
+// a long path), no NUL. Up to 253 bytes of path fit (SOCK_MAXADDRLEN 255 less
+// the length and family bytes).
+func widened(path string) []byte {
+	sa := make([]byte, 2+len(path))
+	sa[0] = byte(len(sa))
+	sa[1] = unix.AF_UNIX
+	copy(sa[2:], path)
+	return sa
 }
 
-// Why a listen never uses the widened sockaddr: a socket bound in the widened
-// form cannot be handed to the net package. net.FileListener reads the
-// socket's address with getsockname(2), which then reports more than a
-// struct sockaddr_un holds, and the syscall package refuses that with EINVAL,
-// although the bind itself went through and the socket file exists. (A
-// dialed socket's own address is unbound, so net.FileConn takes it.) Pinned
-// so that a Go release that accepted the long address would be noticed: then
-// the widened form could serve a listen too. wideOp therefore refuses a
-// listen (errUnusable, nothing created), and the route order sends a listen
-// that only the widened form would carry to the thread-cwd route.
-func TestTheWidenedSockaddrIsNotUsedForAListen(t *testing.T) {
-	t.Parallel()
-	d := tmpDir(t)
-	p := nest(t, d, 200, "s.sock")
-	_, err := rawOp(opListen, func(sock int) error {
-		sa := make([]byte, 2+len(p))
-		sa[0] = byte(len(sa))
-		sa[1] = unix.AF_UNIX
-		copy(sa[2:], p)
-		_, _, e := syscall.Syscall(unix.SYS_BIND, uintptr(sock), uintptr(unsafe.Pointer(&sa[0])), uintptr(len(sa)))
-		if e != 0 {
-			return e
-		}
-		return nil
-	})
-	if !errors.Is(err, syscall.EINVAL) || !isSocket(p) {
-		t.Fatalf("the premise: a widened bind is made (%v) but not adopted (%v)", isSocket(p), err)
-	}
-
-	q := filepath.Dir(p) + "/q.sock"
-	markUntouched(t, filepath.Dir(q))
-	if _, err := wideOp(opListen, q); !errors.Is(err, errUnusable) {
-		t.Fatalf("wideOp for a listen: %v, want errUnusable", err)
-	}
-	assertUntouched(t, filepath.Dir(q))
-	l, r := listenLong(t, q, posixCfg())
-	if r != routeThreadCwd {
-		t.Fatalf("listen: %s, want %s", r, routeThreadCwd)
-	}
-	c, r := dialLong(t, q, posixCfg())
-	if r != routeWide {
-		t.Fatalf("dial: %s, want %s", r, routeWide)
-	}
-	ping(t, l, c)
-}
-
-// The answers that mean "this kernel does not take the widened form" (EINVAL
-// for an address it will not take, ENAMETOOLONG for one over SOCK_MAXADDRLEN)
-// make the order move on with the plain sockaddr; any other answer is the
-// outcome of the call (ENOENT, ECONNREFUSED, ...) and is returned.
-func TestOnlyEINVALAndENAMETOOLONGMeanTheWidenedFormIsRefused(t *testing.T) {
-	t.Parallel()
-	for _, e := range []syscall.Errno{syscall.EINVAL, syscall.ENAMETOOLONG} {
-		if !refusesWide(syscallError("connect", e)) {
-			t.Errorf("%v: want refused", e)
-		}
-	}
-	for _, e := range []syscall.Errno{syscall.ENOENT, syscall.ECONNREFUSED, syscall.EADDRINUSE, syscall.EACCES} {
-		if refusesWide(syscallError("connect", e)) {
-			t.Errorf("%v: want an outcome", e)
-		}
-	}
-}
-
-// A kernel that refuses the widened form (stood in for by cfg.wide = false; a
-// future macOS might stop taking oversized addresses) leaves a dial to the
-// plain sockaddr: a 200-byte path far from the cwd goes through the symlink
-// under a short place, or with no place on the thread-cwd route. A
-// 150-byte place, usable only in the widened form, is then passed over.
-func TestWithoutTheWidenedFormADialTakesThePlainRoutes(t *testing.T) {
-	t.Parallel()
-	d := tmpDir(t)
-	p := nest(t, d, 200, "s.sock")
-	short := tmpDir(t)
-	long := nest(t, tmpDir(t), 150, "base")
-	mkdirMode(t, long, 0o700)
-	markUntouched(t, long)
-	l, _ := listenLong(t, p, posixCfg())
-	for _, c := range []struct {
-		cfg  *config
-		want route
-	}{
-		{plainCfg(short), routeSymlinkFile},
-		{plainCfg(long), routeThreadCwd},
-		{plainCfg(), routeThreadCwd},
-	} {
-		cc, r := dialLong(t, p, c.cfg)
-		if r != c.want {
-			t.Fatalf("%v: %s, want %s", c.cfg.tmpBases, r, c.want)
-		}
-		ping(t, l, cc)
-	}
-	assertUntouched(t, long)
-	assertEmpty(t, short)
-}
-
-// The thread-cwd route puts the file name in the plain sockaddr, and only a
-// name too long for that (over 103 bytes) in the widened one, for a dial (the
-// route order passes wide only then). Without the widened form such a name is
-// ENAMETOOLONG, and so is a name over 253 bytes with it. The socket with the
-// 150-byte name is bound under a short name and renamed, since no listen
-// reaches it.
-func TestTheThreadCwdRouteWidensOnlyANameTooLongForThePlainSockaddr(t *testing.T) {
-	t.Parallel()
-	d := tmpDir(t)
-	name := strings.Repeat("n", 150)
-	p := nest(t, d, 600, name)
-	dir := filepath.Dir(p)
-	f := openTestDir(t, dir)
-	l := must{t}.listener(threadCwdRoute(opListen, f, "s.sock", false))
-	if err := os.Rename(dir+"/s.sock", p); err != nil {
+// rawSocket is a stream socket made with the system call, as an *os.File
+// that owns it.
+func rawSocket(t *testing.T) *os.File {
+	t.Helper()
+	fd, err := unix.Socket(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+	if err != nil {
 		t.Fatal(err)
 	}
-	c := must{t}.conn(threadCwdRoute(opDial, f, name, true))
-	ping(t, l, c)
-	c, r := dialLong(t, p, posixCfg())
-	if r != routeThreadCwd {
-		t.Fatalf("dial through the order: %s", r)
-	}
-	ping(t, l, c)
+	f := os.NewFile(uintptr(fd), "")
+	t.Cleanup(func() { f.Close() })
+	return f
+}
 
-	_, err := threadCwdRoute(opDial, f, name, false)
-	wantErrno(t, "without the widened form", err, syscall.ENAMETOOLONG)
-	_, err = threadCwdRoute(opDial, f, strings.Repeat("n", 254), true)
-	wantErrno(t, "254 bytes", err, syscall.ENAMETOOLONG)
-	_, _, err = runLong(opListen, dir+"/"+strings.Repeat("m", 150), posixCfg())
-	wantErrno(t, "a listen", err, syscall.ENAMETOOLONG)
+// sockcall makes bind(2) or connect(2) (trap) on fd with the raw address sa.
+func sockcall(trap uintptr, fd int, sa []byte) error {
+	_, _, e := syscall.Syscall(trap, uintptr(fd), uintptr(unsafe.Pointer(&sa[0])), uintptr(len(sa)))
+	if e != 0 {
+		return e
+	}
+	return nil
+}
+
+// Why sockat-go does not use the widened sockaddr that SPEC has on macOS
+// (the kernel takes it: a 200-byte path binds and connects in it), pinned with
+// raw system calls made only here:
+//
+//   - a socket bound in the widened form cannot become a *net.UnixListener:
+//     net.FileListener reads the address with getsockname(2), which reports
+//     more than struct sockaddr_un holds, and the syscall package refuses it
+//     with EINVAL (the socket file exists all the same);
+//   - a socket connected in the widened form to a peer bound that way becomes
+//     a *net.UnixConn whose RemoteAddr() is a nil net.Addr (getpeername's
+//     EINVAL is ignored), so RemoteAddr().String() panics. net.DialUnix to the
+//     same socket through a short spelling (a symlink to it) reports that
+//     spelling instead: the address can always be read.
+//
+// So a listen could not be made at all and a dial would break SPEC's "the
+// address can be read without failing". Should a Go release accept the long
+// address, this test fails and the widened form can be reconsidered.
+func TestWhyTheWidenedSockaddrIsNotUsed(t *testing.T) {
+	t.Parallel()
+	d := tmpDir(t)
+	p := nest(t, d, 200, "s.sock")
+
+	srv := rawSocket(t)
+	if err := sockcall(unix.SYS_BIND, int(srv.Fd()), widened(p)); err != nil {
+		t.Fatalf("the kernel takes a widened bind: %v", err)
+	}
+	if !isSocket(p) {
+		t.Fatal("no socket file after a widened bind")
+	}
+	if err := unix.Listen(int(srv.Fd()), 8); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := net.FileListener(srv); !errors.Is(err, syscall.EINVAL) {
+		t.Fatalf("net.FileListener of a widened bind: %v, want EINVAL", err)
+	}
+
+	cli := rawSocket(t)
+	if err := sockcall(unix.SYS_CONNECT, int(cli.Fd()), widened(p)); err != nil {
+		t.Fatalf("the kernel takes a widened connect: %v", err)
+	}
+	c, err := net.FileConn(cli)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if ra := c.RemoteAddr(); ra != nil {
+		t.Fatalf("RemoteAddr of a widened connect: %v, want a nil net.Addr", ra)
+	}
+
+	link := tmpDir(t) + "/l"
+	if err := os.Symlink(p, link); err != nil {
+		t.Fatal(err)
+	}
+	sc, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: link, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sc.Close()
+	if sc.RemoteAddr() == nil {
+		t.Fatal("net.DialUnix left RemoteAddr nil")
+	}
 }
 
 // unreadable makes dir mode 0300 (write and search, no read) and checks the
@@ -244,11 +169,11 @@ func TestTheThreadCwdRouteOpensTheDirectoryForSearchOnly(t *testing.T) {
 	p := nestTail(t, locked, 500, "s.sock")
 	unreadable(t, filepath.Dir(p))
 	t.Cleanup(func() { os.Chmod(filepath.Dir(p), 0o700) })
-	l, r := listenLong(t, p, plainCfg())
+	l, r := listenLong(t, p, posixCfg())
 	if r != routeThreadCwd || !isSocket(p) {
 		t.Fatalf("listen in a directory without read permission: %s", r)
 	}
-	c, r := dialLong(t, p, plainCfg())
+	c, r := dialLong(t, p, posixCfg())
 	if r != routeThreadCwd {
 		t.Fatalf("dial: %s", r)
 	}
@@ -261,11 +186,11 @@ func TestTheThreadCwdRouteOpensTheDirectoryForSearchOnly(t *testing.T) {
 			t.Fatalf("%v: %v", e, err)
 		}
 		name := fmt.Sprintf("e%d.sock", int(e))
-		l := must{t}.listener(threadCwdRoute(opListen, f, name, false))
+		l := must{t}.listener(threadCwdRoute(opListen, f, name))
 		if !isSocket(readable + "/" + name) {
 			t.Fatalf("%v: no socket in the directory", e)
 		}
-		c := must{t}.conn(threadCwdRoute(opDial, f, name, false))
+		c := must{t}.conn(threadCwdRoute(opDial, f, name))
 		ping(t, l, c)
 		f.Close()
 

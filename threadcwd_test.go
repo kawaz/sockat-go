@@ -12,6 +12,7 @@ package sockat
 // this process, and no fd is duplicated.
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,12 +22,12 @@ import (
 )
 
 // needThreadCwd skips a test of the route itself where the system refuses it
-// (Linux under Docker's default seccomp profile, where unshare(2) is EPERM);
-// what happens then is checked by TestThreadCwdRefusedByTheSystemIsENAMETOOLONG.
+// (Linux under a seccomp filter, such as Docker's default profile); what
+// happens then is checked by TestThreadCwdUnderASeccompFilterIsENAMETOOLONG.
 func needThreadCwd(t *testing.T) {
 	t.Helper()
 	if !threadCwdAvailable() {
-		t.Skip("this system refuses a thread a cwd of its own (unshare(2) under a seccomp filter)")
+		t.Skip("this system refuses a thread a cwd of its own (a seccomp filter)")
 	}
 }
 
@@ -47,22 +48,22 @@ func openTestDir(t *testing.T, dir string) *os.File {
 // net package's types in working order, and the server sees this process as
 // the peer (a forked child would show its own pid). Through the route order
 // with nothing earlier usable (far from the cwd, no place for a symlink, on
-// macOS the widened sockaddr off, on Linux no /proc) the same path takes this
+// Linux no /proc) the same path takes this
 // route for both.
 func TestTheThreadCwdRouteListensAndDialsAtThePath(t *testing.T) {
 	t.Parallel()
 	needThreadCwd(t)
 	p := nest(t, tmpDir(t), 600, "s.sock")
 	dir := openTestDir(t, filepath.Dir(p))
-	l := must{t}.listener(threadCwdRoute(opListen, dir, "s.sock", false))
+	l := must{t}.listener(threadCwdRoute(opListen, dir, "s.sock"))
 	if !isSocket(p) {
 		t.Fatal("no socket at the path")
 	}
-	c := must{t}.conn(threadCwdRoute(opDial, dir, "s.sock", false))
+	c := must{t}.conn(threadCwdRoute(opDial, dir, "s.sock"))
 	checkStdTypes(t, l, c)
 
 	l.SetDeadline(time.Now().Add(guard))
-	c2 := must{t}.conn(threadCwdRoute(opDial, dir, "s.sock", false))
+	c2 := must{t}.conn(threadCwdRoute(opDial, dir, "s.sock"))
 	s, err := l.AcceptUnix()
 	if err != nil {
 		t.Fatal(err)
@@ -74,11 +75,11 @@ func TestTheThreadCwdRouteListensAndDialsAtThePath(t *testing.T) {
 	pingConns(t, s, c2)
 
 	q := filepath.Dir(p) + "/q.sock"
-	l, r := listenLong(t, q, plainCfg())
+	l, r := listenLong(t, q, posixCfg())
 	if r != routeThreadCwd || !isSocket(q) {
 		t.Fatalf("listen through the order: %s", r)
 	}
-	c, r = dialLong(t, q, plainCfg())
+	c, r = dialLong(t, q, posixCfg())
 	if r != routeThreadCwd {
 		t.Fatalf("dial through the order: %s", r)
 	}
@@ -97,16 +98,16 @@ func TestThreadCwdFailuresAreTheKernelsErrors(t *testing.T) {
 	p := nest(t, d, 600, "s.sock")
 	dir := filepath.Dir(p)
 	f := openTestDir(t, dir)
-	_, err := threadCwdRoute(opDial, f, "s.sock", false)
+	_, err := threadCwdRoute(opDial, f, "s.sock")
 	wantErrno(t, "dial a missing socket", err, syscall.ENOENT)
-	must{t}.listener(threadCwdRoute(opListen, f, "s.sock", false))
-	_, err = threadCwdRoute(opListen, f, "s.sock", false)
+	must{t}.listener(threadCwdRoute(opListen, f, "s.sock"))
+	_, err = threadCwdRoute(opListen, f, "s.sock")
 	wantErrno(t, "listen on an existing socket", err, syscall.EADDRINUSE)
 	staleSocket(t, dir+"/stale.sock")
-	_, err = threadCwdRoute(opDial, f, "stale.sock", false)
+	_, err = threadCwdRoute(opDial, f, "stale.sock")
 	wantErrno(t, "dial a socket nobody listens on", err, syscall.ECONNREFUSED)
 	for _, o := range []op{opListen, opDial} {
-		_, _, err = runLong(o, dir+"/nope/s.sock", plainCfg())
+		_, _, err = runLong(o, dir+"/nope/s.sock", posixCfg())
 		wantErrno(t, o.sysName()+" in a missing directory", err, syscall.ENOENT)
 	}
 }
@@ -119,16 +120,15 @@ func TestThreadCwdKeepsAFileNameStartingWithAtAFile(t *testing.T) {
 	needThreadCwd(t)
 	p := nest(t, tmpDir(t), 600, "@s.sock")
 	dir := openTestDir(t, filepath.Dir(p))
-	l := must{t}.listener(threadCwdRoute(opListen, dir, "@s.sock", false))
+	l := must{t}.listener(threadCwdRoute(opListen, dir, "@s.sock"))
 	if !isSocket(p) {
 		t.Fatal("no socket at the path")
 	}
-	c := must{t}.conn(threadCwdRoute(opDial, dir, "@s.sock", false))
+	c := must{t}.conn(threadCwdRoute(opDial, dir, "@s.sock"))
 	ping(t, l, c)
 }
 
-// A file name longer than the plain sockaddr carries, with the widened one not
-// in play (a listen, or a kernel that refuses it), is ENAMETOOLONG before any
+// A file name longer than the sockaddr carries is ENAMETOOLONG before any
 // thread is started or anything created.
 func TestThreadCwdRefusesANameTooLongForTheSockaddr(t *testing.T) {
 	t.Parallel()
@@ -136,8 +136,68 @@ func TestThreadCwdRefusesANameTooLongForTheSockaddr(t *testing.T) {
 	markUntouched(t, d)
 	f := openTestDir(t, d)
 	for _, o := range []op{opListen, opDial} {
-		_, err := threadCwdRoute(o, f, strings.Repeat("n", directMax+1), false)
+		_, err := threadCwdRoute(o, f, strings.Repeat("n", directMax+1))
 		wantErrno(t, o.sysName(), err, syscall.ENAMETOOLONG)
 	}
 	assertUntouched(t, d)
+}
+
+// Every spelling a route hands to the kernel goes in the plain sockaddr
+// (directMax bytes: 103 on macOS, which does not use its widened form, 107 on
+// Linux), and that sets how far Listen and Dial reach for a file name:
+//
+//   - a file name of directMax bytes is listened on (the thread-cwd route
+//     binds the bare name) and dialed;
+//   - a file name of directMax + 1 bytes is ENAMETOOLONG for a listen, with or
+//     without a place for the symlink (the link to the directory spells
+//     <place>/sockat.XXXXXXXXXX/<name>), and for a dial with no place;
+//   - a dial through the link to the socket file (<place>/sockat.XXXXXXXXXX,
+//     whatever the name) reaches any name, here directMax + 1 and 200 bytes.
+//
+// On Linux /proc is made to look absent here; the /proc route would not change
+// this, since its spelling holds the name too.
+func TestAFileNameOverTheSockaddrIsReachedOnlyByADialThroughTheSymlink(t *testing.T) {
+	t.Parallel()
+	needThreadCwd(t)
+	d, base := tmpDir(t), tmpDir(t)
+	dir := filepath.Dir(nest(t, d, 600, "x"))
+	fits := dir + "/" + strings.Repeat("f", directMax)
+	l, r := listenLong(t, fits, posixCfg())
+	if r != routeThreadCwd || !isSocket(fits) {
+		t.Fatalf("a %d-byte name: listen %s", directMax, r)
+	}
+	c, r := dialLong(t, fits, posixCfg())
+	if r != routeThreadCwd {
+		t.Fatalf("a %d-byte name: dial %s", directMax, r)
+	}
+	ping(t, l, c)
+
+	for _, n := range []int{directMax + 1, 200} {
+		p := dir + "/" + strings.Repeat("n", n)
+		for _, cfg := range []*config{posixCfg(), posixCfg(base)} {
+			_, _, err := runLong(opListen, p, cfg)
+			wantErrno(t, fmt.Sprintf("listen on a %d-byte name, places %v", n, cfg.tmpBases), err, syscall.ENAMETOOLONG)
+		}
+		if exists(p) {
+			t.Fatal("something was created at the path")
+		}
+		short := dir + "/s.sock"
+		l, _ := listenLong(t, short, posixCfg())
+		if err := os.Rename(short, p); err != nil {
+			t.Fatal(err)
+		}
+		_, _, err := runLong(opDial, p, posixCfg())
+		wantErrno(t, fmt.Sprintf("dial a %d-byte name with no place", n), err, syscall.ENAMETOOLONG)
+		c, r := dialLong(t, p, posixCfg(base))
+		if r != routeSymlinkFile {
+			t.Fatalf("dial a %d-byte name: %s", n, r)
+		}
+		ping(t, l, c)
+		c2, err := Dial(p)
+		if err != nil {
+			t.Fatalf("Dial a %d-byte name through the public order: %v", n, err)
+		}
+		c2.Close()
+	}
+	assertEmpty(t, base)
 }

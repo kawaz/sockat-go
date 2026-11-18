@@ -48,28 +48,25 @@ type endpoint interface{ Close() error }
 type route string
 
 const (
-	routeDirect       route = "direct"        // the path itself, through the standard library
-	routeProc         route = "proc"          // /proc/self/fd/<dirfd>/<name> (Linux)
-	routeRelative     route = "relative"      // the path relative to the cwd
-	routeWide         route = "wide"          // the path in a widened sockaddr (macOS)
-	routeWideRelative route = "wide-relative" // the relative spelling in a widened sockaddr (macOS)
-	routeSymlinkDir   route = "symlink-dir"   // through a symlink to the directory (bind)
-	routeSymlinkFile  route = "symlink-file"  // through a symlink to the file (connect)
-	routeSymlinkWide  route = "symlink-wide"  // a symlink spelling in a widened sockaddr (macOS)
-	routeAt           route = "at"            // bindat(2) / connectat(2) (FreeBSD)
-	routeThreadCwd    route = "thread-cwd"    // a thread whose own cwd is the directory
+	routeDirect      route = "direct"       // the path itself, through the standard library
+	routeProc        route = "proc"         // /proc/self/fd/<dirfd>/<name> (Linux)
+	routeRelative    route = "relative"     // the path relative to the cwd
+	routeSymlinkDir  route = "symlink-dir"  // through a symlink to the directory (bind)
+	routeSymlinkFile route = "symlink-file" // through a symlink to the file (connect)
+	routeAt          route = "at"           // bindat(2) / connectat(2) (FreeBSD)
+	routeThreadCwd   route = "thread-cwd"   // a thread whose own cwd is the directory
 )
 
 // directMax is the longest path the standard library accepts: sun_path less
 // the NUL, 107 bytes on Linux and illumos, 103 on macOS and the BSDs (the
 // test syscall.SockaddrUnix makes). A path of at most this many bytes is handed
 // to the standard library as is, so it alone decides what happens to every
-// path it can take. It is also the limit of every other spelling that goes in
-// the plain sockaddr.
+// path it can take. It is also the limit of every other spelling a route
+// hands to the kernel.
 const directMax = len(unix.RawSockaddrUnix{}.Path) - 1
 
 // errUnusable means that a route cannot be used at all (too long, no /proc,
-// no safe place for a symlink, a kernel refusing the widened form), as
+// no safe place for a symlink, no thread cwd of its own), as
 // opposed to a real failure of the bind / connect it made. It never leaves the
 // package: it only makes the order move on to the next route.
 var errUnusable = errors.New("sockat: route unusable")
@@ -192,10 +189,6 @@ type config struct {
 	// tmpBases is where the temporary symlink may go, in the order tried:
 	// TMPDIR when it is set to an absolute path, then /tmp.
 	tmpBases []string
-	// wide is whether to try the widened sockaddr at all (macOS). Always true
-	// outside the tests, which turn it off to stand in for a kernel that
-	// refuses the widened form.
-	wide bool
 	// procSelfFD is where the kernel lists the fds of the process (Linux).
 	// The tests point it elsewhere to stand in for a system without /proc.
 	procSelfFD string
@@ -220,7 +213,7 @@ func configFromTmpdir(tmpdir string) *config {
 		bases = append(bases, tmpdir)
 	}
 	bases = append(bases, "/tmp")
-	return &config{tmpBases: bases, wide: true, procSelfFD: "/proc/self/fd", threadCwd: true}
+	return &config{tmpBases: bases, procSelfFD: "/proc/self/fd", threadCwd: true}
 }
 
 // sameComponents reports whether a and b are the same spelling component by

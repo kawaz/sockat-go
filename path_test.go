@@ -230,8 +230,8 @@ func TestSameComponentsComparesSpellings(t *testing.T) {
 // is left out, since the link's location would then depend on the cwd, but
 // /tmp is still tried. A TMPDIR that is /tmp (with or without a trailing
 // slash) is tried once. Outside the tests every other input is the real
-// system's: the widened sockaddr and the thread-cwd route are tried, and /proc
-// is looked for at /proc/self/fd.
+// system's: the thread-cwd route is tried, and /proc is looked for at
+// /proc/self/fd.
 func TestConfigFromTmpdirTriesTmpdirThenTmp(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -251,7 +251,7 @@ func TestConfigFromTmpdirTriesTmpdirThenTmp(t *testing.T) {
 		if !slices.Equal(cfg.tmpBases, c.want) {
 			t.Errorf("configFromTmpdir(%q).tmpBases = %q, want %q", c.tmpdir, cfg.tmpBases, c.want)
 		}
-		if !cfg.wide || !cfg.threadCwd || cfg.procSelfFD != "/proc/self/fd" {
+		if !cfg.threadCwd || cfg.procSelfFD != "/proc/self/fd" {
 			t.Errorf("configFromTmpdir(%q) = %+v", c.tmpdir, cfg)
 		}
 	}

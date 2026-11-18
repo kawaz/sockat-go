@@ -6,17 +6,21 @@ import (
 	"errors"
 	"os"
 	"syscall"
-	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
 
-// spellingMax is the longest spelling a sockaddr carries here: the widened
-// form's.
-const spellingMax = wideMax
-
 // runLong is the routes for a path longer than directMax on macOS: the POSIX
-// order (posixRun), with the widened sockaddr.
+// order (posixRun).
+//
+// Design rationale: SPEC also has the widened sockaddr here (sun_len and the
+// address length past sizeof(struct sockaddr_un), up to 253 bytes of path).
+// Go cannot hand such a socket over intact: net.FileListener refuses a socket
+// bound that way (getsockname reports more than the syscall package takes:
+// EINVAL), and net.FileConn on a socket connected that way to a peer bound
+// that way leaves RemoteAddr() a nil net.Addr, whose String() panics, where
+// net.DialUnix would report the spelling. What is lost is a dial with no
+// usable place for the symlink to a file name of 104 to 253 bytes.
 func runLong(o op, path string, cfg *config) (endpoint, route, error) {
 	dir, name, err := splitPath(path)
 	if err != nil {
@@ -69,79 +73,3 @@ func threadChdir(dirfd int) error {
 	}
 	return syscallError("fchdir", e)
 }
-
-// wideUsable reports whether the widened sockaddr can be used for o: only
-// for a connect.
-//
-// A socket bound in the widened form cannot be handed to the net package:
-// net.FileListener reads the socket's address with getsockname(2), which then
-// reports more than a struct sockaddr_un holds, and the syscall package
-// refuses that with EINVAL. A connected socket's own address is unbound, so
-// net.FileConn takes it (the peer's address is read but its error ignored).
-func wideUsable(o op) bool { return o == opDial }
-
-// wideMax is the longest path the widened sockaddr carries.
-//
-// XNU accepts a socket address of up to SOCK_MAXADDRLEN (255) bytes in
-// bind(2) / connect(2) and takes sun_len - offsetof(sun_path) bytes as the
-// path, requiring that to be less than SOCK_MAXADDRLEN. With the length byte
-// and the family byte in front, 255 - 2 = 253 bytes of path fit, without a NUL
-// (the kernel terminates its own copy). libuv uses the same layout.
-const wideMax = 255 - 2
-
-// wideOp binds (and listens) or connects a fresh socket to path in a widened
-// sockaddr: sun_len and the address length both 2 + the path length, no NUL.
-func wideOp(o op, path string) (endpoint, error) {
-	if !wideUsable(o) {
-		return nil, errUnusable
-	}
-	if len(path) > wideMax {
-		return nil, errNameTooLong(o)
-	}
-	sa := make([]byte, 2+len(path))
-	sa[0] = byte(len(sa))
-	sa[1] = unix.AF_UNIX
-	copy(sa[2:], path)
-	return rawOp(o, func(sock int) error {
-		trap := uintptr(unix.SYS_BIND)
-		if o == opDial {
-			trap = unix.SYS_CONNECT
-		}
-		_, _, e := syscall.Syscall(trap, uintptr(sock), uintptr(unsafe.Pointer(&sa[0])), uintptr(len(sa)))
-		if e != 0 {
-			return syscallError(o.sysName(), e)
-		}
-		return nil
-	})
-}
-
-// refusesWide reports whether an error from a widened-address call means the
-// kernel does not take the widened form (as opposed to a real outcome such as
-// ENOENT, EADDRINUSE or ECONNREFUSED). XNU reports an address it will not
-// take with EINVAL, or ENAMETOOLONG for one longer than SOCK_MAXADDRLEN.
-func refusesWide(err error) bool {
-	return errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENAMETOOLONG)
-}
-
-// newSocket creates a stream socket set up as the net package sets up its
-// own on this system: close-on-exec (under syscall.ForkLock, as there is no
-// SOCK_CLOEXEC) and nonblocking.
-func newSocket() (int, error) {
-	syscall.ForkLock.RLock()
-	fd, err := unix.Socket(unix.AF_UNIX, unix.SOCK_STREAM, 0)
-	if err == nil {
-		unix.CloseOnExec(fd)
-	}
-	syscall.ForkLock.RUnlock()
-	if err != nil {
-		return -1, syscallError("socket", err)
-	}
-	if err := unix.SetNonblock(fd, true); err != nil {
-		unix.Close(fd)
-		return -1, syscallError("setnonblock", err)
-	}
-	return fd, nil
-}
-
-// listenBacklog is the backlog the net package passes to listen(2) here.
-func listenBacklog() int { return somaxconn("kern.ipc.somaxconn") }

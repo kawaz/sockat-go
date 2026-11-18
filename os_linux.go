@@ -9,9 +9,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// spellingMax is the longest spelling a sockaddr carries here.
-const spellingMax = directMax
-
 // runLong is the routes for a path longer than directMax on Linux:
 // /proc/self/fd/<dirfd>/<name> with the directory opened O_PATH; when that
 // cannot be used, the POSIX order (posixRun) with that directory fd for the
@@ -77,9 +74,16 @@ func openDir(dir string) (*os.File, error) {
 // directory dirfd: unshare(2) with CLONE_FS gives the thread a working
 // directory of its own, then fchdir(2) moves it.
 //
-// errUnusable when the thread cannot have a cwd of its own (a seccomp filter
-// refusing unshare(2), as Docker's default profile does).
+// errUnusable when the thread cannot have a cwd of its own. unshare(2) is not
+// even called under a seccomp filter (prctl(PR_GET_SECCOMP) other than 0, or
+// prctl failing): a filter may answer it by killing the process with SIGSYS
+// (systemd's SystemCallFilter= does) rather than with an error, and Docker's
+// default profile refuses it anyway (EPERM). A failure of fchdir(2) after
+// unshare(2) is a real failure and is returned.
 func threadChdir(dirfd int) error {
+	if mode, err := unix.PrctlRetInt(unix.PR_GET_SECCOMP, 0, 0, 0, 0); err != nil || mode != 0 {
+		return errUnusable
+	}
 	if err := unix.Unshare(unix.CLONE_FS); err != nil {
 		return errUnusable
 	}

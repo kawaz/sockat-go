@@ -8,4 +8,4 @@ import "os"
 const threadCwdSupported = false
 
 // threadCwdRoute cannot be used here.
-func threadCwdRoute(op, *os.File, string, bool) (endpoint, error) { return nil, errUnusable }
+func threadCwdRoute(op, *os.File, string) (endpoint, error) { return nil, errUnusable }

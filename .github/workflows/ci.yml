@@ -37,7 +37,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
-      # Docker's default seccomp profile refuses unshare(2), so the thread cwd
+      # Under Docker's default seccomp profile (a filter) unshare(2) is not called, so the thread cwd
       # route cannot be used there: the suite checks that the order then ends
       # with ENAMETOOLONG instead.
       - run: docker run --rm -v "$PWD":/work -w /work golang:1 go test -count=1 ./...

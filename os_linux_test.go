@@ -14,6 +14,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -141,9 +142,13 @@ func TestAFileNameThatDoesNotFitBehindProcTakesThePosixOrder(t *testing.T) {
 // real /proc is untouched: only the place to look is changed (cfg.procSelfFD).
 // A 95-byte file name, which does not fit behind /proc/self/fd/<n>/, is not
 // held to that limit when that spelling is not used: the thread-cwd route
-// binds it.
+// binds it. Runs in a child process whose cwd is a temporary directory, to
+// have a socket near the cwd.
 func TestWithoutProcTheOrderIsRelativeThenSymlinkThenThreadCwd(t *testing.T) {
 	t.Parallel()
+	if !inTmpCwd(t) {
+		return
+	}
 	empty := tmpDir(t) + "/proc/self/fd"
 	if err := os.MkdirAll(empty, 0o700); err != nil {
 		t.Fatal(err)
@@ -207,32 +212,35 @@ func TestWithoutProcAMissingDirectoryIsENOENT(t *testing.T) {
 	}
 }
 
-// Under Docker's default seccomp profile, unshare(2) is refused (EPERM), so a
-// thread cannot have a cwd of its own and the thread-cwd route cannot be used:
-// the route reports itself unusable (errUnusable, never leaving the package)
-// and the order ends in ENAMETOOLONG, the error of a path too long for
-// sun_path. A missing directory stays ENOENT. Runs only where the system
-// refuses unshare(2); where it allows it, the route is checked by the
-// thread-cwd tests instead.
-func TestThreadCwdRefusedByTheSystemIsENAMETOOLONG(t *testing.T) {
+// Under a seccomp filter the thread-cwd route is not used at all: unshare(2)
+// is not even called, since a filter may answer it by killing the process
+// (SIGSYS) rather than with an error. The route reports itself unusable
+// (errUnusable, never leaving the package) and the order ends in
+// ENAMETOOLONG, the error of a path too long for sun_path; a missing directory
+// stays ENOENT. Runs only under a filter (Docker's default profile:
+// PR_GET_SECCOMP is 2); without one, TestTheThreadCwdRouteIsUsedWithoutASeccompFilter
+// covers the other side, and TestUnderASeccompFilterThatKillsOnUnshareTheProcessSurvives
+// makes a filter of its own.
+func TestThreadCwdUnderASeccompFilterIsENAMETOOLONG(t *testing.T) {
 	t.Parallel()
-	if threadCwdAvailable() {
-		t.Skip("this system allows unshare(CLONE_FS); run under Docker's default seccomp profile")
+	if mode := seccompMode(t); mode == 0 {
+		t.Skip("no seccomp filter here; run under Docker's default seccomp profile")
+	} else if mode != 2 {
+		t.Fatalf("PR_GET_SECCOMP = %d, want 2 (a filter)", mode)
 	}
-	done := make(chan error, 1)
-	go func() {
-		runtime.LockOSThread()
-		done <- unix.Unshare(unix.CLONE_FS)
-	}()
-	if err := <-done; !errors.Is(err, unix.EPERM) {
-		t.Fatalf("the premise: unshare is refused with EPERM: %v", err)
-	}
+	checkThreadCwdUnusable(t)
+}
+
+// checkThreadCwdUnusable checks that the thread-cwd route reports itself
+// unusable and that a path only it would reach is ENAMETOOLONG.
+func checkThreadCwdUnusable(t *testing.T) {
+	t.Helper()
 	d := tmpDir(t)
 	p := nest(t, d, 600, "s.sock")
 	dir := filepath.Dir(p)
 	f := openTestDir(t, dir)
 	for _, o := range []op{opListen, opDial} {
-		if _, err := threadCwdRoute(o, f, "s.sock", false); !errors.Is(err, errUnusable) {
+		if _, err := threadCwdRoute(o, f, "s.sock"); !errors.Is(err, errUnusable) {
 			t.Fatalf("%s: %v, want errUnusable", o.sysName(), err)
 		}
 	}
@@ -244,6 +252,61 @@ func TestThreadCwdRefusedByTheSystemIsENAMETOOLONG(t *testing.T) {
 		wantErrno(t, o.sysName()+" in a missing directory", err, syscall.ENOENT)
 	}
 	assertUntouched(t, dir)
+}
+
+// Without a seccomp filter (PR_GET_SECCOMP is 0: docker with
+// seccomp=unconfined, or a plain host) the thread-cwd route is used: a path
+// that nothing earlier reaches is bound and dialed on it.
+func TestTheThreadCwdRouteIsUsedWithoutASeccompFilter(t *testing.T) {
+	t.Parallel()
+	if mode := seccompMode(t); mode != 0 {
+		t.Skipf("under a seccomp filter (PR_GET_SECCOMP = %d)", mode)
+	}
+	p := nest(t, tmpDir(t), 600, "s.sock")
+	l, r := listenLong(t, p, posixCfg())
+	if r != routeThreadCwd || !isSocket(p) {
+		t.Fatalf("listen: %s", r)
+	}
+	c, r := dialLong(t, p, posixCfg())
+	if r != routeThreadCwd {
+		t.Fatalf("dial: %s", r)
+	}
+	ping(t, l, c)
+}
+
+// The reason the route looks at PR_GET_SECCOMP instead of trying unshare(2):
+// a filter may kill the process for it. A child process installs such a
+// filter on itself (unshare(2) answered with SECCOMP_RET_KILL_PROCESS, as
+// systemd's SystemCallFilter= does by default; every other call allowed) and
+// then runs the route order to the thread-cwd route. It must survive and get
+// ENAMETOOLONG; a route that called unshare(2) would kill it (SIGSYS).
+func TestUnderASeccompFilterThatKillsOnUnshareTheProcessSurvives(t *testing.T) {
+	t.Parallel()
+	runChild(t, "TestChildUnderAKillingSeccompFilter", tmpDir(t))
+}
+
+func TestChildUnderAKillingSeccompFilter(t *testing.T) {
+	asChild(t)
+	filter := []unix.SockFilter{
+		// The system call number is the first field of struct seccomp_data.
+		{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: 0},
+		{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jt: 0, Jf: 1, K: unix.SYS_UNSHARE},
+		{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_KILL_PROCESS},
+		{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_ALLOW},
+	}
+	prog := unix.SockFprog{Len: uint16(len(filter)), Filter: &filter[0]}
+	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	// TSYNC puts the filter on every thread of the process, not only this one.
+	if _, _, e := unix.Syscall(unix.SYS_SECCOMP, unix.SECCOMP_SET_MODE_FILTER, unix.SECCOMP_FILTER_FLAG_TSYNC, uintptr(unsafe.Pointer(&prog))); e != 0 {
+		t.Fatal(e)
+	}
+	runtime.KeepAlive(filter)
+	if mode := seccompMode(t); mode != 2 {
+		t.Fatalf("PR_GET_SECCOMP = %d after installing the filter", mode)
+	}
+	checkThreadCwdUnusable(t)
 }
 
 // Why a listen never goes through a link to the socket file: Linux does not

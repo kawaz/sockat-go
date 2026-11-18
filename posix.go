@@ -12,71 +12,40 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// The routes that need nothing but POSIX (plus, on macOS, the widened
-// sockaddr), tried in order on every system without a dirfd-relative
-// primitive: macOS, NetBSD, OpenBSD, illumos and the other Unix systems, and
-// Linux when the /proc route cannot be used.
+// The routes that need nothing but POSIX, tried in order on every system
+// without a dirfd-relative primitive: macOS, NetBSD, OpenBSD, illumos and the
+// other Unix systems, and Linux when the /proc route cannot be used. Every
+// spelling they make goes in the plain sockaddr.
 
 // posixRun tries, in order, for a path longer than directMax whose directory
 // part is dir and file name name:
 //
 //  1. the path spelled relative to the cwd, when that is at most directMax
 //     bytes;
-//  2. (macOS) a widened sockaddr with the path itself, or failing that with
-//     the relative spelling, when one of them is at most 253 bytes;
-//  3. a short symlink (symlinkRoute: to the socket's directory for a bind, to
+//  2. a short symlink (symlinkRoute: to the socket's directory for a bind, to
 //     the socket file for a connect) under the first of cfg.tmpBases where the
 //     path through it fits and the symlink can be created;
-//  4. a thread whose own cwd is the directory (threadCwdRoute; opened is the
+//  3. a thread whose own cwd is the directory (threadCwdRoute; opened is the
 //     directory when the caller has it open already, as Linux does), where
 //     the system has per-thread working directories.
 //
 // A failure of a route ends the search with that error, except where it shows
-// that the route itself cannot be used (the kernel refusing the widened form,
-// the symlink not being creatable); then the next route (or the next place for
-// the symlink) is tried.
+// that the route itself cannot be used (no safe place, the symlink not being
+// creatable); then the next route (or the next place for the symlink) is
+// tried.
 func posixRun(o op, path, dir, name string, opened *os.File, cfg *config) (endpoint, route, error) {
 	rel := newRelative(path, dir)
 
-	if rel != nil && len(rel.spelling) <= directMax {
+	if rel != nil {
 		ep, err := rel.run(func(s string) (endpoint, error) { return viaStd(o, s, false) })
 		return ep, routeRelative, err
 	}
 
-	wide := cfg.wide && wideUsable(o)
-	if wide {
-		var ep endpoint
-		var r route
-		err := errUnusable
-		if len(path) <= wideMax {
-			ep, err = wideOp(o, path)
-			r = routeWide
-		} else if rel != nil && len(rel.spelling) <= wideMax {
-			ep, err = rel.run(func(s string) (endpoint, error) { return wideOp(o, s) })
-			r = routeWideRelative
-		}
-		switch {
-		case err == nil:
-			return ep, r, nil
-		case errors.Is(err, errUnusable):
-		case refusesWide(err):
-			wide = false
-		default:
-			return nil, "", err
-		}
-	}
-
 	for _, base := range cfg.tmpBases {
-		limit := directMax
-		if wide {
-			limit = wideMax
-		}
-		ep, r, err := symlinkRoute(o, base, path, dir, name, limit)
+		ep, r, err := symlinkRoute(o, base, path, dir, name)
 		switch {
 		case err == nil:
 			return ep, r, nil
-		case errors.Is(err, errWideRefused):
-			wide = false
 		case errors.Is(err, errUnusable):
 		default:
 			return nil, "", err
@@ -94,7 +63,7 @@ func posixRun(o op, path, dir, name string, opened *os.File, cfg *config) (endpo
 	if !cfg.threadCwd {
 		return nil, "", errNameTooLong(o)
 	}
-	ep, err := threadCwdRoute(o, opened, name, wide)
+	ep, err := threadCwdRoute(o, opened, name)
 	if errors.Is(err, errUnusable) {
 		return nil, "", errNameTooLong(o)
 	}
@@ -154,8 +123,8 @@ func cwdSpellings(cwd string, cwdID fileID) []string {
 //     rather than the directory the path names.
 //
 // The shorter result is kept. nil when path is not absolute, the cwd cannot be
-// read, neither way gives a spelling a sockaddr of this system carries
-// (spellingMax), or the relative directory turns out not to be the absolute
+// read, neither way gives a spelling the sockaddr carries (directMax bytes),
+// or the relative directory turns out not to be the absolute
 // one (a cwd that was removed, or one changed meanwhile by another thread).
 func newRelative(path, dir string) *relative {
 	if !isAbs(path) {
@@ -195,7 +164,7 @@ func newRelative(path, dir string) *relative {
 			}
 		}
 	}
-	if best == "" || len(best) > spellingMax {
+	if best == "" || len(best) > directMax {
 		return nil
 	}
 	relDir, _, err := splitPath(best)
@@ -235,10 +204,6 @@ func (r *relative) run(f func(spelling string) (endpoint, error)) (endpoint, err
 	return ep, err
 }
 
-// errWideRefused means that the path through the symlink needed the widened
-// form and the kernel refused it (macOS).
-var errWideRefused = errors.New("sockat: widened sockaddr refused")
-
 // linkPrefix is what the symlink name starts with, so a link left behind by a
 // process that died is recognisable as sockat's.
 const linkPrefix = "sockat."
@@ -261,20 +226,19 @@ const linkRandomLen = 10
 // spelling (made absolute against the cwd), so the kernel resolves them as it
 // resolves path.
 //
-// Used when the spelling is at most limit bytes (directMax for the plain
-// sockaddr, or on macOS wideMax: a spelling over directMax then goes in the
-// widened form) and base is a place where nobody else can replace the symlink
+// Used when the spelling fits the sockaddr (at most directMax bytes) and base
+// is a place where nobody else can replace the symlink
 // (safeBase). Both are checked before anything is created. Nothing is left
 // under base: the symlink is removed before this returns, whatever the
 // outcome. errUnusable when the route cannot be used here.
-func symlinkRoute(o op, base, path, dir, name string, limit int) (endpoint, route, error) {
+func symlinkRoute(o op, base, path, dir, name string) (endpoint, route, error) {
 	toFile := o == opDial
 	placeholder := underBase(base, linkPrefix+string(make([]byte, linkRandomLen)))
 	spellingLen := len(placeholder)
 	if !toFile {
 		spellingLen += 1 + len(name)
 	}
-	if spellingLen > limit || !safeBase(base) {
+	if spellingLen > directMax || !safeBase(base) {
 		return nil, "", errUnusable
 	}
 	target := dir
@@ -297,13 +261,6 @@ func symlinkRoute(o op, base, path, dir, name string, limit int) (endpoint, rout
 	via, r := link, routeSymlinkFile
 	if !toFile {
 		via, r = link+"/"+name, routeSymlinkDir
-	}
-	if len(via) > directMax {
-		ep, err := wideOp(o, via)
-		if err != nil && refusesWide(err) {
-			return nil, "", errWideRefused
-		}
-		return ep, routeSymlinkWide, err
 	}
 	ep, err := viaStd(o, via, false)
 	return ep, r, err

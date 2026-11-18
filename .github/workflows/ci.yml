@@ -74,9 +74,9 @@ jobs:
           prepare: |
             v=$(ftp -o - 'https://go.dev/VERSION?m=text' | head -1)
             ftp -o /tmp/go.tar.gz "https://go.dev/dl/${v}.netbsd-amd64.tar.gz"
-            tar -xzf /tmp/go.tar.gz -C /usr/local
+            mkdir -p /opt && tar -xzf /tmp/go.tar.gz -C /opt
           run: |
-            export PATH=/usr/local/go/bin:$PATH
+            export PATH=/opt/go/bin:$PATH
             go version
             go test -count=1 ./...
 

@@ -400,3 +400,43 @@ func TestADOfAnotherOwnerIsNotUsed(t *testing.T) {
 		t.Fatalf("in the directory left: %v, %v (R was made in it)", in, err)
 	}
 }
+
+// Without /proc, D is opened O_PATH (no read permission needed) and checked
+// first; its mode is then set by opening it again by its name O_RDONLY. Under
+// a umask of 0477, mkdir(0700) gives 0300, and that second open fails for a
+// non-root user (EACCES): D has passed the check and so is known to be ours,
+// and it is removed rather than left behind. The central route then has no
+// place for D: a listen is ENAMETOOLONG and nothing is left in the place or in
+// the socket's directory, however many times it is called. As root, the
+// second open succeeds and the route is used, also leaving nothing. A umask
+// belongs to the whole process, hence a child.
+func TestWithoutProcAUmaskTakingTheOwnersReadBitLeavesNoD(t *testing.T) {
+	t.Parallel()
+	if !threadCwdAvailable() {
+		t.Skip("the thread cwd cannot be used here (the only means without /proc)")
+	}
+	runChild(t, "TestChildWithoutProcUnderUmask0477", tmpDir(t))
+}
+
+func TestChildWithoutProcUnderUmask0477(t *testing.T) {
+	asChild(t)
+	base := tmpDir(t)
+	dir := tmpDir(t)
+	p := nest(t, dir, 300, "s.sock")
+	cfg := &config{dBases: []string{base}, procSelfFD: "/nonexistent/proc/self/fd", threadCwd: true}
+	syscall.Umask(0o477)
+	for i := range 3 {
+		ep, r, err := runLong(opListen, p, cfg)
+		if os.Geteuid() == 0 {
+			if err != nil || r != routeThreadCwd {
+				t.Fatalf("as root, listen %d: %s, %v", i, r, err)
+			}
+			ep.Close()
+			os.Remove(p)
+		} else if !errors.Is(err, syscall.ENAMETOOLONG) {
+			t.Fatalf("listen %d: %s, %v, want ENAMETOOLONG", i, r, err)
+		}
+		assertEmpty(t, base)
+		assertNoSockatEntry(t, filepath.Dir(p))
+	}
+}

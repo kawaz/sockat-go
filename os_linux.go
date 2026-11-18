@@ -39,13 +39,35 @@ func threadCwdPossible() bool {
 	return err == nil && mode == 0
 }
 
-// dOpenFlagsProc is how D is opened with /proc: O_PATH, which needs no read
-// permission (a umask of 0477 leaves 0300); its mode is then set through
-// /proc/self/fd/<fd>, as an O_PATH fd takes no fchmod(2).
-const dOpenFlagsProc = unix.O_PATH | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+// dOpenFlags is how D is opened: O_PATH, which needs no read permission (a
+// umask of 0477 leaves 0300), so D is checked (fstat) whatever its mode
+// before anything is decided about it.
+const dOpenFlags = unix.O_PATH | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
 
-// dOpenFlags is how D is opened without /proc: an fd fchmod(2) takes.
-const dOpenFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+// setPrivate sets D (fd, an O_PATH fd that passed the check, whose fstat is
+// held) to mode 0700. An O_PATH fd takes no fchmod(2): with /proc, chmod
+// through /proc/self/fd/<fd>, which reaches the directory the fd holds;
+// without it, open D by its name again O_RDONLY (the check having passed, the
+// owner may lack only read permission, so this can still fail), confirm it is
+// the same directory, and fchmod that.
+func setPrivate(baseFD int, name string, fd int, held *unix.Stat_t, proc bool, procSelfFD string) error {
+	if proc {
+		return unix.Chmod(procSelfFD+"/"+strconv.Itoa(fd), 0o700)
+	}
+	rfd, err := unix.Openat(baseFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(rfd)
+	var st unix.Stat_t
+	if err := unix.Fstat(rfd, &st); err != nil {
+		return err
+	}
+	if st.Dev != held.Dev || st.Ino != held.Ino {
+		return errUnusable
+	}
+	return unix.Fchmod(rfd, 0o700)
+}
 
 // procSpelling returns <procSelfFD>/<dir>/<name>, or false when the /proc
 // route cannot be used:

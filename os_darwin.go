@@ -84,8 +84,10 @@ func threadChdir(dirfd int) error {
 // heldLinkRoute needs /proc: not here.
 func heldLinkRoute(string, string, string) (endpoint, error) { return nil, errUnusable }
 
-// dOpenFlagsProc: no /proc here, so as without it.
-const dOpenFlagsProc = dOpenFlags
+// setPrivate sets D (fd, which passed the check) to mode 0700: fchmod(2).
+func setPrivate(_ int, _ string, fd int, _ *unix.Stat_t, _ bool, _ string) error {
+	return unix.Fchmod(fd, 0o700)
+}
 
 // dOpenFlagsRetry is how D is opened when the kernel refuses O_SEARCH on a
 // directory (EISDIR / EINVAL), as openDir does for the socket's directory.

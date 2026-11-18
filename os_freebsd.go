@@ -73,8 +73,10 @@ func newSocket() (int, error) {
 // listenBacklog is the backlog the net package passes to listen(2) here.
 func listenBacklog() int { return somaxconn("kern.ipc.soacceptqueue") }
 
-// dOpenFlagsProc: no /proc here, so as without it.
-const dOpenFlagsProc = dOpenFlags
+// setPrivate sets D (fd, which passed the check) to mode 0700: fchmod(2).
+func setPrivate(_ int, _ string, fd int, _ *unix.Stat_t, _ bool, _ string) error {
+	return unix.Fchmod(fd, 0o700)
+}
 
 // dOpenFlagsRetry: no second way of opening D here.
 const dOpenFlagsRetry = 0

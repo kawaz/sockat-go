@@ -38,10 +38,12 @@ Dial の予備の経路:
   | OS | D の開き方 | 0700 にそろえる |
   |---|---|---|
   | Linux (`/proc` を使える) | `O_PATH \| O_DIRECTORY \| O_NOFOLLOW` | `chmod("/proc/self/fd/<fd>")` |
-  | Linux (`/proc` を使えない)、FreeBSD 等 | `O_RDONLY \| O_DIRECTORY \| O_NOFOLLOW` | `fchmod` |
+  | Linux (`/proc` を使えない) | `O_PATH \| O_DIRECTORY \| O_NOFOLLOW` | 名前で `O_RDONLY \| O_DIRECTORY \| O_NOFOLLOW` で開き直し、`(st_dev, st_ino)` が最初の fd と同じことを確かめて `fchmod` |
+  | FreeBSD 等 | `O_RDONLY \| O_DIRECTORY \| O_NOFOLLOW` | `fchmod` |
   | macOS | `O_SEARCH \| O_DIRECTORY \| O_NOFOLLOW` (カーネルが `EISDIR` / `EINVAL` を返したら `O_RDONLY`) | `fchmod` |
 - D の中に、ソケットのディレクトリの realpath を指す乱数 10 文字の R を `symlinkat` で作る
 - D の fd を基準に `R/<ファイル名>` で bind / connect する
+- 確認が通った後に 0700 にそろえられなければ (umask 0477 の非 root で開き直しが `EACCES` 等)、その置き場では作れないとみなし、D を片付けて次へ。O_RDONLY で開く OS で開けない時は、確かめられないので触らずに残す
 - 片付け: R は作れた時だけ消す。D は確認が通り、名前の `(st_dev, st_ino)` が fd と一致する時だけ消す。確認に落ちた D は中身も含めて触らない
 
 ## 理由
@@ -61,3 +63,4 @@ Dial の予備の経路:
 - 経路と順番: kawaz 裁定 (ハブの DR-0012) 2026-11-19
 - fork の無い Go で bind の 4 を作らないこと: ハブ D12-Q3 の統括推し (a)、kawaz の裁定待ち 2026-11-19
 - macOS の D を `O_SEARCH` で開くこと: 実装側の判断、ハブの SPEC に取り入れ済み (f74cb86b) 2026-11-19
+- Linux は `/proc` の有無によらず D を `O_PATH` で開いて確かめること: 実装側の提案、ハブの SPEC に取り入れ済み (b442e602) 2026-11-19

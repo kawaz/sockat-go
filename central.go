@@ -186,11 +186,7 @@ func makeDIn(baseFD int, prefix, real string, proc bool, procSelfFD string,
 		return nil, err
 	}
 	name := prefix + part
-	flags := dOpenFlags
-	if proc {
-		flags = dOpenFlagsProc
-	}
-	fd, err := unix.Openat(baseFD, name, flags, 0)
+	fd, err := unix.Openat(baseFD, name, dOpenFlags, 0)
 	if (errors.Is(err, unix.EISDIR) || errors.Is(err, unix.EINVAL)) && dOpenFlagsRetry != 0 {
 		// A kernel that does not take O_SEARCH on a directory (macOS).
 		fd, err = unix.Openat(baseFD, name, dOpenFlagsRetry, 0)
@@ -204,12 +200,8 @@ func makeDIn(baseFD int, prefix, real string, proc bool, procSelfFD string,
 		unix.Close(fd)
 		return nil, errUnusable
 	}
-	if proc {
-		err = unix.Chmod(procSelfFD+"/"+strconv.Itoa(fd), 0o700)
-	} else {
-		err = unix.Fchmod(fd, 0o700)
-	}
-	if err != nil {
+	if err := setPrivate(baseFD, name, fd, &h.st, proc, procSelfFD); err != nil {
+		// D passed the check, so it is ours: removed.
 		h.cleanup()
 		return nil, err
 	}

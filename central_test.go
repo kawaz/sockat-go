@@ -700,8 +700,8 @@ func TestRIsARandomSymlinkToTheRealSocketDirectory(t *testing.T) {
 // opened (for search only, or O_PATH with /proc) and the central route works,
 // leaving nothing. A umask belongs to the whole process, hence a child.
 //
-// Not covered: Linux without /proc under 0477 and not root, where D is opened
-// O_RDONLY (SPEC) and so cannot be opened at all.
+// Linux without /proc under 0477 and not root, where D cannot be set to 0700,
+// is TestWithoutProcAUmaskTakingTheOwnersReadBitLeavesNoD.
 func TestTheCentralRouteWorksUnderAUmaskTakingTheOwnersBits(t *testing.T) {
 	t.Parallel()
 	for _, mask := range []string{"0277", "0477"} {

@@ -124,6 +124,7 @@ Only for a long path:
 - **A path that does not end with a file name** (`dir/`, `dir/.`, `dir/..`) is `EINVAL`, and nothing is created
 - **The directory is looked up first**: the central route resolves the socket's directory to a real path when it creates R; Dial's fallback /proc, relative and connectat routes look the directory up and then pass the file name. A rename or a repointed symlink in between is not seen
 - **Another goroutine's `os.Chdir`**: if the cwd changes during the relative route (Dial's fallback), the result is discarded and an error is returned
+- **R swapped in the form without D**: in a socket directory others can write to without the sticky bit, R of the form without D (Listen) can be replaced between its creation and the bind, which may then bind in another directory (where the name exists already the bind fails with `EADDRINUSE`; nothing is overwritten)
 - **Leftovers**: if the process dies before removing them, a `sockat.XXXXXXXXXX` (D, a symlink) stays in the place, and a `.sockat.XXXXXXXXXX` (D) in the socket's directory
 
 ## Documentation

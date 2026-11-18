@@ -1,0 +1,130 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "VERSION"
+  # A version pushed before this workflow existed (or a release that failed
+  # half-way) is released by running it by hand; check-version still refuses a
+  # version that is already tagged.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # Release only what passes CI: the whole suite runs here first.
+  ci:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  check-version:
+    needs: ci
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.version.outputs.sha }}
+      version: ${{ steps.version.outputs.current }}
+      changed: ${{ steps.version.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Install bump-semver
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          LATEST=$(gh release list --repo kawaz/bump-semver --limit 1 --json tagName -q '.[0].tagName' | sed 's/^v//')
+          curl -fsSL --retry 5 --retry-delay 2 --max-time 60 \
+            "https://github.com/kawaz/bump-semver/releases/download/v${LATEST}/bump-semver-linux-amd64" \
+            -o /usr/local/bin/bump-semver
+          chmod +x /usr/local/bin/bump-semver
+          bump-semver --version
+
+      - name: Check version change
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          CURRENT_VERSION=$(tr -d '[:space:]' < VERSION)
+          echo "current=${CURRENT_VERSION}" >> "$GITHUB_OUTPUT"
+
+          if ! bump-semver get "$CURRENT_VERSION" -qq; then
+            echo "::error::Invalid version format in VERSION: ${CURRENT_VERSION}"
+            exit 1
+          fi
+
+          # Greater than every existing tag (no double release, no rollback).
+          set +e
+          LATEST=$(bump-semver vcs get latest-tag --include-prerelease --vcs git 2>/dev/null)
+          LATEST_EXIT=$?
+          set -e
+          if [ "$LATEST_EXIT" -ne 0 ]; then
+            echo "vcs get latest-tag exited ${LATEST_EXIT} (no SemVer tags yet); assuming first release"
+          else
+            set +e
+            bump-semver compare gt "$CURRENT_VERSION" "$LATEST"
+            CMP_EXIT=$?
+            set -e
+            case "$CMP_EXIT" in
+              0) ;;
+              1)
+                echo "changed=false" >> "$GITHUB_OUTPUT"
+                echo "Version v${CURRENT_VERSION} is not greater than latest tag ${LATEST}; skipping release."
+                exit 0
+                ;;
+              *)
+                echo "::error::Unexpected exit code from bump-semver compare: ${CMP_EXIT}"
+                exit 1
+                ;;
+            esac
+          fi
+
+          if gh release view "v${CURRENT_VERSION}" --repo "$REPO" >/dev/null 2>&1; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Version v${CURRENT_VERSION} already released; skipping."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "New version detected: v${CURRENT_VERSION}"
+          fi
+
+  # The tag is the release of a Go module: the module proxy serves it from the
+  # tag, so creating the tag (with the GitHub release) is the publish.
+  release:
+    needs: check-version
+    if: needs.check-version.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create release with tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check-version.outputs.version }}
+          COMMIT_SHA: ${{ needs.check-version.outputs.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh release create "v${VERSION}" \
+            --repo "$REPO" \
+            --title "v${VERSION}" \
+            --target "$COMMIT_SHA" \
+            --generate-notes
+
+      # Ask the module proxy for the new version so it is fetched (and listed
+      # on pkg.go.dev) right away instead of on the first user's request.
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+      - name: Fetch the version through the module proxy
+        env:
+          VERSION: ${{ needs.check-version.outputs.version }}
+          GOPROXY: https://proxy.golang.org
+          GOFLAGS: -mod=mod
+        run: |
+          cd "$(mktemp -d)"
+          go mod init example.com/fetch
+          go get "github.com/kawaz/sockat-go@v${VERSION}"

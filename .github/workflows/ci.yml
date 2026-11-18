@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # release.yml runs the whole suite before it creates the tag.
+  workflow_call:
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }}, Go ${{ matrix.go }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # The routes differ per OS (Linux: /proc; macOS: relative / widened
+        # sockaddr / symlink / thread cwd), so each OS runs the whole suite on
+        # both supported Go releases.
+        os: [ubuntu-latest, macos-latest]
+        go: [oldstable, stable]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ matrix.go }}
+      - uses: extractions/setup-just@v3
+      # just ci = check (gofmt, vet, tidy, vet for the other OSes) + test.
+      # The same entry point as locally, so the checks match.
+      - run: just ci
+
+  linux-docker:
+    name: Test (Linux in Docker, default seccomp)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      # Docker's default seccomp profile refuses unshare(2), so the thread cwd
+      # route cannot be used there: the suite checks that the order then ends
+      # with ENAMETOOLONG instead.
+      - run: docker run --rm -v "$PWD":/work -w /work golang:1 go test -count=1 ./...
+
+  # FreeBSD reaches long paths with bindat(2) / connectat(2), which only a
+  # FreeBSD kernel can exercise.
+  freebsd:
+    name: Test (FreeBSD VM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          prepare: pkg install -y go
+          run: go test -count=1 ./...
+
+  # The Unix systems without a dirfd-relative bind / connect or per-thread
+  # working directories. They run the whole suite in a VM so the routes they
+  # share with macOS (relative path, symlink) are exercised on their own
+  # kernels.
+  netbsd:
+    name: Test (NetBSD VM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: vmactions/netbsd-vm@v1
+        with:
+          usesh: true
+          prepare: /usr/sbin/pkg_add go
+          run: |
+            export PATH="$(ls -d /usr/pkg/go*/bin | sort -V | tail -1):$PATH"
+            go test -count=1 ./...
+
+  openbsd:
+    name: Test (OpenBSD VM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: vmactions/openbsd-vm@v1
+        with:
+          usesh: true
+          prepare: pkg_add go
+          run: go test -count=1 ./...
+
+  illumos:
+    name: Test (illumos / OmniOS VM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: vmactions/omnios-vm@v1
+        with:
+          usesh: true
+          # The official illumos build of the latest Go release.
+          prepare: |
+            v=$(curl -fsSL 'https://go.dev/VERSION?m=text' | head -1)
+            curl -fsSL "https://go.dev/dl/${v}.illumos-amd64.tar.gz" | gtar -xz -C /opt
+          run: |
+            export PATH=/opt/go/bin:$PATH
+            go test -count=1 ./...

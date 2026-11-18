@@ -36,6 +36,10 @@
 | `net.Listener` / `net.Conn` で返し、長いパスでは Close で元のパスを消す wrapper にする | 標準と同じ型でなくなる。[DR-0007](DR-0007-long-path-listener-keeps-socket-file.md) |
 | `DialContext` を足す | Unix domain の connect は呼び出しの中で終わるので、待つものが無い |
 
+## 未確定
+
+- `ListenEx` で bind は通ったのにファイルを覚えられない (realpath / lstat が失敗する) 分岐は試験していない。その状況を試験で作れない (compile と通常の分岐のみ確かめた)
+
 ## 判断の出所
 
 - `ListenEx` の形 (関数を返す、discard は消すだけ): ハブ D12-Q4 の統括推し、kawaz の裁定待ち 2026-11-19 (名前は仮)

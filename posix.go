@@ -3,7 +3,6 @@
 package sockat
 
 import (
-	"crypto/rand"
 	"errors"
 	"os"
 	"path/filepath"
@@ -12,46 +11,37 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// The routes that need nothing but POSIX, tried in order on every system
-// without a dirfd-relative primitive: macOS, NetBSD, OpenBSD, illumos and the
-// other Unix systems, and Linux when the /proc route cannot be used. Every
-// spelling they make goes in the plain sockaddr.
+// The fallback routes of a dial (SPEC "予備の経路"), for when the central
+// route cannot be used: a connect leaves no spelling behind with the peer (the
+// connecting socket is not bound), so these spell the path without a random
+// part. A bind never takes them.
 
-// posixRun tries, in order, for a path longer than directMax whose directory
-// part is dir and file name name:
+// posixFallbackDial tries, in order, for a path longer than directMax whose
+// directory part is dir and file name name:
 //
-//  1. the path spelled relative to the cwd, when that is at most directMax
-//     bytes;
-//  2. a short symlink (symlinkRoute: to the socket's directory for a bind, to
-//     the socket file for a connect) under the first of cfg.tmpBases where the
-//     path through it fits and the symlink can be created;
-//  3. a thread whose own cwd is the directory (threadCwdRoute; opened is the
-//     directory when the caller has it open already, as Linux does), where
-//     the system has per-thread working directories.
+//  1. (withRelative) the path spelled relative to the cwd, when that fits;
+//  2. for each of cfg.tmpBases: a symlink to the socket file in it when it is
+//     a safe place (symlinkRoute), or, when it is not, a directory of our own
+//     in it held by its fd (heldLinkRoute: Linux with /proc only).
 //
-// A failure of a route ends the search with that error, except where it shows
-// that the route itself cannot be used (no safe place, the symlink not being
-// creatable); then the next route (or the next place for the symlink) is
-// tried.
-func posixRun(o op, path, dir, name string, opened *os.File, cfg *config) (endpoint, route, error) {
-	rel := newRelative(path, dir)
-
-	if rel != nil {
-		ep, err := rel.run(func(s string) (endpoint, error) { return viaStd(o, s, false) })
-		return ep, routeRelative, err
+// A failure of a route ends the search with that error; errUnusable when no
+// route can be used.
+func posixFallbackDial(path, dir string, withRelative bool, cfg *config) (endpoint, route, error) {
+	if withRelative {
+		if rel := newRelative(path, dir); rel != nil {
+			ep, err := rel.run(func(s string) (endpoint, error) { return viaStd(opDial, s, false) })
+			return ep, routeRelative, err
+		}
 	}
-
 	for _, base := range cfg.tmpBases {
 		var ep endpoint
 		var r route
 		var err error
-		if o == opDial && !safeBase(base) {
-			// A place others can write to: a directory of our own in it, held
-			// by its fd (Linux with /proc; errUnusable elsewhere).
+		if !safeBase(base) {
 			ep, err = heldLinkRoute(base, path, cfg.procSelfFD)
 			r = routeHeldLink
 		} else {
-			ep, r, err = symlinkRoute(o, base, path, dir, name)
+			ep, r, err = symlinkRoute(base, path)
 		}
 		switch {
 		case err == nil:
@@ -61,23 +51,7 @@ func posixRun(o op, path, dir, name string, opened *os.File, cfg *config) (endpo
 			return nil, "", err
 		}
 	}
-
-	if opened == nil {
-		f, err := openDir(dir)
-		if err != nil {
-			return nil, "", err
-		}
-		defer f.Close()
-		opened = f
-	}
-	if !cfg.threadCwd {
-		return nil, "", errNameTooLong(o)
-	}
-	ep, err := threadCwdRoute(o, opened, name)
-	if errors.Is(err, errUnusable) {
-		return nil, "", errNameTooLong(o)
-	}
-	return ep, routeThreadCwd, err
+	return nil, "", errUnusable
 }
 
 // relative is a relative spelling of an absolute socket path, checked to
@@ -85,17 +59,6 @@ func posixRun(o op, path, dir, name string, opened *os.File, cfg *config) (endpo
 type relative struct {
 	spelling string
 	cwd      fileID // the cwd when the spelling was made
-}
-
-// fileID is (st_dev, st_ino).
-type fileID struct{ dev, ino uint64 }
-
-func statID(path string) (fileID, bool) {
-	var st unix.Stat_t
-	if err := unix.Stat(path, &st); err != nil {
-		return fileID{}, false
-	}
-	return fileID{uint64(st.Dev), uint64(st.Ino)}, true
 }
 
 // cwdSpellings returns the spellings of the cwd that the path may start with:
@@ -214,48 +177,22 @@ func (r *relative) run(f func(spelling string) (endpoint, error)) (endpoint, err
 	return ep, err
 }
 
-// linkPrefix is what the symlink name starts with, so a link left behind by a
-// process that died is recognisable as sockat's.
-const linkPrefix = "sockat."
-
-// linkRandomLen is the length of the random part of the symlink name.
-const linkRandomLen = 10
-
-// symlinkRoute binds / connects path (directory part dir, file name name)
-// through a symlink <base>/sockat.XXXXXXXXXX:
+// symlinkRoute connects to path through a symlink <base>/sockat.XXXXXXXXXX
+// to the socket file. A connect follows a symlink in the last component, so
+// the spelling's length depends on neither the directory nor the file name.
+// The link holds the caller's own spelling (made absolute against the cwd), so
+// the kernel resolves it as it resolves path.
 //
-//	| op      | the link points to | spelling handed to the kernel |
-//	|---------|--------------------|-------------------------------|
-//	| bind    | dir                | <link>/<name>                 |
-//	| connect | path               | <link>                        |
-//
-// A connect follows a symlink in the last component, so the link to the file
-// reaches the socket by a spelling whose length depends on neither the
-// directory nor the file name. A bind does not: Linux refuses it with
-// EADDRINUSE, the link being there already. Both links hold the caller's own
-// spelling (made absolute against the cwd), so the kernel resolves them as it
-// resolves path.
-//
-// Used when the spelling fits the sockaddr (at most directMax bytes) and base
-// is a place where nobody else can replace the symlink
-// (safeBase). Both are checked before anything is created. Nothing is left
-// under base: the symlink is removed before this returns, whatever the
-// outcome. errUnusable when the route cannot be used here.
-func symlinkRoute(o op, base, path, dir, name string) (endpoint, route, error) {
-	toFile := o == opDial
-	placeholder := underBase(base, linkPrefix+string(make([]byte, linkRandomLen)))
-	spellingLen := len(placeholder)
-	if !toFile {
-		spellingLen += 1 + len(name)
-	}
-	if spellingLen > directMax || !safeBase(base) {
+// Used when the spelling fits and base is a place where nobody else can
+// replace the symlink (safeBase); both are checked before anything is
+// created. The symlink is removed before this returns, whatever the outcome.
+// errUnusable when the route cannot be used here.
+func symlinkRoute(base, path string) (endpoint, route, error) {
+	link := underBase(base, linkPrefix+string(make([]byte, linkRandomLen)))
+	if len(link) > directMax || !safeBase(base) {
 		return nil, "", errUnusable
 	}
-	target := dir
-	if toFile {
-		target = path
-	}
-	target, ok := absTarget(target)
+	target, ok := absTarget(path)
 	if !ok {
 		return nil, "", errUnusable
 	}
@@ -264,13 +201,8 @@ func symlinkRoute(o op, base, path, dir, name string) (endpoint, route, error) {
 		return nil, "", errUnusable
 	}
 	defer os.Remove(link)
-
-	via, r := link, routeSymlinkFile
-	if !toFile {
-		via, r = link+"/"+name, routeSymlinkDir
-	}
-	ep, err := viaStd(o, via, false)
-	return ep, r, err
+	ep, err := viaStd(opDial, link, false)
+	return ep, routeSymlinkFile, err
 }
 
 // absTarget is the caller's spelling made absolute against the cwd, for a
@@ -320,14 +252,6 @@ func onlyWeCanReplace(mode, owner, us uint32) bool {
 	return (mode&sticky != 0 && ours) || (owner == us && mode&groupOrOtherWrite == 0)
 }
 
-// linkAttempts is how many names createLink tries before giving up. Each try
-// is a fresh random name from 62^10 possibilities, so exhausting this means
-// something other than bad luck (for example a base that refuses every name).
-const linkAttempts = 16
-
-// errNoFreeName is returned when createLink ran out of names.
-var errNoFreeName = errors.New("could not find a free name for a temporary symlink")
-
 // createLink creates a symlink under base pointing to target, named by
 // nextName (called once per try; its error ends the attempt), and returns its
 // path.
@@ -352,23 +276,6 @@ func createLink(base, target string, nextName func() (string, error)) (string, e
 		}
 	}
 	return "", errNoFreeName
-}
-
-// randomName returns "sockat." followed by linkRandomLen random letters and
-// digits from the system's secure generator (crypto/rand).
-func randomName() (string, error) {
-	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-	var random [linkRandomLen]byte
-	if _, err := rand.Read(random[:]); err != nil {
-		return "", err
-	}
-	name := []byte(linkPrefix)
-	// 256 is not a multiple of 62, so this is slightly biased; the name only
-	// has to be hard to collide with, not uniform.
-	for _, b := range random {
-		name = append(name, alphabet[int(b)%len(alphabet)])
-	}
-	return string(name), nil
 }
 
 // underBase spells the entry name of the directory base as base followed by

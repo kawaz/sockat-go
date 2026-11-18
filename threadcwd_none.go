@@ -1,11 +1,9 @@
-//go:build !(darwin || ios || linux || android || freebsd)
+//go:build !(darwin || ios || linux || android)
 
 package sockat
 
-import "os"
+// threadCwdPossible: no per-thread working directories here.
+func threadCwdPossible() bool { return false }
 
-// threadCwdSupported: no per-thread working directories here.
-const threadCwdSupported = false
-
-// threadCwdRoute cannot be used here.
-func threadCwdRoute(op, *os.File, string) (endpoint, error) { return nil, errUnusable }
+// inThreadCwd cannot be used here.
+func inThreadCwd(op, int, string) (endpoint, error) { return nil, errUnusable }

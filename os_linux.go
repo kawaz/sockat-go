@@ -9,37 +9,43 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// runLong is the routes for a path longer than directMax on Linux:
-// /proc/self/fd/<dirfd>/<name> with the directory opened O_PATH; when that
-// cannot be used, the POSIX order (posixRun) with that directory fd for the
-// thread-cwd route.
-//
-// The kernel resolves the /proc/self/fd/<n> magic link to the directory the
-// fd refers to, so the socket is created in (or looked up in) that directory
-// without ever changing the cwd. That route has no length limit on the
-// directory, needs no temporary file, so whenever it can be used nothing else
-// is tried. It cannot be used when <procSelfFD>/<dirfd> is not there (no /proc
-// mounted, as in some chroots and minimal containers) or when the spelling
-// does not fit sun_path (a file name of about 90 bytes or more). What a bind /
-// connect through /proc returns is the result, never retried on another route.
-func runLong(o op, path string, cfg *config) (endpoint, route, error) {
-	dir, name, err := splitPath(path)
-	if err != nil {
-		return nil, "", err
+// fallbackDial is a dial's fallback routes on Linux (SPEC "予備の経路"):
+// with /proc, /proc/self/fd/<dirfd>/<name>, then for each place a symlink to
+// the file (safe places) or the fd-held form (others); without /proc, the
+// path relative to the cwd, then symlinks in safe places.
+func fallbackDial(path, dir, name string, sdir *os.File, cfg *config) (endpoint, route, error) {
+	proc := procFDUsableFor(sdir, cfg.procSelfFD)
+	if proc {
+		if via, ok := procSpelling(sdir, name, cfg.procSelfFD); ok {
+			ep, err := viaStd(opDial, via, false)
+			return ep, routeProc, err
+		}
 	}
-	opened, err := openDir(dir)
-	if err != nil {
-		return nil, "", err
-	}
-	// opened stays open until this returns, so the /proc spelling keeps
-	// naming it.
-	defer opened.Close()
-	if via, ok := procSpelling(opened, name, cfg.procSelfFD); ok {
-		ep, err := viaStd(o, via, false)
-		return ep, routeProc, err
-	}
-	return posixRun(o, path, dir, name, opened, cfg)
+	return posixFallbackDial(path, dir, !proc, cfg)
 }
+
+// procFDUsableFor reports whether <procSelfFD>/<fd of dir> can be looked up,
+// that is, whether /proc is there.
+func procFDUsableFor(dir *os.File, procSelfFD string) bool {
+	_, err := os.Stat(procSelfFD + "/" + strconv.Itoa(int(dir.Fd())))
+	return err == nil
+}
+
+// threadCwdPossible reports whether the thread-cwd route may be tried: not
+// under a seccomp filter (prctl(PR_GET_SECCOMP) other than 0, or failing),
+// which may answer unshare(2) by killing the process.
+func threadCwdPossible() bool {
+	mode, err := unix.PrctlRetInt(unix.PR_GET_SECCOMP, 0, 0, 0, 0)
+	return err == nil && mode == 0
+}
+
+// dOpenFlagsProc is how D is opened with /proc: O_PATH, which needs no read
+// permission (a umask of 0477 leaves 0300); its mode is then set through
+// /proc/self/fd/<fd>, as an O_PATH fd takes no fchmod(2).
+const dOpenFlagsProc = unix.O_PATH | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+
+// dOpenFlags is how D is opened without /proc: an fd fchmod(2) takes.
+const dOpenFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
 
 // procSpelling returns <procSelfFD>/<dir>/<name>, or false when the /proc
 // route cannot be used:
@@ -205,13 +211,6 @@ func createHeldDir(base string, nextName func() (string, error)) (string, error)
 	return "", errNoFreeName
 }
 
-// isOurPrivateDir reports whether st (an fstat) is a directory owned by us
-// with no permission for group and others: the one created (mkdir 0700 under
-// any umask), and not one swapped in for it.
-func isOurPrivateDir(st *unix.Stat_t, us uint32) bool {
-	return st.Mode&unix.S_IFMT == unix.S_IFDIR && st.Uid == us && st.Mode&0o077 == 0
-}
-
 // removeHeldDir removes the directory at dirPath when that name still names
 // the directory held (held is its fstat). Best effort, as for the symlink.
 func removeHeldDir(dirPath string, held *unix.Stat_t) {
@@ -220,3 +219,6 @@ func removeHeldDir(dirPath string, held *unix.Stat_t) {
 		unix.Rmdir(dirPath)
 	}
 }
+
+// dOpenFlagsRetry: no second way of opening D here.
+const dOpenFlagsRetry = 0

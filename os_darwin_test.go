@@ -16,23 +16,23 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// ways are the four macOS routes, each with its own socket path and the route
+// ways are the macOS routes, each with its own socket path and the route
 // order's inputs that force it. Every spelling goes in the plain sockaddr.
 //
-//	| way        | path                          | inputs             | listen      | dial         |
-//	|------------|-------------------------------|--------------------|-------------|--------------|
-//	| direct     | directMax bytes               | (the public order) | direct      | direct       |
-//	| relative   | directMax bytes below the cwd | no place           | relative    | relative     |
-//	| symlink    | 600 bytes under /tmp          | a short place      | symlink-dir | symlink-file |
-//	| thread-cwd | 600 bytes under /tmp          | no place           | thread-cwd  | thread-cwd   |
+//	| way        | path                          | inputs                         | listen     | dial         |
+//	|------------|-------------------------------|--------------------------------|------------|--------------|
+//	| direct     | directMax bytes               | (the public order)             | direct     | direct       |
+//	| thread-cwd | 600 bytes under /tmp          | D in a place of its own        | thread-cwd | thread-cwd   |
+//	| relative   | directMax bytes below the cwd | no means (fallback), no place  | (listenAt) | relative     |
+//	| symlink    | 600 bytes under /tmp          | no means (fallback), a place   | (listenAt) | symlink-file |
 func ways(t *testing.T) []way {
 	t.Helper()
-	d, short := tmpDir(t), tmpDir(t)
+	d, dbase, short := tmpDir(t), tmpDir(t), tmpDir(t)
 	return []way{
 		{"direct", nest(t, d+"/direct", directMax, "s.sock"), nil, routeDirect, routeDirect},
-		{"relative", belowCwdPath(t, directMax, "s.sock"), posixCfg(), routeRelative, routeRelative},
-		{"symlink", nest(t, d+"/symlink", 600, "s.sock"), posixCfg(short), routeSymlinkDir, routeSymlinkFile},
-		{"thread-cwd", nest(t, d+"/thread", 600, "s.sock"), posixCfg(), routeThreadCwd, routeThreadCwd},
+		{"thread-cwd", nest(t, d+"/thread", 600, "s.sock"), centralCfg(dbase), routeThreadCwd, routeThreadCwd},
+		{"relative", belowCwdPath(t, directMax, "s.sock"), fallbackCfg(), "", routeRelative},
+		{"symlink", nest(t, d+"/symlink", 600, "s.sock"), fallbackCfg(short), "", routeSymlinkFile},
 	}
 }
 
@@ -146,34 +146,41 @@ func unreadable(t *testing.T, dir string) {
 	}
 }
 
-// The thread-cwd route opens the directory O_SEARCH, which needs only search
+// The socket's directory is opened O_SEARCH, which needs only search
 // permission, as a bind / connect by the path itself does: in a directory of
-// mode 0300 the route listens and dials. Opening it O_RDONLY would make the
-// long path fail where a short one in the same directory works.
+// mode 0300 the central route listens and dials (with no other place for D,
+// D is made in that directory, which write and search permission allow).
+// Opening it O_RDONLY would make the long path fail where a short one in the
+// same directory works.
 //
 // A kernel that does not take O_SEARCH on a directory answers EISDIR or EINVAL;
 // the directory is then opened O_RDONLY rather than given up on. The running
 // kernel takes O_SEARCH, so its refusal is stood in for by handing that answer
 // to searchOrReadOnly:
 //
-//   - EISDIR and EINVAL give an fd the route listens and dials through;
+//   - EISDIR and EINVAL give an fd that serves as the socket's directory: D is
+//     made in it and the thread-cwd means listens and dials through D;
 //   - that fd really comes from O_RDONLY: for the 0300 directory it is now
 //     EACCES (and that is the error returned);
 //   - any other answer is the real outcome and is returned without trying
 //     O_RDONLY: an EACCES stays EACCES even for a readable directory (falling
 //     back would hide a real permission failure).
-func TestTheThreadCwdRouteOpensTheDirectoryForSearchOnly(t *testing.T) {
+//
+// The same fallback for D itself (opened O_SEARCH, then O_RDONLY on EISDIR /
+// EINVAL: dOpenFlagsRetry in makeDIn) has no stand-in: the open is made inside
+// makeDIn. Only its usual way (O_SEARCH) is exercised, by every test here.
+func TestTheSocketsDirectoryIsOpenedForSearchOnly(t *testing.T) {
 	t.Parallel()
 	d := tmpDir(t)
 	locked := mkdirMode(t, d+"/locked", 0o700)
 	p := nestTail(t, locked, 500, "s.sock")
 	unreadable(t, filepath.Dir(p))
 	t.Cleanup(func() { os.Chmod(filepath.Dir(p), 0o700) })
-	l, r := listenLong(t, p, posixCfg())
+	l, r := listenLong(t, p, centralCfg())
 	if r != routeThreadCwd || !isSocket(p) {
 		t.Fatalf("listen in a directory without read permission: %s", r)
 	}
-	c, r := dialLong(t, p, posixCfg())
+	c, r := dialLong(t, p, centralCfg())
 	if r != routeThreadCwd {
 		t.Fatalf("dial: %s", r)
 	}
@@ -186,13 +193,19 @@ func TestTheThreadCwdRouteOpensTheDirectoryForSearchOnly(t *testing.T) {
 			t.Fatalf("%v: %v", e, err)
 		}
 		name := fmt.Sprintf("e%d.sock", int(e))
-		l := must{t}.listener(threadCwdRoute(opListen, f, name))
+		h, err := makeD(nil, f, readable, false, "", randomPart, randomPart)
+		if err != nil {
+			t.Fatalf("%v: D in the directory: %v", e, err)
+		}
+		l := must{t}.listener(inThreadCwd(opListen, h.fd, h.r+"/"+name))
 		if !isSocket(readable + "/" + name) {
 			t.Fatalf("%v: no socket in the directory", e)
 		}
-		c := must{t}.conn(threadCwdRoute(opDial, f, name))
+		c := must{t}.conn(inThreadCwd(opDial, h.fd, h.r+"/"+name))
 		ping(t, l, c)
+		h.cleanup()
 		f.Close()
+		assertNoSockatEntry(t, readable)
 
 		_, err = searchOrReadOnly(filepath.Dir(p), -1, e)
 		wantErrno(t, e.Error()+" for a directory without read permission", err, syscall.EACCES)

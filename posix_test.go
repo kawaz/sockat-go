@@ -2,11 +2,20 @@
 
 package sockat
 
-// The POSIX route order (posixRun): every system but FreeBSD, and Linux when
-// the /proc route cannot be used. In order: the path relative to the cwd, a
-// short symlink under the first
-// usable place (TMPDIR, then /tmp), and where the system has per-thread
-// working directories, a thread whose own cwd is the socket's directory.
+// The fallback routes of a dial (posixFallbackDial), for when the central
+// route cannot be used: every system but FreeBSD; on Linux the /proc spelling
+// comes first when /proc is there (os_linux_test.go). In order: the path
+// relative to the cwd (when /proc is not used), then for each place for the
+// symlink (TMPDIR, then /tmp) a short symlink to the socket file when the place
+// is safe, or on Linux with /proc the fd-held form when it is not
+// (heldlink_linux_test.go). A connect leaves no spelling behind with the peer
+// (the connecting socket is not bound), so these spellings need no random
+// part; a listen never takes them.
+//
+// The tests force the fallback with fallbackCfg: no thread cwd and no /proc,
+// so the central route has no means and is not even attempted. The listener
+// at a long path is made by listenAt (bound at a short path and renamed), so
+// these tests need no route of a listen and run on every system.
 
 import (
 	"errors"
@@ -25,10 +34,18 @@ import (
 // never read.
 const noProc = "/nonexistent/proc/self/fd"
 
-// posixCfg is the route order's inputs with bases as the places for the
-// symlink, /proc made to look absent (Linux) and the thread-cwd route on.
-func posixCfg(bases ...string) *config {
-	return &config{tmpBases: bases, procSelfFD: noProc, threadCwd: true}
+// fallbackCfg is the route order's inputs with the central route out of
+// reach (no thread cwd, /proc made to look absent, so no means at all) and
+// bases as the places for a dial's symlink.
+func fallbackCfg(bases ...string) *config {
+	return &config{tmpBases: bases, procSelfFD: noProc, threadCwd: false}
+}
+
+// centralCfg is the route order's inputs for the central route: D placed in
+// dBases (then the socket's directory), the thread-cwd means on, /proc looked
+// for where it is (Linux), and no place for a fallback symlink.
+func centralCfg(dBases ...string) *config {
+	return &config{dBases: dBases, procSelfFD: "/proc/self/fd", threadCwd: true}
 }
 
 // listenLong and dialLong run the long-path route order with cfg and return
@@ -43,23 +60,6 @@ func dialLong(t *testing.T, p string, cfg *config) (*net.UnixConn, route) {
 	t.Helper()
 	ep, r, err := runLong(opDial, p, cfg)
 	return must{t}.conn(ep, err), r
-}
-
-// wantLastRoute checks the outcome of a request that nothing but the last
-// route (the thread cwd) can carry: that route where the system has it and
-// allows it (not on NetBSD / OpenBSD / illumos, nor on Linux under a seccomp
-// filter that refuses unshare(2)), ENAMETOOLONG otherwise. It reports whether
-// the route was taken.
-func wantLastRoute(t *testing.T, what string, r route, err error) bool {
-	t.Helper()
-	if threadCwdAvailable() {
-		if err != nil || r != routeThreadCwd {
-			t.Fatalf("%s: %s, %v; want %s", what, r, err, routeThreadCwd)
-		}
-		return true
-	}
-	wantErrno(t, what, err, syscall.ENAMETOOLONG)
-	return false
 }
 
 // A place for the symlink is used only where no other user can replace the
@@ -109,6 +109,32 @@ func TestAPlaceForTheSymlinkMustBeStickyOrTheUsersOwn(t *testing.T) {
 	// bits that st_mode carries too.
 	if !onlyWeCanReplace(syscall.S_IFDIR|0o1777, 0, me) {
 		t.Error("S_IFDIR|1777 owned by root: want true")
+	}
+}
+
+// A safe place for the symlink must be a directory. A file of ours with no
+// group / other write bits (or a symlink to one) passes the mode and owner
+// test of onlyWeCanReplace, but nothing can be created in it; it is not a
+// place at all, so safeBase says no and the order moves on without trying it.
+func TestASafePlaceMustBeADirectory(t *testing.T) {
+	t.Parallel()
+	d := tmpDir(t)
+	if !safeBase(d) {
+		t.Fatalf("%s (our 0700 directory): want safe", d)
+	}
+	f := d + "/file"
+	if err := os.WriteFile(f, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if safeBase(f) {
+		t.Errorf("%s (our 0600 file): want not safe", f)
+	}
+	link := d + "/link"
+	if err := os.Symlink(f, link); err != nil {
+		t.Fatal(err)
+	}
+	if safeBase(link) {
+		t.Errorf("%s (a symlink to our file): want not safe", link)
 	}
 }
 
@@ -243,16 +269,15 @@ func TestCreateLinkStopsAtAnyOtherFailure(t *testing.T) {
 // symlinkRoute checks, before creating anything, that the spelling through
 // the link fits and that the place is safe; and a place where the link cannot
 // be created makes the route unusable there (errUnusable: the order moves on)
-// rather than failing the call. Checked for the link to the directory (listen)
-// and to the file (dial), on places that are missing, a file, too long (250
-// bytes, more than any sockaddr carries even without the file name), writable
-// by others, and, unless running as root (who may write anywhere), read-only.
-// No socket appears, and the directories involved keep their mtime.
+// rather than failing the call. Checked on places that are missing, a file,
+// too long (250 bytes, more than the sockaddr carries even for the link
+// alone), writable by others, and, unless running as root (who may write
+// anywhere), read-only. No socket appears, and the directories involved keep
+// their mtime.
 func TestSymlinkRouteIsUnusableWhereItCannotBeUsedAndCreatesNothing(t *testing.T) {
 	t.Parallel()
 	d := tmpDir(t)
 	p := nest(t, d, 600, "s.sock")
-	dir, name, _ := splitPath(p)
 	file := d + "/file"
 	if err := os.WriteFile(file, nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -260,30 +285,24 @@ func TestSymlinkRouteIsUnusableWhereItCannotBeUsedAndCreatesNothing(t *testing.T
 	long := nest(t, tmpDir(t), 250, "base")
 	mkdirMode(t, long, 0o700)
 	open := mkdirMode(t, d+"/open", 0o777)
-	places := []string{"/nonexistent", file, long, open}
+	places := []string{long, open}
 	if os.Geteuid() != 0 {
 		places = append(places, mkdirMode(t, d+"/readonly", 0o500))
 	}
 	for _, pl := range places {
-		if pl != "/nonexistent" && pl != file {
-			markUntouched(t, pl)
-		}
+		markUntouched(t, pl)
 	}
-	markUntouched(t, dir)
-	for _, pl := range places {
-		for _, o := range []op{opListen, opDial} {
-			_, _, err := symlinkRoute(o, pl, p, dir, name)
-			if !errors.Is(err, errUnusable) {
-				t.Errorf("%s under %s: %v, want errUnusable", o.sysName(), pl, err)
-			}
+	for _, pl := range append([]string{"/nonexistent", file}, places...) {
+		if _, _, err := symlinkRoute(pl, p); !errors.Is(err, errUnusable) {
+			t.Errorf("under %s: %v, want errUnusable", pl, err)
 		}
 	}
 	for _, pl := range places {
-		if pl != "/nonexistent" && pl != file {
-			assertUntouched(t, pl)
-		}
+		assertUntouched(t, pl)
 	}
-	assertUntouched(t, dir)
+	if exists(p) {
+		t.Fatal("something was created at the path")
+	}
 }
 
 // mkdirMode creates the directory p with exactly mode (set after creating it,
@@ -301,25 +320,17 @@ func mkdirMode(t *testing.T, p string, mode os.FileMode) string {
 	return p
 }
 
-// A path far from the cwd (600 bytes under /tmp, so no relative spelling fits)
-// goes through a symlink
-// <place>/sockat.XXXXXXXXXX: a listen through one to the socket's directory,
-// so the socket is created in the real directory; a dial through one to the
-// socket file. Under a short place both spellings fit the plain sockaddr. The
-// place is empty afterwards: the link is removed once the call returns.
-func TestAPathFarFromTheCwdGoesThroughATemporarySymlink(t *testing.T) {
+// A path far from the cwd (600 bytes under /tmp, so no relative spelling
+// fits) is dialed through a symlink <place>/sockat.XXXXXXXXXX to the socket
+// file: it reaches the listener there, the connection is the net package's
+// type in working order, and the place is empty afterwards (the link is
+// removed once the call returns).
+func TestADialFarFromTheCwdGoesThroughATemporarySymlink(t *testing.T) {
 	t.Parallel()
 	p := nest(t, tmpDir(t), 600, "s.sock")
+	l := listenAt(t, p)
 	base := tmpDir(t)
-	l, r := listenLong(t, p, posixCfg(base))
-	if r != routeSymlinkDir {
-		t.Fatalf("listen: %s", r)
-	}
-	if !isSocket(p) {
-		t.Fatal("no socket at the path")
-	}
-	assertEmpty(t, base)
-	c, r := dialLong(t, p, posixCfg(base))
+	c, r := dialLong(t, p, fallbackCfg(base))
 	if r != routeSymlinkFile {
 		t.Fatalf("dial: %s", r)
 	}
@@ -328,25 +339,14 @@ func TestAPathFarFromTheCwdGoesThroughATemporarySymlink(t *testing.T) {
 }
 
 // The link to the socket file is spelled <place>/sockat.XXXXXXXXXX whatever
-// the file name, so a dial reaches a name too long for the link to the
-// directory (<place>/sockat.XXXXXXXXXX/<name> over the sockaddr), which a
-// listen cannot use. The socket is bound under a short name and renamed so the
-// test does not depend on the routes a listen has for the long name.
-func TestADialReachesAFileNameTooLongForTheLinkToTheDirectory(t *testing.T) {
+// the file name, so a dial reaches a file name of any length (here 200 bytes,
+// past every sockaddr and past what the central route carries).
+func TestADialThroughTheSymlinkReachesAnyFileName(t *testing.T) {
 	t.Parallel()
-	d := tmpDir(t)
 	base := tmpDir(t)
-	name := strings.Repeat("n", 90)
-	p := nest(t, d, 600, name)
-	dir := filepath.Dir(p)
-	if len(underBase(base, linkPrefix+strings.Repeat("X", linkRandomLen)))+1+len(name) <= directMax {
-		t.Fatal("the premise: the link to the directory does not fit")
-	}
-	l, _ := listenLong(t, dir+"/s.sock", posixCfg(base))
-	if err := os.Rename(dir+"/s.sock", p); err != nil {
-		t.Fatal(err)
-	}
-	c, r := dialLong(t, p, posixCfg(base))
+	p := nest(t, tmpDir(t), 600, strings.Repeat("n", 200))
+	l := listenAt(t, p)
+	c, r := dialLong(t, p, fallbackCfg(base))
 	if r != routeSymlinkFile {
 		t.Fatalf("dial: %s", r)
 	}
@@ -354,13 +354,13 @@ func TestADialReachesAFileNameTooLongForTheLinkToTheDirectory(t *testing.T) {
 	assertEmpty(t, base)
 }
 
-// Both links hold the path as the caller wrote it, so the kernel resolves them
+// The link holds the path as the caller wrote it, so the kernel resolves it
 // as it resolves the path: a ".." right after a symlink climbs out of the
 // symlink's target, not out of the directory the symlink sits in. With
-// <t>/link -> <t>/real/sub, <t>/link/../x/... names <t>/real/x/...; a socket at
-// <t>/x/... (where a lexical ".." would lead) is a decoy that must not be
+// <t>/link -> <t>/real/sub, <t>/link/../x/... names <t>/real/x/...; a listener
+// at <t>/x/... (where a lexical ".." would lead) is a decoy that must not be
 // reached.
-func TestTheLinksResolveThePathAsTheKernelDoes(t *testing.T) {
+func TestTheLinkResolvesThePathAsTheKernelDoes(t *testing.T) {
 	t.Parallel()
 	d := tmpDir(t)
 	base := tmpDir(t)
@@ -378,69 +378,54 @@ func TestTheLinksResolveThePathAsTheKernelDoes(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(decoy), 0o700); err != nil {
 		t.Fatal(err)
 	}
-
-	l, r := listenLong(t, spelled, posixCfg(base))
-	if r != routeSymlinkDir {
-		t.Fatalf("listen: %s", r)
-	}
-	if !isSocket(atReal) || isSocket(decoy) {
-		t.Fatalf("socket at the real path %v, at the decoy %v", isSocket(atReal), isSocket(decoy))
-	}
-	decoyL, err := Listen(decoy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer decoyL.Close()
-
-	c, r := dialLong(t, spelled, posixCfg(base))
+	l := listenAt(t, atReal)
+	decoyL := listenAt(t, decoy)
+	c, r := dialLong(t, spelled, fallbackCfg(base))
 	if r != routeSymlinkFile {
 		t.Fatalf("dial: %s", r)
 	}
 	ping(t, l, c)
-	decoyL.SetDeadline(time.Now().Add(-time.Second))
-	if _, err := decoyL.Accept(); !errors.Is(err, os.ErrDeadlineExceeded) {
-		t.Fatalf("the decoy got a connection: %v", err)
-	}
+	assertNothingAccepted(t, decoyL)
 	assertEmpty(t, base)
 }
 
-// A listen / dial that actually ran through the symlink under the first place
-// is the result: its error is returned and the call is not made again under
-// the next place (which would repeat it, or worse, succeed somewhere the caller
-// did not mean) nor on the thread-cwd route. The second place stays untouched
-// (no link was even created there) and the first is left empty: the link is
-// removed after a failure too. Covered: EADDRINUSE, a missing directory
-// (ENOENT through a dangling link), a missing socket (ENOENT) and a socket
-// nobody listens on (ECONNREFUSED).
+// assertNothingAccepted checks that no connection is waiting at l.
+func assertNothingAccepted(t *testing.T, l *net.UnixListener) {
+	t.Helper()
+	l.SetDeadline(time.Now().Add(-time.Second))
+	if _, err := l.Accept(); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("a connection got in: %v", err)
+	}
+	l.SetDeadline(time.Time{})
+}
+
+// A dial that actually ran through the symlink under the first place is the
+// result: its error comes back as it is and the call is not made again under
+// the next place (which would repeat it, or worse, succeed somewhere the
+// caller did not mean). The second place stays untouched (no link was even
+// created there) and the first is left empty: the link is removed after a
+// failure too. Covered: a missing socket (ENOENT), a socket nobody listens on
+// (ECONNREFUSED), a missing directory (ENOENT, from opening it first).
 func TestAFailureThroughTheSymlinkIsReturnedAndNotRetried(t *testing.T) {
 	t.Parallel()
-	d := tmpDir(t)
-	p := nest(t, d, 600, "s.sock")
+	p := nest(t, tmpDir(t), 600, "s.sock")
 	dir := filepath.Dir(p)
 	first, second := tmpDir(t), tmpDir(t)
-	cfg := posixCfg(first, second)
-	_, r := listenLong(t, p, cfg)
-	if r != routeSymlinkDir {
-		t.Fatalf("the premise: %s", r)
-	}
+	cfg := fallbackCfg(first, second)
 	staleSocket(t, dir+"/stale.sock")
 	markUntouched(t, second)
-
 	cases := []struct {
 		what  string
-		o     op
 		path  string
 		errno syscall.Errno
 	}{
-		{"listen on an existing socket", opListen, p, syscall.EADDRINUSE},
-		{"listen in a missing directory", opListen, dir + "/nope/s.sock", syscall.ENOENT},
-		{"dial a missing socket", opDial, dir + "/x.sock", syscall.ENOENT},
-		{"dial a socket nobody listens on", opDial, dir + "/stale.sock", syscall.ECONNREFUSED},
-		{"dial in a missing directory", opDial, dir + "/nope/s.sock", syscall.ENOENT},
+		{"a missing socket", p, syscall.ENOENT},
+		{"a socket nobody listens on", dir + "/stale.sock", syscall.ECONNREFUSED},
+		{"a missing directory", dir + "/nope/s.sock", syscall.ENOENT},
 	}
 	for _, c := range cases {
-		_, _, err := runLong(c.o, c.path, cfg)
-		wantErrno(t, c.what, err, c.errno)
+		_, _, err := runLong(opDial, c.path, cfg)
+		wantErrno(t, "dial "+c.what, err, c.errno)
 		assertEmpty(t, first)
 	}
 	assertUntouched(t, second)
@@ -452,19 +437,18 @@ func TestAFailureThroughTheSymlinkIsReturnedAndNotRetried(t *testing.T) {
 // A place that is not safe (writable by others and not sticky: 0777, 0775,
 // 0757) is passed over without creating anything in it (its mtime is
 // unchanged) and the next place is used. A sticky place (1777) and the user's
-// own (0700, 0755) are used. With only unsafe places there is no symlink
-// route. Run as root (docker), a place owned by another user is made too
-// (chown) and must be passed over, sticky or not.
+// own (0700, 0755) are used. With only unsafe places there is no route:
+// ENAMETOOLONG. Run as root (docker), a place owned by another user is made
+// too (chown) and must be passed over, sticky or not.
 //
 // This is the case where there is no fd-held form for an unsafe place: macOS
-// and the other systems, and Linux without /proc (posixCfg makes /proc look
-// absent). With /proc, Linux dials through an unsafe place in that form
+// and the other systems, and Linux without /proc (fallbackCfg makes /proc
+// look absent). With /proc, Linux dials through an unsafe place in that form
 // instead (heldlink_linux_test.go).
 func TestAnUnsafePlaceForTheSymlinkIsPassedOver(t *testing.T) {
 	t.Parallel()
 	d := tmpDir(t)
-	p := nest(t, d, 600, "s.sock")
-	dir := filepath.Dir(p)
+	dir := filepath.Dir(nest(t, d, 600, "x"))
 	places := tmpDir(t)
 	good := tmpDir(t)
 	var bad []string
@@ -473,11 +457,8 @@ func TestAnUnsafePlaceForTheSymlinkIsPassedOver(t *testing.T) {
 		bad = append(bad, pl)
 		markUntouched(t, pl)
 		q := fmt.Sprintf("%s/bad%o.sock", dir, mode)
-		l, r := listenLong(t, q, posixCfg(pl, good))
-		if r != routeSymlinkDir || !isSocket(q) {
-			t.Fatalf("%o: listen %s", mode, r)
-		}
-		c, r := dialLong(t, q, posixCfg(pl, good))
+		l := listenAt(t, q)
+		c, r := dialLong(t, q, fallbackCfg(pl, good))
 		if r != routeSymlinkFile {
 			t.Fatalf("%o: dial %s", mode, r)
 		}
@@ -488,11 +469,8 @@ func TestAnUnsafePlaceForTheSymlinkIsPassedOver(t *testing.T) {
 	for _, mode := range []os.FileMode{os.ModeSticky | 0o777, 0o700, 0o755} {
 		pl := mkdirMode(t, fmt.Sprintf("%s/ok%o", places, mode.Perm()), mode)
 		q := fmt.Sprintf("%s/ok%o.sock", dir, mode.Perm())
-		l, r := listenLong(t, q, posixCfg(pl))
-		if r != routeSymlinkDir {
-			t.Fatalf("%v: listen %s", mode, r)
-		}
-		c, r := dialLong(t, q, posixCfg(pl))
+		l := listenAt(t, q)
+		c, r := dialLong(t, q, fallbackCfg(pl))
 		if r != routeSymlinkFile {
 			t.Fatalf("%v: dial %s", mode, r)
 		}
@@ -501,11 +479,9 @@ func TestAnUnsafePlaceForTheSymlinkIsPassedOver(t *testing.T) {
 	}
 
 	q := dir + "/onlybad.sock"
-	cfg := posixCfg(bad...)
-	ep, r, err := runLong(opListen, q, cfg)
-	if wantLastRoute(t, "listen with only unsafe places", r, err) {
-		ep.Close()
-	}
+	listenAt(t, q)
+	_, _, err := runLong(opDial, q, fallbackCfg(bad...))
+	wantErrno(t, "dial with only unsafe places", err, syscall.ENAMETOOLONG)
 	for _, pl := range bad {
 		assertUntouched(t, pl)
 	}
@@ -521,35 +497,31 @@ func TestAnUnsafePlaceForTheSymlinkIsPassedOver(t *testing.T) {
 			}
 			markUntouched(t, pl)
 			q := fmt.Sprintf("%s/theirs%o.sock", dir, mode.Perm())
-			_, r := listenLong(t, q, posixCfg(pl, good))
-			if r != routeSymlinkDir {
-				t.Fatalf("%v: listen %s", mode, r)
+			listenAt(t, q)
+			_, r := dialLong(t, q, fallbackCfg(pl, good))
+			if r != routeSymlinkFile {
+				t.Fatalf("%v: dial %s", mode, r)
 			}
 			assertUntouched(t, pl)
 		}
 	})
 }
 
-// A place where the symlink cannot be created (missing, a file rather than a
-// directory) makes that place unusable, not the whole route: the next place is
-// tried, and the socket is at the given path.
+// A place where the symlink cannot be created (missing, or a file rather than
+// a directory) makes that place unusable, not the whole route: the next place
+// is used.
 func TestAPlaceWhereTheSymlinkCannotBeCreatedMovesOnToTheNext(t *testing.T) {
 	t.Parallel()
 	d := tmpDir(t)
 	p := nest(t, d, 600, "s.sock")
-	dir := filepath.Dir(p)
+	l := listenAt(t, p)
 	file := d + "/file"
 	if err := os.WriteFile(file, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	good := tmpDir(t)
-	for i, bad := range []string{"/nonexistent", file} {
-		q := fmt.Sprintf("%s/%d.sock", dir, i)
-		l, r := listenLong(t, q, posixCfg(bad, good))
-		if r != routeSymlinkDir || !isSocket(q) {
-			t.Fatalf("%s: listen %s", bad, r)
-		}
-		c, r := dialLong(t, q, posixCfg(bad, good))
+	for _, bad := range []string{"/nonexistent", file} {
+		c, r := dialLong(t, p, fallbackCfg(bad, good))
 		if r != routeSymlinkFile {
 			t.Fatalf("%s: dial %s", bad, r)
 		}
@@ -558,24 +530,20 @@ func TestAPlaceWhereTheSymlinkCannotBeCreatedMovesOnToTheNext(t *testing.T) {
 	assertEmpty(t, good)
 }
 
-// The symlink goes under the first place where the spelling through it fits.
-// A place so long that no sockaddr carries even the link (the situation of a
-// deeply nested TMPDIR) is passed over without creating anything in it, and
-// the next place is used. With two short places the first is used and the
-// second never touched.
-func TestTheSymlinkGoesUnderTheFirstPlaceWhereThePathFits(t *testing.T) {
+// The symlink goes under the first place where the link fits. A place so long
+// that the sockaddr cannot carry even the link (the situation of a deeply
+// nested TMPDIR) is passed over without creating anything in it, and the next
+// place is used. With two short places the first is used and the second never
+// touched.
+func TestTheSymlinkGoesUnderTheFirstPlaceWhereItFits(t *testing.T) {
 	t.Parallel()
 	p := nest(t, tmpDir(t), 600, "s.sock")
+	l := listenAt(t, p)
 	long := nest(t, tmpDir(t), 250, "base")
 	mkdirMode(t, long, 0o700)
 	first, second := tmpDir(t), tmpDir(t)
-
 	markUntouched(t, long)
-	l, r := listenLong(t, p, posixCfg(long, first))
-	if r != routeSymlinkDir || !isSocket(p) {
-		t.Fatalf("listen: %s", r)
-	}
-	c, r := dialLong(t, p, posixCfg(long, first))
+	c, r := dialLong(t, p, fallbackCfg(long, first))
 	if r != routeSymlinkFile {
 		t.Fatalf("dial: %s", r)
 	}
@@ -584,34 +552,26 @@ func TestTheSymlinkGoesUnderTheFirstPlaceWhereThePathFits(t *testing.T) {
 	assertEmpty(t, first)
 
 	markUntouched(t, second)
-	q := filepath.Dir(p) + "/q.sock"
-	l, r = listenLong(t, q, posixCfg(first, second))
-	if r != routeSymlinkDir {
-		t.Fatalf("listen: %s", r)
-	}
-	c, _ = dialLong(t, q, posixCfg(first, second))
+	c, _ = dialLong(t, p, fallbackCfg(first, second))
 	ping(t, l, c)
 	assertUntouched(t, second)
 	assertEmpty(t, first)
 }
 
-// A TMPDIR too long for the symlink route does not leave a long path without
-// it: configFromTmpdir puts /tmp after TMPDIR, so a 600-byte path still goes
+// A TMPDIR too long for the symlink does not leave a long path without it:
+// configFromTmpdir puts /tmp after TMPDIR, so a 600-byte path is still dialed
 // through a symlink, under /tmp, and nothing is created in TMPDIR. No link of
 // sockat's pointing at the socket's directory is left in /tmp either.
 func TestADeepTmpdirFallsBackToTmp(t *testing.T) {
 	t.Parallel()
 	d := tmpDir(t)
 	p := nest(t, d, 600, "s.sock")
+	l := listenAt(t, p)
 	long := nest(t, tmpDir(t), 250, "tmpdir")
 	mkdirMode(t, long, 0o700)
 	markUntouched(t, long)
 	cfg := configFromTmpdir(long)
-	cfg.procSelfFD = noProc
-	l, r := listenLong(t, p, cfg)
-	if r != routeSymlinkDir || !isSocket(p) {
-		t.Fatalf("listen: %s", r)
-	}
+	cfg.procSelfFD, cfg.threadCwd = noProc, false
 	c, r := dialLong(t, p, cfg)
 	if r != routeSymlinkFile {
 		t.Fatalf("dial: %s", r)
@@ -639,80 +599,75 @@ func assertNoLinkInTmpTo(t *testing.T, dir string) {
 	}
 }
 
-// The same through the environment, as Listen reads it (configFromEnv): with
-// TMPDIR set to a directory too long for the symlink, a 600-byte path goes
-// through a symlink under /tmp and nothing is created in TMPDIR. Runs in a
-// child process because it sets TMPDIR; the child's cwd is / so the relative
-// spelling is long too.
+// The same through the environment, as Dial reads it (configFromEnv): with
+// TMPDIR set to a directory too long for the symlink, a 600-byte path is
+// dialed through a symlink under /tmp and nothing is created in TMPDIR. Runs
+// in a child process because it sets TMPDIR; the child's cwd is / so the
+// relative spelling is long too.
 func TestADeepTmpdirInTheEnvironmentFallsBackToTmp(t *testing.T) {
 	t.Parallel()
 	d := tmpDir(t)
 	p := nest(t, d, 600, "s.sock")
+	l := listenAt(t, p)
 	long := nest(t, tmpDir(t), 250, "tmpdir")
 	mkdirMode(t, long, 0o700)
 	markUntouched(t, long)
-	out := runChild(t, "TestChildListenFromEnv", "/", "TMPDIR="+long, "SOCKAT_PATH="+p)
-	if got := readChildReport(t, out); got != string(routeSymlinkDir) {
+	out := runChild(t, "TestChildDialFromEnv", "/", "TMPDIR="+long, "SOCKAT_PATH="+p)
+	if got := readChildReport(t, out); got != string(routeSymlinkFile) {
 		t.Fatalf("route %s\n%s", got, out)
 	}
-	if !isSocket(p) {
-		t.Fatal("no socket at the path")
+	l.SetDeadline(nowPlusGuard())
+	if _, err := l.Accept(); err != nil {
+		t.Fatalf("the child's dial did not arrive: %v", err)
 	}
 	assertUntouched(t, long)
 	assertNoLinkInTmpTo(t, d)
 }
 
-func TestChildListenFromEnv(t *testing.T) {
+func TestChildDialFromEnv(t *testing.T) {
 	asChild(t)
 	cfg := configFromEnv()
-	cfg.procSelfFD = noProc
-	_, r := listenLong(t, os.Getenv("SOCKAT_PATH"), cfg)
+	cfg.procSelfFD, cfg.threadCwd = noProc, false
+	_, r := dialLong(t, os.Getenv("SOCKAT_PATH"), cfg)
 	childReport("%s", r)
 }
 
-// With no route left (no relative spelling, the only place
-// for the symlink too long, the thread-cwd route ruled out), a path is
-// ENAMETOOLONG, the error of a bind / connect to a path too long for sun_path,
-// and nothing happens: no connection reaches the listener, nothing is created
-// in the place for the symlink (its mtime is unchanged) or next to the socket.
-// A real failure stays what it is: a missing directory is ENOENT.
+// With no route left for a dial (no central route, no relative spelling, the
+// only place for the symlink too long), a path is ENAMETOOLONG, the error of a
+// connect to a path too long for sun_path, and nothing happens: no connection
+// reaches the listener, nothing is created in the place or next to the
+// socket. A real failure stays what it is: a missing directory is ENOENT. A
+// listen with the central route out of reach is ENAMETOOLONG too: a listen has
+// no fallback routes.
 func TestWithNoRouteLeftAPathIsENAMETOOLONGAndNothingIsMade(t *testing.T) {
 	t.Parallel()
-	d := tmpDir(t)
-	p := nest(t, d, 600, "s.sock")
+	p := nest(t, tmpDir(t), 600, "s.sock")
 	dir := filepath.Dir(p)
-	short := tmpDir(t)
-	l, _ := listenLong(t, p, posixCfg(short))
+	l := listenAt(t, p)
 	long := nest(t, tmpDir(t), 250, "base")
 	mkdirMode(t, long, 0o700)
 	markUntouched(t, long)
 	markUntouched(t, dir)
-	none := posixCfg(long)
-	none.threadCwd = false
-	for _, o := range []op{opListen, opDial} {
-		_, _, err := runLong(o, p, none)
-		wantErrno(t, o.sysName(), err, syscall.ENAMETOOLONG)
-		_, _, err = runLong(o, dir+"/other.sock", none)
-		wantErrno(t, o.sysName()+" elsewhere", err, syscall.ENAMETOOLONG)
-		_, _, err = runLong(o, dir+"/nope/s.sock", none)
-		wantErrno(t, o.sysName()+" in a missing directory", err, syscall.ENOENT)
-	}
+	none := fallbackCfg(long)
+	_, _, err := runLong(opDial, p, none)
+	wantErrno(t, "dial", err, syscall.ENAMETOOLONG)
+	_, _, err = runLong(opDial, dir+"/nope/s.sock", none)
+	wantErrno(t, "dial in a missing directory", err, syscall.ENOENT)
+	_, _, err = runLong(opListen, dir+"/other.sock", none)
+	wantErrno(t, "listen", err, syscall.ENAMETOOLONG)
 	assertUntouched(t, long)
 	assertUntouched(t, dir)
-	l.SetDeadline(time.Now().Add(-time.Second))
-	if _, err := l.Accept(); !errors.Is(err, os.ErrDeadlineExceeded) {
-		t.Fatalf("a connection got in: %v", err)
-	}
+	assertNothingAccepted(t, l)
 }
 
 // ----- the relative spelling -----
 
 // A path over directMax bytes whose spelling relative to the cwd is at most
-// directMax bytes takes the relative route (through the net package, the plain
-// sockaddr), before anything else is considered. The socket is at the given
-// absolute path, and no place for the symlink is touched. Runs in a child
-// process whose cwd is a temporary directory, to have a socket near the cwd.
-func TestAPathShortRelativeToTheCwdTakesTheRelativeRoute(t *testing.T) {
+// directMax bytes is dialed through that spelling (through the net package),
+// before any place for the symlink is considered, which stays untouched. Runs
+// in a child process whose cwd is a temporary directory, to have a socket near
+// the cwd.
+func TestADialShortRelativeToTheCwdTakesTheRelativeRoute(t *testing.T) {
 	t.Parallel()
 	if !inTmpCwd(t) {
 		return
@@ -721,13 +676,10 @@ func TestAPathShortRelativeToTheCwdTakesTheRelativeRoute(t *testing.T) {
 	if len(p) <= directMax {
 		t.Fatalf("the premise: %d bytes is not long", len(p))
 	}
+	l := listenAt(t, p)
 	base := tmpDir(t)
 	markUntouched(t, base)
-	l, r := listenLong(t, p, posixCfg(base))
-	if r != routeRelative || !isSocket(p) {
-		t.Fatalf("listen: %s", r)
-	}
-	c, r := dialLong(t, p, posixCfg(base))
+	c, r := dialLong(t, p, fallbackCfg(base))
 	if r != routeRelative {
 		t.Fatalf("dial: %s", r)
 	}
@@ -735,11 +687,10 @@ func TestAPathShortRelativeToTheCwdTakesTheRelativeRoute(t *testing.T) {
 	assertUntouched(t, base)
 }
 
-// A failure of a listen / dial made through the relative spelling is the
-// result: it is not retried through a symlink (the place stays untouched) or
-// on the thread-cwd route. The other paths have names of the same length, so
-// their relative spellings fit as well. Runs in a child process whose cwd is a
-// temporary directory.
+// A failure of a dial made through the relative spelling is the result: it is
+// not retried through a symlink (the place stays untouched). The other paths
+// have names of the same length, so their relative spellings fit as well.
+// Runs in a child process whose cwd is a temporary directory.
 func TestAFailureThroughTheRelativeSpellingIsReturnedAndNotRetried(t *testing.T) {
 	t.Parallel()
 	if !inTmpCwd(t) {
@@ -748,16 +699,10 @@ func TestAFailureThroughTheRelativeSpellingIsReturnedAndNotRetried(t *testing.T)
 	p := belowCwdPath(t, directMax, "s.sock")
 	dir := filepath.Dir(p)
 	base := tmpDir(t)
-	cfg := posixCfg(base)
-	_, r := listenLong(t, p, cfg)
-	if r != routeRelative {
-		t.Fatalf("the premise: %s", r)
-	}
+	cfg := fallbackCfg(base)
 	staleSocket(t, dir+"/z.sock")
 	markUntouched(t, base)
-	_, _, err := runLong(opListen, p, cfg)
-	wantErrno(t, "listen on an existing socket", err, syscall.EADDRINUSE)
-	_, _, err = runLong(opDial, dir+"/x.sock", cfg)
+	_, _, err := runLong(opDial, p, cfg)
 	wantErrno(t, "dial a missing socket", err, syscall.ENOENT)
 	_, _, err = runLong(opDial, dir+"/z.sock", cfg)
 	wantErrno(t, "dial a socket nobody listens on", err, syscall.ECONNREFUSED)
@@ -765,21 +710,22 @@ func TestAFailureThroughTheRelativeSpellingIsReturnedAndNotRetried(t *testing.T)
 }
 
 // The tests below run in a child process so the cwd and $PWD can be chosen.
-// The child spells the path relative to its cwd (newRelative), listens
-// through the route order with no place for a symlink, and reports the route
-// and the spelling; the parent checks where the socket appeared.
+// The parent listens at the path; the child spells the path relative to its
+// cwd (newRelative), dials through the fallback routes with no place for a
+// symlink, and reports the route and the spelling; the parent checks that the
+// connection reached its listener (and not a decoy).
 
-// listenInChild listens on path in a child whose cwd is cwd and whose $PWD is
-// pwd, and returns the route and the relative spelling ("-" for none) the
-// child reported.
-func listenInChild(t *testing.T, cwd, pwd, path string) (route, string) {
+// dialInChild dials path in a child whose cwd is cwd and whose $PWD is pwd,
+// and returns the route and the relative spelling ("-" for none) the child
+// reported.
+func dialInChild(t *testing.T, cwd, pwd, path string) (route, string) {
 	t.Helper()
-	out := runChild(t, "TestChildListenRelative", cwd, "PWD="+pwd, "SOCKAT_PATH="+path)
+	out := runChild(t, "TestChildDialRelative", cwd, "PWD="+pwd, "SOCKAT_PATH="+path)
 	r, rel, _ := strings.Cut(readChildReport(t, out), " ")
 	return route(r), rel
 }
 
-func TestChildListenRelative(t *testing.T) {
+func TestChildDialRelative(t *testing.T) {
 	asChild(t)
 	p := os.Getenv("SOCKAT_PATH")
 	dir, _, _ := splitPath(p)
@@ -787,8 +733,25 @@ func TestChildListenRelative(t *testing.T) {
 	if r := newRelative(p, dir); r != nil {
 		rel = r.spelling
 	}
-	_, r := listenLong(t, p, posixCfg())
+	c, r := dialLong(t, p, fallbackCfg())
+	c.Write([]byte("x"))
 	childReport("%s %s", r, rel)
+}
+
+// assertReached checks that a connection from a child reached l, and wrote the
+// byte the child sends.
+func assertReached(t *testing.T, l *net.UnixListener) {
+	t.Helper()
+	l.SetDeadline(nowPlusGuard())
+	s, err := l.Accept()
+	if err != nil {
+		t.Fatalf("the dial did not reach the listener: %v", err)
+	}
+	defer s.Close()
+	s.SetDeadline(nowPlusGuard())
+	if _, err := s.Read(make([]byte, 1)); err != nil {
+		t.Fatalf("nothing arrived: %v", err)
+	}
 }
 
 // realAndLink makes <d>/real and <d>/link -> real.
@@ -808,8 +771,7 @@ func realAndLink(t *testing.T, d string) (real, link string) {
 // symlink: the path starts with $PWD, so that prefix is cut off and the
 // spelling only descends (no "..", no realpath), resolving through the same
 // symlinks the path does. getcwd would not have matched: it is the real path
-// (on macOS also through /tmp -> /private/tmp). The socket is in the real
-// directory.
+// (on macOS also through /tmp -> /private/tmp).
 func TestAPathBelowPWDThroughASymlinkIsCutAtPWD(t *testing.T) {
 	t.Parallel()
 	real, link := realAndLink(t, tmpDir(t))
@@ -818,13 +780,12 @@ func TestAPathBelowPWDThroughASymlinkIsCutAtPWD(t *testing.T) {
 		t.Fatalf("the premise: %d bytes is not long", len(p))
 	}
 	want := strings.TrimPrefix(p, link+"/")
-	r, rel := listenInChild(t, link, link, p)
+	l := listenAt(t, real+"/"+want)
+	r, rel := dialInChild(t, link, link, p)
 	if r != routeRelative || rel != want {
 		t.Fatalf("%s %q, want %s %q", r, rel, routeRelative, want)
 	}
-	if !isSocket(real + "/" + want) {
-		t.Fatal("no socket in the real directory")
-	}
+	assertReached(t, l)
 }
 
 // The cwd is reached through a symlink but $PWD names another directory. The
@@ -839,20 +800,19 @@ func TestACwdThroughASymlinkIsMatchedByRealPaths(t *testing.T) {
 		t.Fatalf("the premise: %d bytes is not long", len(p))
 	}
 	want := strings.TrimPrefix(p, link+"/")
-	r, rel := listenInChild(t, link, "/", p)
+	l := listenAt(t, real+"/"+want)
+	r, rel := dialInChild(t, link, "/", p)
 	if r != routeRelative || rel != want {
 		t.Fatalf("%s %q, want %s %q", r, rel, routeRelative, want)
 	}
-	if !isSocket(real + "/" + want) {
-		t.Fatal("no socket in the real directory")
-	}
+	assertReached(t, l)
 }
 
 // A symlink in the middle of the path, below the cwd: <cwd>/link/... where
 // link -> real. Cutting the cwd off gives "link/..." (descending through the
-// link, as the path does); either way the socket must be in the real
-// directory. The point is the place, not the spelling, which must not climb.
-func TestASymlinkInTheMiddleOfThePathStillLandsInTheRealDirectory(t *testing.T) {
+// link, as the path does); the spelling must not climb, and the dial reaches
+// the socket in the real directory.
+func TestASymlinkInTheMiddleOfThePathStillReachesTheRealDirectory(t *testing.T) {
 	t.Parallel()
 	d := tmpDir(t)
 	real, link := realAndLink(t, d)
@@ -860,13 +820,12 @@ func TestASymlinkInTheMiddleOfThePathStillLandsInTheRealDirectory(t *testing.T) 
 	if len(p) <= directMax {
 		t.Fatalf("the premise: %d bytes is not long", len(p))
 	}
-	r, rel := listenInChild(t, d, d, p)
+	l := listenAt(t, real+strings.TrimPrefix(p, link))
+	r, rel := dialInChild(t, d, d, p)
 	if r != routeRelative || strings.Contains(rel, "..") {
 		t.Fatalf("%s %q", r, rel)
 	}
-	if !isSocket(real + strings.TrimPrefix(p, link)) {
-		t.Fatal("no socket in the real directory")
-	}
+	assertReached(t, l)
 }
 
 // The path is in a sibling of the cwd, so the spelling climbs with "..": cwd
@@ -883,20 +842,19 @@ func TestAPathBesideTheCwdIsSpelledWithDotDot(t *testing.T) {
 	if len(p) <= directMax {
 		t.Fatalf("the premise: %d bytes is not long", len(p))
 	}
-	r, rel := listenInChild(t, cwd, cwd, p)
+	l := listenAt(t, p)
+	r, rel := dialInChild(t, cwd, cwd, p)
 	if r != routeRelative || !strings.HasPrefix(rel, "../../c/") {
 		t.Fatalf("%s %q", r, rel)
 	}
-	if !isSocket(p) {
-		t.Fatal("no socket at the path")
-	}
+	assertReached(t, l)
 }
 
 // A $PWD that names a directory other than the cwd must not be used: cut off
 // the path, it would spell the right subpath relative to the wrong directory.
-// Both directories have the same subtree here, so using $PWD would silently
-// create the socket in the cwd's copy. The socket must be where the path
-// points, reached by climbing out of the real cwd.
+// Both directories have the same subtree, with a decoy listener in the cwd's
+// copy: using $PWD would silently reach the decoy. The dial must reach the
+// listener where the path points, by climbing out of the real cwd.
 func TestAPWDThatIsNotTheCwdIsNotUsed(t *testing.T) {
 	t.Parallel()
 	d := tmpDir(t)
@@ -909,18 +867,19 @@ func TestAPWDThatIsNotTheCwdIsNotUsed(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(cwd+sub), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	r, rel := listenInChild(t, cwd, pwd, p)
+	l := listenAt(t, p)
+	decoy := listenAt(t, cwd+sub)
+	r, rel := dialInChild(t, cwd, pwd, p)
 	if r != routeRelative || !strings.HasPrefix(rel, "../two/") {
 		t.Fatalf("%s %q", r, rel)
 	}
-	if !isSocket(p) || exists(cwd+sub) {
-		t.Fatalf("socket at the path %v, in the cwd's copy %v", isSocket(p), exists(cwd+sub))
-	}
+	assertReached(t, l)
+	assertNothingAccepted(t, decoy)
 }
 
 // A cwd whose name is a byte prefix of the path's next component (cwd
 // <t>/ab, path <t>/abc/...) is not a prefix of the path: cutting bytes would
-// spell "c/..." and name <t>/ab/c/.... The spelling climbs instead.
+// spell "c/..." and reach a decoy at <t>/ab/c/.... The spelling climbs instead.
 func TestACwdThatIsOnlyABytePrefixIsNotCutOff(t *testing.T) {
 	t.Parallel()
 	d := tmpDir(t)
@@ -932,20 +891,25 @@ func TestACwdThatIsOnlyABytePrefixIsNotCutOff(t *testing.T) {
 	if len(p) <= directMax {
 		t.Fatalf("the premise: %d bytes is not long", len(p))
 	}
-	r, rel := listenInChild(t, cwd, cwd, p)
+	l := listenAt(t, p)
+	wrong := cwd + "/c" + strings.TrimPrefix(p, d+"/abc")
+	if err := os.MkdirAll(filepath.Dir(wrong), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	decoy := listenAt(t, wrong)
+	r, rel := dialInChild(t, cwd, cwd, p)
 	if r != routeRelative || !strings.HasPrefix(rel, "../abc/") {
 		t.Fatalf("%s %q", r, rel)
 	}
-	if !isSocket(p) || exists(cwd+"/c") {
-		t.Fatal("the socket is not at the path")
-	}
+	assertReached(t, l)
+	assertNothingAccepted(t, decoy)
 }
 
 // A relative spelling that starts with '@' (the cwd's subdirectory is named
 // "@d") gets "./" in front. Go's net package reads a leading '@' as an
-// abstract socket name on Linux: without the "./" the listen would succeed
-// with no file anywhere, and the socket would not be at the path. Checked on
-// every system, since the spelling is made the same way everywhere.
+// abstract socket name on Linux: without the "./" the dial would go to the
+// abstract name and fail (or reach whatever listens there). Checked on every
+// system, since the spelling is made the same way everywhere.
 func TestARelativeSpellingStartingWithAtIsNotAbstract(t *testing.T) {
 	t.Parallel()
 	d := tmpDir(t)
@@ -953,35 +917,26 @@ func TestARelativeSpellingStartingWithAtIsNotAbstract(t *testing.T) {
 	if len(p) <= directMax {
 		t.Fatalf("the premise: %d bytes is not long", len(p))
 	}
-	r, rel := listenInChild(t, d, d, p)
+	l := listenAt(t, p)
+	r, rel := dialInChild(t, d, d, p)
 	if r != routeRelative || !strings.HasPrefix(rel, "./@d/") {
 		t.Fatalf("%s %q", r, rel)
 	}
-	if !isSocket(p) {
-		t.Fatal("no socket at the path")
-	}
+	assertReached(t, l)
 }
 
 // The relative spelling is resolved against the cwd at the moment of the call,
 // and the cwd is shared by every thread, so another thread that changes it in
 // between sends the call to another directory. When the cwd is still changed
 // afterwards, relative.run must turn the result into errCwdChanged even though
-// the call itself succeeded: a listener in the wrong directory or a connection
-// to the wrong server must not reach the caller as if it were at their path.
-//
-// The change is made from inside the call (the function chdirs before it
-// listens / dials), standing in for another thread. Two directories with the
-// same subtree make the wrong directory one where the call succeeds:
-//
-//   - listen: the error comes back, the socket file is in the other directory
-//     and is left there (where it went is not known, so nothing is removed),
-//     and nothing appears at the given path;
-//   - dial: the error comes back, and the connection that did reach a listener
-//     in the other directory is closed, which that listener sees as end of
-//     file.
-//
-// Runs in a child process because it changes the cwd.
-func TestACwdChangedDuringARelativeCallDiscardsTheResult(t *testing.T) {
+// the call itself succeeded: a connection to the wrong server must not reach
+// the caller as if it were to their path. The change is made from inside the
+// call (the function chdirs before it dials), standing in for another thread,
+// and a listener at the same spelling in the other directory makes the wrong
+// call succeed. The connection that did reach it is closed, which that
+// listener sees as end of file. Runs in a child process because it changes the
+// cwd.
+func TestACwdChangedDuringARelativeDialDiscardsTheResult(t *testing.T) {
 	t.Parallel()
 	d := tmpDir(t)
 	one, two := d+"/one", d+"/two"
@@ -993,52 +948,29 @@ func TestACwdChangedDuringARelativeCallDiscardsTheResult(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(two+sub), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	l := listenAt(t, two+sub)
 	runChild(t, "TestChildRelativeWithTheCwdChangedMidway", one, "SOCKAT_PATH="+p, "SOCKAT_OTHER="+two)
-	if isSocket(p) || !isSocket(two+sub) {
-		t.Fatalf("socket at the path %v, in the other directory %v", isSocket(p), isSocket(two+sub))
+	l.SetDeadline(nowPlusGuard())
+	s, err := l.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.SetDeadline(nowPlusGuard())
+	if n, err := s.Read(make([]byte, 1)); n != 0 || err == nil {
+		t.Fatalf("the discarded connection is open: %d, %v", n, err)
 	}
 }
 
 func TestChildRelativeWithTheCwdChangedMidway(t *testing.T) {
 	asChild(t)
 	p, two := os.Getenv("SOCKAT_PATH"), os.Getenv("SOCKAT_OTHER")
-	one, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
 	dir, _, _ := splitPath(p)
 	rel := newRelative(p, dir)
 	if rel == nil || strings.Contains(rel.spelling, "..") {
 		t.Fatalf("the premise: a spelling below the cwd: %+v", rel)
 	}
-	_, err = rel.run(func(s string) (endpoint, error) {
-		if err := os.Chdir(two); err != nil {
-			t.Fatal(err)
-		}
-		return viaStd(opListen, s, false)
-	})
-	if !errors.Is(err, errCwdChanged) {
-		t.Fatalf("listen: %v, want errCwdChanged", err)
-	}
-	if !isSocket(two+"/"+rel.spelling) || isSocket(p) {
-		t.Fatal("listen: the socket is not where the changed cwd sent it")
-	}
-
-	// A listener in the other directory at the spelling of c.sock.
-	if err := os.Chdir(one); err != nil {
-		t.Fatal(err)
-	}
-	c := filepath.Dir(p) + "/c.sock"
-	crel := newRelative(c, dir)
-	if crel == nil {
-		t.Fatal("no relative spelling")
-	}
-	l, err := Listen(two + "/" + crel.spelling)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer l.Close()
-	_, err = crel.run(func(s string) (endpoint, error) {
+	_, err := rel.run(func(s string) (endpoint, error) {
 		if err := os.Chdir(two); err != nil {
 			t.Fatal(err)
 		}
@@ -1046,41 +978,5 @@ func TestChildRelativeWithTheCwdChangedMidway(t *testing.T) {
 	})
 	if !errors.Is(err, errCwdChanged) {
 		t.Fatalf("dial: %v, want errCwdChanged", err)
-	}
-	l.SetDeadline(time.Now().Add(guard))
-	s, err := l.Accept()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	s.SetDeadline(time.Now().Add(guard))
-	if n, err := s.Read(make([]byte, 1)); n != 0 || err == nil {
-		t.Fatalf("the discarded connection is open: %d, %v", n, err)
-	}
-}
-
-// A safe place for the symlink must be a directory. A file of ours with no
-// group / other write bits (or a symlink to one) passes the mode and owner
-// test of onlyWeCanReplace, but nothing can be created in it; it is not a
-// place at all, so safeBase says no and the order moves on without trying it.
-func TestASafePlaceMustBeADirectory(t *testing.T) {
-	t.Parallel()
-	d := tmpDir(t)
-	if !safeBase(d) {
-		t.Fatalf("%s (our 0700 directory): want safe", d)
-	}
-	f := d + "/file"
-	if err := os.WriteFile(f, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if safeBase(f) {
-		t.Errorf("%s (our 0600 file): want not safe", f)
-	}
-	link := d + "/link"
-	if err := os.Symlink(f, link); err != nil {
-		t.Fatal(err)
-	}
-	if safeBase(link) {
-		t.Errorf("%s (a symlink to our file): want not safe", link)
 	}
 }

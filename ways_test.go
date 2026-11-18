@@ -5,10 +5,12 @@ package sockat
 // Every route of the system, each forced by its inputs and run through the
 // same checks. The routes are listed per system by ways (os_linux_test.go,
 // os_darwin_test.go): each way is one socket path and the route order's inputs
-// chosen so that a listen and a dial there take one known route. One way is a
-// socket near the cwd (the relative spelling), so the tests that go through
-// every way run in a child process whose cwd is a temporary directory
-// (inTmpCwd).
+// chosen so that a dial there takes one known route, and a listen too where
+// the route is one a listen takes (the central route and the path itself). A
+// dial's fallback routes are not a listen's: there the listener is made by
+// listenAt. One way is a socket near the cwd (the relative spelling), so the
+// tests that go through every way run in a child process whose cwd is a
+// temporary directory (inTmpCwd).
 
 import (
 	"net"
@@ -30,7 +32,9 @@ type way struct {
 	// cfg is the route order's inputs; nil for the path the net package takes
 	// (run, through the public order).
 	cfg *config
-	// listen and dial are the routes a listen and a dial there must take.
+	// listen is the route a listen there must take; "" where the way is a
+	// dial's fallback only (the listener is then made by listenAt). dial is
+	// the route a dial must take.
 	listen, dial route
 }
 
@@ -48,7 +52,7 @@ func (w way) sibling(first byte) string {
 	return dir + "/" + string(first) + name[1:]
 }
 
-// usable reports whether the way can run here: the thread-cwd route only
+// usable reports whether the way can run here: the thread-cwd means only
 // where the system allows a thread a cwd of its own.
 func (w way) usable() bool {
 	return threadCwdAvailable() || (w.listen != routeThreadCwd && w.dial != routeThreadCwd)
@@ -56,6 +60,9 @@ func (w way) usable() bool {
 
 func (w way) listenOn(t *testing.T) *net.UnixListener {
 	t.Helper()
+	if w.listen == "" {
+		return listenAt(t, w.path)
+	}
 	ep, r, err := w.run(opListen)
 	l := must{t}.listener(ep, err)
 	if r != w.listen {
@@ -77,12 +84,13 @@ func (w way) dialTo(t *testing.T) *net.UnixConn {
 	return c
 }
 
-// bases are the places for the symlink of the way, which must be left empty.
-func (w way) bases() []string {
+// places are the places of the way (for D, and for a dial's symlink), which
+// must be left empty.
+func (w way) places() []string {
 	if w.cfg == nil {
 		return nil
 	}
-	return w.cfg.tmpBases
+	return append(slices.Clone(w.cfg.dBases), w.cfg.tmpBases...)
 }
 
 // On every route: the socket is at the given path, a dial the same way reaches
@@ -90,8 +98,7 @@ func (w way) bases() []string {
 // the net package's types in full working order (deadlines work, so they are
 // registered with the runtime's poller), the addresses the kernel reports can
 // be read without a panic, the server sees this process as the peer (no route
-// connects from another process), and nothing is left in the places for the
-// symlink.
+// connects from another process), and nothing is left in the places.
 func TestEveryRouteListensAndDialsAtThePath(t *testing.T) {
 	t.Parallel()
 	if !inTmpCwd(t) {
@@ -118,7 +125,7 @@ func TestEveryRouteListensAndDialsAtThePath(t *testing.T) {
 			}
 			pingConns(t, s, c2)
 			t.Logf("listener %v, conn local %v remote %v, accepted local %v remote %v", l.Addr(), c2.LocalAddr(), c2.RemoteAddr(), s.LocalAddr(), s.RemoteAddr())
-			for _, b := range w.bases() {
+			for _, b := range w.places() {
 				assertEmpty(t, b)
 			}
 		})
@@ -144,12 +151,13 @@ func relisten(t *testing.T, l *net.UnixListener, n int) {
 // A dial must not wait for room in a full backlog on any route, as the net
 // package's own does not: its connect is nonblocking, and Linux answers
 // EAGAIN where a blocking connect would sleep until the listener accepts
-// (macOS answers ECONNREFUSED either way). Each route must hand the net package
-// the spelling, or adopt its own socket, so that this holds: a route that
-// connected a blocking socket of its own would hang here. With the backlog
-// shrunk to 1 and filled (Linux lets backlog + 1 connections wait, macOS
-// fewer), the next dial fails at once with that error, and keeps failing while
-// it stays full; every dial that got in took the way's route.
+// (macOS answers ECONNREFUSED either way). Every route hands the net package
+// a spelling, from the caller's goroutine or a thread of its own, so this
+// holds; a route that connected a blocking socket of its own would hang here.
+// With the backlog shrunk to 1 and filled (Linux lets backlog + 1 connections
+// wait, macOS fewer), the next dial fails at once with that error, and keeps
+// failing while it stays full; every dial that got in took the way's route,
+// and the places are empty afterwards.
 func TestADialFailsAtOnceOnAFullBacklogOnEveryRoute(t *testing.T) {
 	t.Parallel()
 	if !inTmpCwd(t) {
@@ -195,23 +203,21 @@ func TestADialFailsAtOnceOnAFullBacklogOnEveryRoute(t *testing.T) {
 			}
 			wantErrno(t, "dial to a full backlog", full, fullBacklog)
 			wantErrno(t, "dial to a still full backlog", dial().err, fullBacklog)
+			for _, b := range w.places() {
+				assertEmpty(t, b)
+			}
 		})
 	}
 }
 
-// earlierThanSymlink: the routes that come before the symlink route in the
-// order (and the symlink route itself, before a further place). A base added
-// after the way's own places is never used by them, so it must stay untouched
-// when their call fails.
-var earlierThanSymlink = []route{routeProc, routeRelative, routeSymlinkDir, routeSymlinkFile}
-
 // On every route, a listen / dial that fails is the result: the kernel's
 // error for the path (EADDRINUSE for an existing file, ENOENT for a missing
 // socket, ECONNREFUSED for a socket nobody listens on) comes back as it is,
-// and the order does not move on. Where a later route exists, it is a place
-// for the symlink added after the way's own, and it stays untouched: no link
-// was even created there. The siblings have names of the same length as the
-// way's path, so they take the same route.
+// and the order does not move on: a place for a dial's symlink added after
+// the way's own stays untouched (no link was even created there, no later
+// route was tried), and the way's places are empty (D, R and links are
+// removed after a failure too). The siblings have names of the same length as
+// the way's path, so they take the same route.
 func TestAFailureOnEveryRouteIsReturnedAndNotRetried(t *testing.T) {
 	t.Parallel()
 	if !inTmpCwd(t) {
@@ -234,16 +240,18 @@ func TestAFailureOnEveryRouteIsReturnedAndNotRetried(t *testing.T) {
 			}
 			stale := w.sibling('z')
 			staleSocket(t, stale)
-			cases := []struct {
+			type failure struct {
 				what  string
 				o     op
 				path  string
 				errno syscall.Errno
-				r     route
-			}{
-				{"listen on an existing file", opListen, existing, syscall.EADDRINUSE, w.listen},
-				{"dial a missing socket", opDial, w.sibling('m'), syscall.ENOENT, w.dial},
-				{"dial a socket nobody listens on", opDial, stale, syscall.ECONNREFUSED, w.dial},
+			}
+			cases := []failure{
+				{"dial a missing socket", opDial, w.sibling('m'), syscall.ENOENT},
+				{"dial a socket nobody listens on", opDial, stale, syscall.ECONNREFUSED},
+			}
+			if w.listen != "" {
+				cases = append(cases, failure{"listen on an existing file", opListen, existing, syscall.EADDRINUSE})
 			}
 			for _, c := range cases {
 				markUntouched(t, later)
@@ -251,11 +259,11 @@ func TestAFailureOnEveryRouteIsReturnedAndNotRetried(t *testing.T) {
 				ww.path = c.path
 				_, _, err := ww.run(c.o)
 				wantErrno(t, c.what, err, c.errno)
-				if slices.Contains(earlierThanSymlink, c.r) {
+				if w.cfg != nil {
 					assertUntouched(t, later)
 				}
 			}
-			for _, b := range w.bases() {
+			for _, b := range w.places() {
 				assertEmpty(t, b)
 			}
 		})
@@ -263,13 +271,14 @@ func TestAFailureOnEveryRouteIsReturnedAndNotRetried(t *testing.T) {
 }
 
 // No route changes the cwd of the process: the relative spelling only reads
-// it, the thread-cwd route changes the cwd of one thread, which is then
+// it, the thread-cwd means changes the cwd of one thread, which is then
 // discarded, and the others never look at it. Watcher goroutines compare
 // getcwd(3) and (st_dev, st_ino) of "." with the starting values the whole
 // time workers listen and dial on every route, each on its own set of paths.
 // Afterwards a burst of goroutines locked to threads checks the same: had a
-// thread whose cwd the thread-cwd route changed been handed back to the
-// runtime, a goroutine scheduled on it would see the socket's directory.
+// thread whose cwd the thread-cwd means changed been handed back to the
+// runtime, a goroutine scheduled on it would find that cwd (D, removed by
+// then).
 func TestNoRouteChangesTheProcessCwd(t *testing.T) {
 	t.Parallel()
 	if !inTmpCwd(t) {
@@ -311,28 +320,43 @@ func TestNoRouteChangesTheProcessCwd(t *testing.T) {
 
 	var workers sync.WaitGroup
 	for range 4 {
-		ws := ways(t)
+		var ws []way
+		for _, w := range ways(t) {
+			if !w.usable() {
+				continue
+			}
+			if w.listen == "" {
+				listenAt(t, w.path)
+			}
+			ws = append(ws, w)
+		}
 		workers.Go(func() {
 			for round := range 5 {
 				for _, w := range ws {
-					if !w.usable() {
-						continue
-					}
-					l, r, err := w.run(opListen)
-					if err != nil || r != w.listen {
-						t.Errorf("%s round %d: listen %s, %v", w.name, round, r, err)
-						return
+					var l endpoint
+					if w.listen != "" {
+						var r route
+						var err error
+						l, r, err = w.run(opListen)
+						if err != nil || r != w.listen {
+							t.Errorf("%s round %d: listen %s, %v", w.name, round, r, err)
+							return
+						}
 					}
 					c, r, err := w.run(opDial)
-					l.Close()
+					if l != nil {
+						l.Close()
+					}
 					if err != nil || r != w.dial {
 						t.Errorf("%s round %d: dial %s, %v", w.name, round, r, err)
 						return
 					}
 					c.Close()
-					// A long path's listener leaves its socket file (a short
-					// one's removes it): clear it for the next round.
-					os.Remove(w.path)
+					if l != nil {
+						// A long path's listener leaves its socket file (a
+						// short one's removes it): clear it for the next round.
+						os.Remove(w.path)
+					}
 				}
 			}
 		})

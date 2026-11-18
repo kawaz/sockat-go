@@ -27,6 +27,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -423,4 +424,64 @@ func wantOpError(t *testing.T, what string, o op, path string, err error, errno 
 	if oe.Addr == nil || oe.Addr.String() != path {
 		t.Fatalf("%s: Addr %v, want the caller's path %q", what, oe.Addr, path)
 	}
+}
+
+// openTestDir opens dir as the routes open a socket's directory, closed at
+// the end of the test.
+func openTestDir(t *testing.T, dir string) *os.File {
+	t.Helper()
+	f, err := openDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { f.Close() })
+	return f
+}
+
+// listenAt makes a listener whose socket file is at p, however long p is and
+// whatever routes a listen has here: bound at a short path in /tmp (the net
+// package itself) and renamed to p. p must be on the same file system as
+// /tmp. The listener does not remove anything on Close.
+func listenAt(t *testing.T, p string) *net.UnixListener {
+	t.Helper()
+	short := tmpDir(t) + "/s"
+	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: short, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.SetUnlinkOnClose(false)
+	t.Cleanup(func() { l.Close() })
+	if err := os.Rename(short, p); err != nil {
+		t.Fatal(err)
+	}
+	return l
+}
+
+// longListen reports whether a listen of a long path has a route here: the
+// central route has a means (a thread cwd on Linux and macOS, /proc on Linux,
+// bindat on FreeBSD). NetBSD, OpenBSD and illumos have none, and Go has no
+// fork: there a listen of a long path is ENAMETOOLONG.
+func longListen() bool {
+	switch runtime.GOOS {
+	case "linux", "android", "darwin", "ios", "freebsd":
+		return true
+	}
+	return false
+}
+
+// listenPublic is Listen(p) where a listen of a long path has a route; where
+// it has none, it checks that Listen(p) is ENAMETOOLONG and makes the
+// listener with listenAt instead.
+func listenPublic(t *testing.T, p string) *net.UnixListener {
+	t.Helper()
+	l, err := Listen(p)
+	if len(p) > directMax && !longListen() {
+		wantErrno(t, "listen of a long path with no means", err, syscall.ENAMETOOLONG)
+		return listenAt(t, p)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	return l
 }

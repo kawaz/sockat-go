@@ -48,14 +48,17 @@ type endpoint interface{ Close() error }
 type route string
 
 const (
-	routeDirect      route = "direct"       // the path itself, through the standard library
+	routeDirect route = "direct" // the path itself, through the standard library
+	// The central route: R/<name> relative to D.
+	routeThreadCwd route = "thread-cwd" // a thread whose own cwd is D (Linux, macOS)
+	routeProcD     route = "proc-d"     // /proc/self/fd/<D>/R/<name> (Linux)
+	routeAt        route = "at"         // bindat(2) / connectat(2) on D (FreeBSD)
+	// The fallback routes of a dial.
 	routeProc        route = "proc"         // /proc/self/fd/<dirfd>/<name> (Linux)
 	routeRelative    route = "relative"     // the path relative to the cwd
-	routeSymlinkDir  route = "symlink-dir"  // through a symlink to the directory (bind)
-	routeSymlinkFile route = "symlink-file" // through a symlink to the file (connect)
-	routeHeldLink    route = "held-link"    // a symlink in a directory of our own held by its fd (connect, Linux)
-	routeAt          route = "at"           // bindat(2) / connectat(2) (FreeBSD)
-	routeThreadCwd   route = "thread-cwd"   // a thread whose own cwd is the directory
+	routeSymlinkFile route = "symlink-file" // through a symlink to the file
+	routeHeldLink    route = "held-link"    // a symlink in a directory of our own held by its fd (Linux)
+	routeConnectAt   route = "connectat"    // connectat(2) on the socket's directory (FreeBSD)
 )
 
 // directMax is the longest path the standard library accepts: sun_path less
@@ -187,8 +190,11 @@ func errNameTooLong(o op) error {
 // config is what the route order reads from the environment, made explicit so
 // the tests can vary it without touching the process environment.
 type config struct {
-	// tmpBases is where the temporary symlink may go, in the order tried:
-	// TMPDIR when it is set to an absolute path, then /tmp.
+	// dBases is where D may go, in the order tried: ${TMPDIR:-/tmp} (a
+	// relative one too), then /tmp. The socket's directory comes after them.
+	dBases []string
+	// tmpBases is where the temporary symlink of a dial's fallback may go, in
+	// the order tried: TMPDIR when it is set to an absolute path, then /tmp.
 	tmpBases []string
 	// procSelfFD is where the kernel lists the fds of the process (Linux).
 	// The tests point it elsewhere to stand in for a system without /proc.
@@ -214,7 +220,11 @@ func configFromTmpdir(tmpdir string) *config {
 		bases = append(bases, tmpdir)
 	}
 	bases = append(bases, "/tmp")
-	return &config{tmpBases: bases, procSelfFD: "/proc/self/fd", threadCwd: true}
+	dBases := []string{"/tmp"}
+	if tmpdir != "" && !sameComponents(tmpdir, "/tmp") {
+		dBases = []string{tmpdir, "/tmp"}
+	}
+	return &config{dBases: dBases, tmpBases: bases, procSelfFD: "/proc/self/fd", threadCwd: true}
 }
 
 // sameComponents reports whether a and b are the same spelling component by

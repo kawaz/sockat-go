@@ -80,8 +80,9 @@ func pastProc(t *testing.T) (string, *net.UnixListener) {
 // working order, the server sees this process as the peer), and the place is
 // empty afterwards (the symlink and the directory are removed). The same for
 // a path whose directory part is long (600 bytes): the spelling does not
-// depend on it. A name that fits behind /proc takes the /proc route and the
-// place is not touched at all.
+// depend on it. A name that fits behind /proc/self/fd/<n>/ (85 bytes: too
+// long for the central route's /proc form, which also holds R/) takes the
+// /proc route and the place is not touched at all.
 func TestADialThroughAnUnsafePlaceTakesTheFdHeldForm(t *testing.T) {
 	t.Parallel()
 	base := unsafePlace(t)
@@ -117,8 +118,8 @@ func TestADialThroughAnUnsafePlaceTakesTheFdHeldForm(t *testing.T) {
 	ping(t, dl, c)
 	assertEmpty(t, base)
 
-	fits := nest(t, tmpDir(t), 300, "s.sock")
-	fl, _ := listenLong(t, fits, procCfg())
+	fits := nest(t, tmpDir(t), 300, strings.Repeat("f", 85))
+	fl := listenAt(t, fits)
 	markUntouched(t, base)
 	c, r = dialLong(t, fits, procCfg(base))
 	if r != routeProc {
@@ -220,47 +221,40 @@ func TestThePlacesAreTriedInOrderEachInItsForm(t *testing.T) {
 
 // Without /proc (procSelfFD pointed at an empty directory, or at nothing)
 // there is no fd-held form: an unsafe place is passed over without anything
-// created in it (its mtime is unchanged), as on the systems without /proc, and
-// the order goes on to the thread-cwd route (ENAMETOOLONG where the system
-// refuses it).
+// created in it (its mtime is unchanged), as on the systems without /proc;
+// with no other way left the dial is ENAMETOOLONG.
 func TestWithoutProcAnUnsafePlaceIsPassedOverUntouched(t *testing.T) {
 	t.Parallel()
 	empty := tmpDir(t) + "/proc/self/fd"
 	if err := os.MkdirAll(empty, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	p, l := pastProc(t)
+	p, _ := pastProc(t)
 	for _, none := range []string{empty, noProc} {
 		base := unsafePlace(t)
 		markUntouched(t, base)
 		cfg := procCfg(base)
 		cfg.procSelfFD = none
-		ep, r, err := runLong(opDial, p, cfg)
-		if wantLastRoute(t, "dial with "+none, r, err) {
-			c := ep.(*net.UnixConn)
-			ping(t, l, c)
-			c.Close()
-		}
+		_, _, err := runLong(opDial, p, cfg)
+		wantErrno(t, "dial with "+none, err, syscall.ENAMETOOLONG)
 		assertUntouched(t, base)
 	}
 }
 
-// A listen never takes the fd-held form (its spelling,
-// /proc/self/fd/<fd>/s/<name>, would be longer than the /proc route's, which
-// was tried first) and creates nothing in an unsafe place: the 95-byte name
-// goes on to the thread-cwd route, and a name that fits behind /proc takes
-// the /proc route.
+// A listen never takes the fd-held form, or any of a dial's fallbacks: it
+// creates nothing in a place for a dial's symlink, unsafe or not. With the
+// thread cwd off, a 95-byte name is too long for the central route's /proc
+// form, so the listen is ENAMETOOLONG; a short name takes that form (D goes in
+// the socket's directory here, procCfg giving no place for D).
 func TestAListenCreatesNothingInAnUnsafePlace(t *testing.T) {
 	t.Parallel()
 	base := unsafePlace(t)
 	markUntouched(t, base)
 	d := tmpDir(t)
-	ep, r, err := runLong(opListen, d+"/"+strings.Repeat("n", 95), procCfg(base))
-	if wantLastRoute(t, "listen on a 95-byte name", r, err) {
-		ep.Close()
-	}
-	_, r = listenLong(t, d+"/s"+strings.Repeat("x", 60), procCfg(base))
-	if r != routeProc {
+	_, _, err := runLong(opListen, d+"/"+strings.Repeat("n", 95), procCfg(base))
+	wantErrno(t, "listen on a 95-byte name", err, syscall.ENAMETOOLONG)
+	_, r := listenLong(t, d+"/s"+strings.Repeat("x", 60), procCfg(base))
+	if r != routeProcD {
 		t.Fatalf("listen on a short name: %s", r)
 	}
 	assertUntouched(t, base)
@@ -311,63 +305,8 @@ func TestCreateHeldDirSkipsTakenNamesAndGivesUpAfter16(t *testing.T) {
 	}
 }
 
-// isOurPrivateDir is the check that a directory opened by name is the one
-// just created and not one swapped in for it by someone who can write to the
-// place: a directory, owned by the effective uid, with no permission for
-// group and others (mkdir 0700 under any umask gives that; the route then
-// chmods it to 0700). Checked on fstat of real entries: our 0700, 0500 and
-// 01700 directories pass; a directory with group or other bits (0755, 0711,
-// 0770), a file of mode 0700, and (as root, chown) a 0700 directory of another
-// user do not; nor does our directory for another uid.
-func TestIsOurPrivateDirTakesOnlyOurOwnPrivateDirectory(t *testing.T) {
-	t.Parallel()
-	d := tmpDir(t)
-	us := uint32(os.Geteuid())
-	fstat := func(p string) *unix.Stat_t {
-		t.Helper()
-		fd, err := unix.Open(p, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer unix.Close(fd)
-		var st unix.Stat_t
-		if err := unix.Fstat(fd, &st); err != nil {
-			t.Fatal(err)
-		}
-		return &st
-	}
-	if !isOurPrivateDir(fstat(mkdirMode(t, d+"/ours", 0o700)), us) {
-		t.Fatal("our 0700 directory: want true")
-	}
-	if isOurPrivateDir(fstat(d+"/ours"), us+1) {
-		t.Fatal("our 0700 directory for another uid: want false")
-	}
-	for _, mode := range []os.FileMode{0o500, os.ModeSticky | 0o700} {
-		if !isOurPrivateDir(fstat(mkdirMode(t, fmt.Sprintf("%s/ok%o", d, mode), mode)), us) {
-			t.Errorf("our directory of mode %v: want true", mode)
-		}
-	}
-	for _, mode := range []os.FileMode{0o755, 0o711, 0o770} {
-		if isOurPrivateDir(fstat(mkdirMode(t, fmt.Sprintf("%s/m%o", d, mode), mode)), us) {
-			t.Errorf("a directory of mode %v: want false", mode)
-		}
-	}
-	if err := os.WriteFile(d+"/file", nil, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if isOurPrivateDir(fstat(d+"/file"), us) {
-		t.Error("a file of mode 0700: want false")
-	}
-	if us == 0 {
-		theirs := mkdirMode(t, d+"/theirs", 0o700)
-		if err := os.Chown(theirs, 65534, -1); err != nil {
-			t.Fatal(err)
-		}
-		if isOurPrivateDir(fstat(theirs), us) {
-			t.Error("another user's 0700 directory: want false")
-		}
-	}
-}
+// isOurPrivateDir, the check made on the held directory as on D, is pinned by
+// TestIsOurPrivateDirTakesOnlyOurOwnPrivateDirectory (central_test.go).
 
 // A umask that takes the owner's bits makes mkdir(0700) create a directory
 // the owner cannot fully use: 0277 gives 0500 (no write), 0477 gives 0300 (no

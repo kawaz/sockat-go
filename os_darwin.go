@@ -10,24 +10,31 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// runLong is the routes for a path longer than directMax on macOS: the POSIX
-// order (posixRun).
+// fallbackDial is a dial's fallback routes on macOS: the path relative to the
+// cwd, then symlinks to the file in safe places.
 //
 // Design rationale: SPEC also has the widened sockaddr here (sun_len and the
 // address length past sizeof(struct sockaddr_un), up to 253 bytes of path).
-// Go cannot hand such a socket over intact: net.FileListener refuses a socket
-// bound that way (getsockname reports more than the syscall package takes:
-// EINVAL), and net.FileConn on a socket connected that way to a peer bound
-// that way leaves RemoteAddr() a nil net.Addr, whose String() panics, where
-// net.DialUnix would report the spelling. What is lost is a dial with no
-// usable place for the symlink to a file name of 104 to 253 bytes.
-func runLong(o op, path string, cfg *config) (endpoint, route, error) {
-	dir, name, err := splitPath(path)
-	if err != nil {
-		return nil, "", err
-	}
-	return posixRun(o, path, dir, name, nil, cfg)
+// Go cannot hand such a socket over intact: net.FileConn on a socket connected
+// that way to a peer bound that way leaves RemoteAddr() a nil net.Addr, whose
+// String() panics, where net.DialUnix would report the spelling. What is lost
+// is a dial that the central route cannot make (no thread cwd) with no usable
+// place for the symlink, to a file name of 104 to 253 bytes.
+func fallbackDial(path, dir, _ string, _ *os.File, cfg *config) (endpoint, route, error) {
+	return posixFallbackDial(path, dir, true, cfg)
 }
+
+// procFDUsableFor: no /proc here.
+func procFDUsableFor(*os.File, string) bool { return false }
+
+// threadCwdPossible: __pthread_fchdir is tried (threadChdir tells when the
+// kernel lacks it).
+func threadCwdPossible() bool { return true }
+
+// dOpenFlags is how D is opened: O_SEARCH, which needs only search permission
+// (a umask of 0477 leaves 0300), and gives an fd fchmod(2) and
+// __pthread_fchdir take.
+const dOpenFlags = unix.O_SEARCH | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
 
 // openDir opens dir to serve as the cwd of the thread-cwd route: O_SEARCH,
 // which needs only search permission on the directory, the same as a plain
@@ -76,3 +83,10 @@ func threadChdir(dirfd int) error {
 
 // heldLinkRoute needs /proc: not here.
 func heldLinkRoute(string, string, string) (endpoint, error) { return nil, errUnusable }
+
+// dOpenFlagsProc: no /proc here, so as without it.
+const dOpenFlagsProc = dOpenFlags
+
+// dOpenFlagsRetry is how D is opened when the kernel refuses O_SEARCH on a
+// directory (EISDIR / EINVAL), as openDir does for the socket's directory.
+const dOpenFlagsRetry = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC

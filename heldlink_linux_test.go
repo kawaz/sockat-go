@@ -34,6 +34,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -540,4 +541,75 @@ func TestChildHeldLinkUnderAKillingSeccompFilter(t *testing.T) {
 	}
 	ping(t, l, c)
 	assertEmpty(t, base)
+}
+
+// A directory swapped in for the route's between its mkdir and its open
+// (someone who can write to the place renames ours away and puts theirs, with
+// their own "s" in it, at the name) must neither be used nor be touched: the
+// route returns errUnusable, connects nowhere, and leaves that directory and
+// everything in it as it was. The swap is stood in for by handing heldLinkVia
+// a directory that fails the check: one of ours with group / other bits (any
+// user), and one of another user (root only, chown).
+func TestASwappedInDirectoryAndWhatIsInItAreLeftAlone(t *testing.T) {
+	t.Parallel()
+	p, l := pastProc(t)
+	cases := []struct {
+		name  string
+		mode  os.FileMode
+		owner int
+	}{
+		{"group and other bits", 0o777, -1},
+		{"another user", 0o700, 65534},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if c.owner >= 0 && os.Geteuid() != 0 {
+				t.Skip("only root can create a directory of another user")
+			}
+			base := unsafePlace(t)
+			swapped := base + "/" + linkPrefix + "swappedin0"
+			if err := os.Mkdir(swapped, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			theirs := swapped + "/" + heldLinkName
+			if err := os.Symlink("/their/target", theirs); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(swapped+"/other", []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if c.owner >= 0 {
+				if err := os.Lchown(theirs, c.owner, -1); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chown(swapped, c.owner, -1); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Chmod(swapped, c.mode); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { os.Chmod(swapped, 0o700) })
+
+			_, err := heldLinkVia(base, p, "/proc/self/fd", func(string) (string, error) { return swapped, nil })
+			if !errors.Is(err, errUnusable) {
+				t.Fatalf("%v, want errUnusable", err)
+			}
+			if got, err := os.Readlink(theirs); err != nil || got != "/their/target" {
+				t.Fatalf("their %s: %q, %v (removed or replaced)", heldLinkName, got, err)
+			}
+			if b, err := os.ReadFile(swapped + "/other"); err != nil || string(b) != "x" {
+				t.Fatalf("their other file: %q, %v", b, err)
+			}
+			fi, err := os.Lstat(swapped)
+			if err != nil || !fi.IsDir() || fi.Mode().Perm() != c.mode {
+				t.Fatalf("the swapped-in directory: %v, %v", fi, err)
+			}
+			l.SetDeadline(time.Now())
+			if s, err := l.Accept(); err == nil {
+				s.Close()
+				t.Fatal("something connected through the swapped-in directory")
+			}
+		})
+	}
 }

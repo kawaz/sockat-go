@@ -1058,3 +1058,29 @@ func TestChildRelativeWithTheCwdChangedMidway(t *testing.T) {
 		t.Fatalf("the discarded connection is open: %d, %v", n, err)
 	}
 }
+
+// A safe place for the symlink must be a directory. A file of ours with no
+// group / other write bits (or a symlink to one) passes the mode and owner
+// test of onlyWeCanReplace, but nothing can be created in it; it is not a
+// place at all, so safeBase says no and the order moves on without trying it.
+func TestASafePlaceMustBeADirectory(t *testing.T) {
+	t.Parallel()
+	d := tmpDir(t)
+	if !safeBase(d) {
+		t.Fatalf("%s (our 0700 directory): want safe", d)
+	}
+	f := d + "/file"
+	if err := os.WriteFile(f, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if safeBase(f) {
+		t.Errorf("%s (our 0600 file): want not safe", f)
+	}
+	link := d + "/link"
+	if err := os.Symlink(f, link); err != nil {
+		t.Fatal(err)
+	}
+	if safeBase(link) {
+		t.Errorf("%s (a symlink to our file): want not safe", link)
+	}
+}

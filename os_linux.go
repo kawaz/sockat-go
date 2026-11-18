@@ -117,8 +117,19 @@ const heldLinkName = "s"
 // A bind never takes this: its spelling would be <procSelfFD>/<fd>/s/<name>,
 // longer than the /proc route's, which has been tried already. errUnusable
 // when /proc cannot be used or a step above fails; what was made is removed
-// first.
+// first. Only what this made is removed: the symlink "s" once symlinkat(2)
+// made it, the directory once it passed the check of step 2. A directory
+// swapped in is left alone with whatever is in it.
 func heldLinkRoute(base, path, procSelfFD string) (endpoint, error) {
+	return heldLinkVia(base, path, procSelfFD, func(base string) (string, error) {
+		return createHeldDir(base, randomName)
+	})
+}
+
+// heldLinkVia is heldLinkRoute with step 1 (create the directory, return its
+// path) given as mkdir, so the tests can hand over a directory standing in for
+// one swapped in between the mkdir and the open.
+func heldLinkVia(base, path, procSelfFD string, mkdir func(base string) (string, error)) (endpoint, error) {
 	target, ok := absTarget(path)
 	if !ok {
 		return nil, errUnusable
@@ -128,7 +139,7 @@ func heldLinkRoute(base, path, procSelfFD string) (endpoint, error) {
 	if !procFDUsable(base, procSelfFD) {
 		return nil, errUnusable
 	}
-	dirPath, err := createHeldDir(base, randomName)
+	dirPath, err := mkdir(base)
 	if err != nil {
 		return nil, errUnusable
 	}

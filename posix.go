@@ -297,7 +297,7 @@ func safeBase(base string) bool {
 	if err := unix.Stat(base, &st); err != nil {
 		return false
 	}
-	return onlyWeCanReplace(uint32(st.Mode), st.Uid, uint32(os.Geteuid()))
+	return st.Mode&unix.S_IFMT == unix.S_IFDIR && onlyWeCanReplace(uint32(st.Mode), st.Uid, uint32(os.Geteuid()))
 }
 
 // onlyWeCanReplace reports whether, in a directory of mode owned by owner,

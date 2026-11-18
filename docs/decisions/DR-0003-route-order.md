@@ -17,7 +17,7 @@
 | macOS | 相対パス → symlink → スレッド cwd |
 | NetBSD / OpenBSD / illumos / その他 | 相対パス → symlink |
 
-- 各経路のやり方・使える条件・相対パスの作り方・symlink の置き場と名前と安全条件と片付けは SPEC のまま
+- 各経路のやり方・使える条件・相対パスの作り方・symlink の置き場と名前と安全条件 (ディレクトリであること、sticky か自分専用) と片付けは SPEC のまま
 - 経路が実際に bind / connect して失敗したら、そのエラーを返し、次の経路を試さない。次へ進むのは経路自体が使えない時だけ (SPEC)
 - symlink の名前の乱数は `crypto/rand` (OS の安全な乱数)
 - 最後の経路まで使えなければ、ディレクトリを開いてから `ENAMETOOLONG` (ディレクトリが無ければ `ENOENT`)

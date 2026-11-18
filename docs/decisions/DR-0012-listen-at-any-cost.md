@@ -19,6 +19,7 @@
 | 既定の経路で届いた時 | `standard` は `None`、他の経路は `Respelled` |
 
 - 経路は親パッケージ `sockat` の非公開の関数にあり、`internal/anyhook` の関数の変数を通して `atanycost` に渡す (親パッケージの `init` が入れる)
+- FreeBSD では symlink が届かせる範囲が無い: symlink の綴り `<置き場>/sockat.XXXXXXXXXX/<名前>` は at の綴り `R/<名前>` より必ず長く、at は FreeBSD で常に使える (symlink が効くのは、長さでなく手段が使えない時だけ)
 
 ## 理由
 

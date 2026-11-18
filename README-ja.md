@@ -59,6 +59,7 @@ if res.Level == atanycost.SharedSymlink {
 
 - `sockat.Listen` と同じ経路を試し、`ENAMETOOLONG` の時だけ置き場の symlink (ソケットのディレクトリを指す、`<置き場>/sockat.XXXXXXXXXX/<ファイル名>`、bind の後すぐ消す) を試す。置き場は `XDG_RUNTIME_DIR`・`TMPDIR`・`/tmp` のうち、自分だけが書ける所を先に、無ければ共有の所 (sticky の `/tmp` 等)
 - `res.Level` は通った経路で失ったもの ([SPEC の「失ったものの段階」](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#失ったものの段階))。値に大小は無い (`Forked` と `SharedSymlink` はどちらも `Respelled` を含むが互いを含まない)。値は将来増えうる。知らない値は「標準ではない (何かを失った、中身は分からない)」とだけ読む
+- FreeBSD では at が常に使え、symlink の綴りは at の綴りより必ず長いので、`atanycost.Listen` が `sockat.Listen` より遠くに届くことは無い
 - `res.Route` は通った経路の名前、`res.Skipped` はそれより前に試して使えなかった経路の並び (試した順) と理由。どちらも診断用 (ログ等) で、中身は約束しない
 
 | `Level` | 失ったもの |

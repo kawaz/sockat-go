@@ -70,8 +70,10 @@ jobs:
         with:
           usesh: true
           prepare: /usr/sbin/pkg_add go
+          # pkgsrc installs each release under /usr/pkg/go1NN; take the newest.
           run: |
-            export PATH="$(ls -d /usr/pkg/go*/bin | sort -V | tail -1):$PATH"
+            export PATH="$(ls -d /usr/pkg/go1*/bin | tail -1):/usr/pkg/bin:$PATH"
+            go version
             go test -count=1 ./...
 
   openbsd:
@@ -98,7 +100,8 @@ jobs:
           # The official illumos build of the latest Go release.
           prepare: |
             v=$(curl -fsSL 'https://go.dev/VERSION?m=text' | head -1)
-            curl -fsSL "https://go.dev/dl/${v}.illumos-amd64.tar.gz" | gtar -xz -C /opt
+            curl -fsSL -o /tmp/go.tar.gz "https://go.dev/dl/${v}.illumos-amd64.tar.gz"
+            cd /opt && gzip -dc /tmp/go.tar.gz | tar -xf -
           run: |
             export PATH=/opt/go/bin:$PATH
             go test -count=1 ./...

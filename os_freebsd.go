@@ -18,14 +18,16 @@ func runLong(o op, path string, _ *config) (endpoint, route, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	if len(name) > directMax {
-		return nil, "", errNameTooLong(o)
-	}
+	// The directory is opened first, so a missing one is ENOENT whatever the
+	// length of the name (SPEC: the errors' order).
 	dfd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, "", syscallError("open", err)
 	}
 	defer unix.Close(dfd)
+	if len(name) > directMax {
+		return nil, "", errNameTooLong(o)
+	}
 	// The standard form: sun_len, family, the name and a NUL.
 	sa := make([]byte, 2+len(name)+1)
 	sa[0] = byte(len(sa))

@@ -32,11 +32,12 @@ l, discard, res, err := sockat.ListenEx(path, sockat.NoLastResort) // l is a *ne
 if err != nil {
 	return err
 }
-defer discard() // removes the socket file (does not close l)
 defer l.Close()
+defer discard() // removes the socket file (does not close l)
 ```
 
-- `discard` records the file right after the bind and removes it only while the path still names that same file (`(st_dev, st_ino)`); a socket that replaced it in the meantime is left alone. When the file cannot be recorded, `ListenEx` closes the listener and returns an error (the file is left)
+- `discard` records the file right after the bind and removes it only while the path still names that same file (`(st_dev, st_ino)`). When the file cannot be recorded, `ListenEx` closes the listener and returns an error (the file is left)
+- **Call `discard` before closing the listener** (with the `defer`s above, `discard` runs first). A replacement is told apart only while the listener is open: the kernel holds the socket file meanwhile, so whatever another process removes and makes again there has another `(st_dev, st_ino)`, and `discard` leaves it. After the close, a file removed and made again gets the same numbers on a file system that reuses them at once (Linux's ext4, the BSDs' UFS / FFS), and `discard` may remove it (as `os.Remove` of the path would)
 - `discard` returns an error when it cannot check the file (no permission, for example) or the removal fails; nil when the file is gone or was replaced
 - A replacement in the instant between the check and the removal cannot be told apart (POSIX has no removal by inode)
 - The listener from `ListenEx` does not remove the file on Close (short paths included); only `discard` removes it
@@ -54,8 +55,8 @@ if err != nil {
 	}
 	return err
 }
-defer discard()
 defer l.Close()
+defer discard()
 if res.Has(sockat.RecreatableSpelling) {
 	log.Printf("%s: bound through a shared place (route %s, skipped %v)", path, res.Route, res.Skipped)
 }
@@ -91,8 +92,8 @@ l, discard, res, err := sockat.ListenEx(path, sockat.UseLastResort)
 if err != nil {
 	log.Fatal(err)
 }
-defer discard() // not os.Remove(l.Addr().String())
 defer l.Close()
+defer discard() // not os.Remove(l.Addr().String())
 fmt.Println("respelled:", res.Has(sockat.Respelled))
 ```
 
@@ -109,8 +110,8 @@ l, discard, res, err := sockat.ListenEx(abs, sockat.UseLastResort)
 if err != nil {
 	log.Fatal(err)
 }
-defer discard()
 defer l.Close()
+defer discard()
 fmt.Println("cwd-relative:", res.Has(sockat.CwdRelative))
 ```
 
@@ -127,8 +128,8 @@ l, discard, res, err := sockat.ListenEx(path, sockat.UseLastResort)
 if err != nil {
 	log.Fatal(err)
 }
-defer discard() // not os.Remove(l.Addr().String())
 defer l.Close()
+defer discard() // not os.Remove(l.Addr().String())
 if res.Has(sockat.RecreatableSpelling) {
 	log.Printf("%s: bound through a shared place", path)
 }

@@ -40,8 +40,8 @@ func ExampleListenEx() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		defer discard() // removes the socket file at path (does not close l)
 		defer l.Close()
+		defer discard() // removes the socket file at path (does not close l)
 	}()
 
 	_, err := os.Stat(path)
@@ -62,8 +62,8 @@ func ExampleListenEx_respelled() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		defer discard() // not os.Remove(l.Addr().String())
 		defer l.Close()
+		defer discard() // not os.Remove(l.Addr().String())
 		fmt.Println("respelled:", res.Has(sockat.Respelled))
 	}()
 
@@ -100,8 +100,8 @@ func ExampleListenEx_cwdRelative() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		defer discard()
 		defer l.Close()
+		defer discard()
 		fmt.Println("cwd-relative:", res.Has(sockat.CwdRelative))
 	}()
 	// Output: cwd-relative: false
@@ -120,8 +120,8 @@ func ExampleListenEx_recreatableSpelling() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		defer discard() // not os.Remove(l.Addr().String())
 		defer l.Close()
+		defer discard() // not os.Remove(l.Addr().String())
 		if res.Has(sockat.RecreatableSpelling) {
 			log.Printf("%s: bound through a shared place", path)
 		}
@@ -142,8 +142,8 @@ func ExampleDialEx() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer discard()
 	defer l.Close()
+	defer discard()
 
 	c, res, err := sockat.DialEx(path, sockat.NoLastResort)
 	if err != nil {

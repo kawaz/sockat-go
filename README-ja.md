@@ -32,11 +32,12 @@ l, discard, res, err := sockat.ListenEx(path, sockat.NoLastResort) // l は *net
 if err != nil {
 	return err
 }
-defer discard() // ソケットのファイルを消す (l は閉じない)
 defer l.Close()
+defer discard() // ソケットのファイルを消す (l は閉じない)
 ```
 
-- `discard` は bind した直後にファイルを覚えておき、そのパスが今も同じファイル (`(st_dev, st_ino)`) の時だけ消す。間に他のソケットに置き換わっていたら消さない。覚えられなければ `ListenEx` は listener を閉じてエラーを返す (ファイルは消さない)
+- `discard` は bind した直後にファイルを覚えておき、そのパスが今も同じファイル (`(st_dev, st_ino)`) の時だけ消す。覚えられなければ `ListenEx` は listener を閉じてエラーを返す (ファイルは消さない)
+- **`discard` は listener を閉じる前に呼ぶ** (上の `defer` の順で、`discard` が先に走る)。置き換えを見分けられるのは listener が開いている間だけ: 開いている間はカーネルがソケットのファイルを掴んでいるので、他のプロセスが消して作り直した物は別の `(st_dev, st_ino)` になり、`discard` は消さない。閉じた後に消して作り直された物は、番号をすぐ使い回すファイルシステム (Linux の ext4、BSD の UFS / FFS) では同じ番号になり、`discard` が消しうる (元のパスで `os.Remove` するのと同じ)
 - `discard` がエラーを返すのは、ファイルを確かめられない時 (権限が無い等) と消すのに失敗した時。既に無い・置き換わっていた時は nil
 - 確かめてから消すまでの一瞬に置き換えられると見分けられない (POSIX に inode を指定して消す手段が無い)
 - `ListenEx` の listener は Close でファイルを消さない (短いパスも)。消すのは `discard` だけ
@@ -54,8 +55,8 @@ if err != nil {
 	}
 	return err
 }
-defer discard()
 defer l.Close()
+defer discard()
 if res.Has(sockat.RecreatableSpelling) {
 	log.Printf("%s: bound through a shared place (route %s, skipped %v)", path, res.Route, res.Skipped)
 }
@@ -91,8 +92,8 @@ l, discard, res, err := sockat.ListenEx(path, sockat.UseLastResort)
 if err != nil {
 	log.Fatal(err)
 }
-defer discard() // not os.Remove(l.Addr().String())
 defer l.Close()
+defer discard() // not os.Remove(l.Addr().String())
 fmt.Println("respelled:", res.Has(sockat.Respelled))
 ```
 
@@ -109,8 +110,8 @@ l, discard, res, err := sockat.ListenEx(abs, sockat.UseLastResort)
 if err != nil {
 	log.Fatal(err)
 }
-defer discard()
 defer l.Close()
+defer discard()
 fmt.Println("cwd-relative:", res.Has(sockat.CwdRelative))
 ```
 
@@ -127,8 +128,8 @@ l, discard, res, err := sockat.ListenEx(path, sockat.UseLastResort)
 if err != nil {
 	log.Fatal(err)
 }
-defer discard() // not os.Remove(l.Addr().String())
 defer l.Close()
+defer discard() // not os.Remove(l.Addr().String())
 if res.Has(sockat.RecreatableSpelling) {
 	log.Printf("%s: bound through a shared place", path)
 }

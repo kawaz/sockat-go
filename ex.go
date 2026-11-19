@@ -125,13 +125,17 @@ func (e *RouteError) Unwrap() error { return e.Err }
 // Right after the bind it records the socket file (by its real path and
 // (st_dev, st_ino)); discard removes the file only while that path still
 // names that same file, so a socket that someone else has bound at the path
-// since is left alone. Between discard's check and the removal, a replacement
+// since, while the listener is open, is left alone. Call discard before
+// closing the listener: the kernel holds the socket file only while it is
+// open, and a file removed and made again after the close gets the same
+// (st_dev, st_ino) on file systems that reuse them at once (ext4, UFS, FFS),
+// which discard may then remove. Between discard's check and the removal, a replacement
 // cannot be told apart (POSIX has no removal by inode). When the file cannot
 // be recorded, the listener is closed, the file is left, and an error is
 // returned; so too for a relative path when the cwd changes (another
 // goroutine's os.Chdir) between the resolving of its real path and the bind.
 //
-// discard does not close the listener: close it yourself (before or after).
+// discard does not close the listener: close it yourself, after discard.
 // It returns nil when the file is removed, is gone, or is no longer the one
 // bound; an error when the file cannot be checked (lstat fails otherwise than
 // for a missing file, for example EACCES) or the removal fails. Calling it

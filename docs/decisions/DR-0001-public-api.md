@@ -20,7 +20,7 @@
 - 戻り値は具体型。`net.Listener` / `net.Conn` にそのまま代入でき、`AcceptUnix` 等も使える
 - Dial は 1 つ。SPEC の「標準の connect が元から待たない言語」に当たるので `_nonblocking` (と `connect_nonblocking_ex`) を分けない
 - `ListenEx` / `DialEx` は最終手段を使うかを受け取り、失ったもの・通った経路・飛ばした経路 (`Result`) を返す。失敗は `*RouteError` ([DR-0014](DR-0014-ex-last-resort-and-diagnostics.md))
-- `ListenEx` は bind の直後にソケットのファイルの realpath と `(st_dev, st_ino)` を覚える (覚えられなければ listener を閉じ、ファイルは消さずにエラー)。相対パスでは realpath を引く前と bind の後でプロセスの cwd の `(st_dev, st_ino)` を比べ、違えば (他の goroutine の `os.Chdir`) 覚えられない時と同じに扱う (bind は新しい cwd の下、覚えるのは元の cwd の下になり、元の cwd の同じ名前の無関係なファイルを `discard` が消しうるため。変えて戻した場合は見えない)。`discard` はそのパスが今も同じファイルの時だけ消す。listener は閉じない (利用者が閉じる)。既に無い (確かめた後に消えていた時も)・別のファイルに置き換わっていて消さない時は nil。エラーを返すのは、確かめられない時 (lstat が ENOENT / ENOTDIR 以外で失敗、EACCES 等) と消そうとして失敗した時 (消せたか分からないのを nil に見せない)。2 回目以降は何もしない。listener は短いパスも `SetUnlinkOnClose(false)` (消すのは discard だけ)
+- `ListenEx` は bind の直後にソケットのファイルの realpath と `(st_dev, st_ino)` を覚える (覚えられなければ listener を閉じ、ファイルは消さずにエラー)。相対パスでは realpath を引く前と bind の後でプロセスの cwd の `(st_dev, st_ino)` を比べ、違えば (他の goroutine の `os.Chdir`) 覚えられない時と同じに扱う (bind は新しい cwd の下、覚えるのは元の cwd の下になり、元の cwd の同じ名前の無関係なファイルを `discard` が消しうるため。変えて戻した場合は見えない)。`discard` はそのパスが今も同じファイルの時だけ消す。置き換えを見分けると約束するのは listener が開いている間だけ (閉じた後に消して作り直された物は、番号をすぐ使い回すファイルシステム (ext4、UFS / FFS) では同じ `(st_dev, st_ino)` になり消しうる。元のパスで消すのと同じ) で、doc と README で `discard` を listener を閉じる前に呼ぶよう勧め、例の `defer` もその順にする。listener は閉じない (利用者が閉じる)。既に無い (確かめた後に消えていた時も)・別のファイルに置き換わっていて消さない時は nil。エラーを返すのは、確かめられない時 (lstat が ENOENT / ENOTDIR 以外で失敗、EACCES 等) と消そうとして失敗した時 (消せたか分からないのを nil に見せない)。2 回目以降は何もしない。listener は短いパスも `SetUnlinkOnClose(false)` (消すのは discard だけ)
   - 型を足さず関数を返すのは、`context.WithCancel` と同じ形で、listener を標準の型のまま渡せるから
 - `Listen` / `Dial` のエラーは標準と同じ形の `*net.OpError` (`Op` は `listen` / `dial`、`Addr` は呼び出し元のパス、`Err` は `*os.SyscallError`)。`errors.Is(err, syscall.ENOENT)` 等が効く。経路が渡した綴りはエラーに出さない。`ListenEx` / `DialEx` はそれを `*RouteError` に包む
 
@@ -45,6 +45,7 @@
 ## 判断の出所
 
 - `ListenEx` の discard (関数を返す、消すだけ): kawaz 裁定 (ハブの DR-0015) 2026-11-19
+- discard の約束を listener が開いている間の置き換えに狭める: kawaz 裁定 (ハブの DS-Q1 a、SPEC cb1149a) 2026-11-19
 - `ListenEx` / `DialEx` の引数と戻り値の形: 統括の案、kawaz 了承 2026-11-19
 - 名前と戻り値の型: 実装側の判断 2026-11-18
 - Dial を 1 つにすること: ハブの裁定 (HB-Q2) 2026-11-18

@@ -98,8 +98,10 @@
 //   - On illumos, a path that starts with '@' names the file "@..." in the
 //     current directory. The net package would read the '@' as an abstract
 //     name, which the kernel there does not have, so the path is handed to it
-//     with "./" in front: the listener's Addr is "./@...", and a path of 106
-//     or 107 bytes, which no longer fits, is treated as a long path.
+//     with "./" in front: the listener's Addr is "./@...", its Close leaves
+//     the file (as the net package elsewhere leaves a path that starts with
+//     '@'), and a path of 106 or 107 bytes, which no longer fits, is treated
+//     as a long path.
 //   - The listener of a long path does not remove the socket file on Close.
 //     Its address is the spelling handed to the kernel, so do not call
 //     SetUnlinkOnClose(true) on it; use [ListenEx]'s discard.

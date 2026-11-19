@@ -405,10 +405,11 @@ func TestALeadingNULIsEINVALWhereThereAreNoAbstractNames(t *testing.T) {
 // and reached by a dial of the same path. On illumos the net package would
 // read the '@' as an abstract name, which that kernel lacks (ENOENT);
 // sockat-go hands it "./@..." there instead (DR-0002), so the kernel keeps
-// that spelling, which still names the same file, and Close removes the file
-// as the net package does for any path it binds. Elsewhere the listener is
-// the net package's own for "@...", whose Close leaves the file (the net
-// package skips the removal of any address that starts with '@'). Where "./" makes the spelling longer than the
+// that spelling, which still names the same file. Close leaves the file on
+// every system: elsewhere the listener is the net package's own for "@...",
+// whose Close skips the removal of any address that starts with '@'; on
+// illumos sockat-go's listener for "./@..." does the same, so that Close does
+// not unlink a relative spelling after the cwd may have changed. Where "./" makes the spelling longer than the
 // standard library takes (a path of directMax bytes), the path goes through
 // the routes as a long one, and a dial still reaches the file; elsewhere such
 // a path is still the standard library's. Runs in a child whose cwd is a fresh
@@ -452,12 +453,8 @@ func TestALeadingAtIsAPathWhereThereAreNoAbstractNames(t *testing.T) {
 		t.Fatalf("%q did not name the file %q in the cwd", q, q)
 	}
 	lq.Close()
-	_, err = os.Lstat(q)
-	if stdReadsAtAsAbstract && !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("Close left %q (bound as \"./%s\"): %v", q, q, err)
-	}
-	if !stdReadsAtAsAbstract && err != nil {
-		t.Fatalf("Close removed %q, which the net package leaves: %v", q, err)
+	if _, err := os.Lstat(q); err != nil {
+		t.Fatalf("Close removed %q, which a path starting with '@' keeps: %v", q, err)
 	}
 
 	wd, err := os.Getwd()

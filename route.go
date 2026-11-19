@@ -139,7 +139,7 @@ func runTraced(o op, path string, cfg *config, tr *trace) (endpoint, route, erro
 		return nil, "", opError(o, path, fmt.Errorf("socket path must not contain a NUL byte: %w", syscall.EINVAL))
 	}
 	if s := stdSpelling(path); len(s) <= directMax {
-		ep, err := viaStd(o, s, true)
+		ep, err := viaStd(o, s, s == path)
 		if err != nil && s != path {
 			err = opError(o, path, unwrapOpError(err))
 		}
@@ -180,7 +180,10 @@ func abstractName(path string) bool {
 // but Go's standard library on illumos rewrites a leading '@' to a NUL and
 // the kernel then fails (ENOENT). "./" is the shortest spelling of the same
 // relative path that it leaves alone, at the cost of two bytes and of the
-// kernel keeping "./@..." (the listener's Addr). DR-0002.
+// kernel keeping "./@..." (the listener's Addr). Its listener does not
+// remove the file on Close, as the net package elsewhere leaves a path that
+// starts with '@' (and as a relative spelling must not be unlinked once the
+// cwd may have changed). DR-0002.
 func stdSpelling(path string) string {
 	if stdReadsAtAsAbstract && !abstractNames {
 		return asSpelling(path)

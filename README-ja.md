@@ -231,7 +231,7 @@ D は 1 回の呼び出しで 1 度だけ作り、D を使う経路で共有す�
 ## 標準と違う点
 
 - **NUL を含むパスは長さによらず `EINVAL`**。標準は NUL で黙って切り詰め、別のパスに bind する。Linux / Android では、先頭が NUL か `@` の abstract socket の名前を標準にそのまま渡す。abstract socket の無い OS (illumos を含む) では先頭の NUL も `EINVAL`
-- **illumos では `@` で始まるパスを cwd の `@...` のファイルとして bind / connect する**。標準は先頭の `@` を abstract の名前に書き換えるが、illumos のカーネルには abstract socket が無い。sockat は `./` を付けて標準に渡すので、listener の `Addr()` は `./@...` を返し、失うものは他の相対パスと同じ `cwd-relative`。`./` を付けて上限を超える 106・107 バイトのパスは長いパスとして扱う (Listen は `ENAMETOOLONG`)
+- **illumos では `@` で始まるパスを cwd の `@...` のファイルとして bind / connect する**。標準は先頭の `@` を abstract の名前に書き換えるが、illumos のカーネルには abstract socket が無い。sockat は `./` を付けて標準に渡すので、listener の `Addr()` は `./@...` を返し、失うものは他の相対パスと同じ `cwd-relative`。listener の Close はファイルを消さない (他の OS の標準が `@` で始まるパスを消さないのとそろえる。消すなら `ListenEx` の `discard`)。`./` を付けて上限を超える 106・107 バイトのパスは長いパスとして扱う (Listen は `ENAMETOOLONG`)
 
 長いパスでだけ違う点:
 

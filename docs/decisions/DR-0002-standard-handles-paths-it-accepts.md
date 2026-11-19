@@ -29,7 +29,7 @@ illumos で `./` を付けると、SPEC の「標準にそのまま渡す。何�
 
 - カーネルが覚える綴りと listener の `Addr()` が `./@...` になる。同じ cwd の同じファイルを指すので、失うものは他の相対パスと同じ `cwd-relative`
 - 106・107 バイトの `@...` は `./` を付けると標準に入らず、経路に回る。illumos の Listen には経路が無いので `ENAMETOOLONG`、Dial は経路 (symlink-file 等) で届く
-- listener の Close は `./@...` のファイルを消す (標準が普通のパスに対してするのと同じ)。macOS / BSD の標準は `@` で始まるアドレスのファイルを消さない
+- listener の Close は `./@...` のファイルを消さない (`SetUnlinkOnClose(false)`)。他の OS の Go の標準が `@` で始まるアドレスのファイルを Close で消さない (`net/unixsock_posix.go` の `ln.path[0] != '@'`) のとそろえ、相対の綴りで消して間に変わった cwd の別のファイルを消す危険を sockat が足さないため (ハブの統括の判断 2026-11-19)
 
 ## 却下した案
 

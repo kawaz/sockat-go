@@ -231,7 +231,7 @@ When a path over the limit gets `ENAMETOOLONG` (with the directory there and D c
 ## What differs from the net package
 
 - **A path containing a NUL is `EINVAL`, whatever its length.** The net package silently cuts it short there and binds some other path. On Linux and Android, an abstract socket name (a leading NUL or `@`) is handed to the net package as is. Where there are no abstract sockets (illumos included), a leading NUL is `EINVAL` too
-- **On illumos, a path that starts with `@` is bound / dialled as the file `@...` in the cwd.** The net package rewrites a leading `@` into an abstract name, but the illumos kernel has no abstract sockets. sockat hands the net package the path with `./` in front, so the listener's `Addr()` returns `./@...` and the loss is `cwd-relative`, as for any other relative path. A path of 106 or 107 bytes, which no longer fits once `./` is added, is treated as a long path (Listen gets `ENAMETOOLONG`)
+- **On illumos, a path that starts with `@` is bound / dialled as the file `@...` in the cwd.** The net package rewrites a leading `@` into an abstract name, but the illumos kernel has no abstract sockets. sockat hands the net package the path with `./` in front, so the listener's `Addr()` returns `./@...` and the loss is `cwd-relative`, as for any other relative path. The listener's Close leaves the file (as the net package elsewhere leaves a path that starts with `@`; to remove it, use `ListenEx`'s `discard`). A path of 106 or 107 bytes, which no longer fits once `./` is added, is treated as a long path (Listen gets `ENAMETOOLONG`)
 
 Only for a long path:
 

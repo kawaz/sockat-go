@@ -349,6 +349,38 @@ func inTmpCwd(t *testing.T) bool {
 	return false
 }
 
+// unprivileged reports whether the calling test is to run its body here: as a
+// user other than root, it is (`if !unprivileged(t) { return }`). As root, who
+// ignores permissions and so breaks the premise of tests about read-only
+// directories, it runs the calling test again in a child process (cwd /) that
+// drops to nobody / nogroup before the body, and reports false; in that child
+// it reports true once the ids are dropped. So such a test runs in the Linux
+// container, which is root, rather than being skipped there.
+func unprivileged(t *testing.T) bool {
+	t.Helper()
+	if os.Getenv(childEnv) == t.Name() {
+		if os.Geteuid() == 0 {
+			// syscall's (not unix's) set the ids of every thread of the
+			// process.
+			if err := syscall.Setgroups(nil); err != nil {
+				t.Fatal(err)
+			}
+			if err := syscall.Setgid(65534); err != nil {
+				t.Fatal(err)
+			}
+			if err := syscall.Setuid(65534); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return true
+	}
+	if os.Geteuid() == 0 {
+		runChild(t, t.Name(), "/")
+		return false
+	}
+	return true
+}
+
 // asChild skips the test unless this process is the child runChild started
 // for it.
 func asChild(t *testing.T) {

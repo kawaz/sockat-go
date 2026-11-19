@@ -495,11 +495,13 @@ func TestARelativePlaceForDIsUsed(t *testing.T) {
 // When D can be made nowhere (no place given works and the socket's
 // directory is not writable), a listen is ENAMETOOLONG (Go has no fork, the
 // SPEC's D-less way for a bind) and a dial takes its fallback routes. Nothing
-// is left in the socket's directory. Not as root, who may write anywhere.
+// is left in the socket's directory. As root, who may write in a read-only
+// directory, it runs in a child that has dropped to nobody (unprivileged), so
+// that it runs in the Linux container too.
 func TestWhenDCanBeMadeNowhereAListenIsENAMETOOLONGAndADialFallsBack(t *testing.T) {
 	t.Parallel()
-	if os.Geteuid() == 0 {
-		t.Skip("root may write in a read-only directory")
+	if !unprivileged(t) {
+		return
 	}
 	ms := allMeans()
 	if len(ms) == 0 {
@@ -1003,38 +1005,13 @@ func TestTheSockdirRoutesNeedTheDirectorysFdAndASpellingThatFits(t *testing.T) {
 // unchanged), not in ListenAny's place, not at the path.
 //
 // As root, who may write in a read-only directory, it runs in a child that
-// has dropped to an unprivileged user, so that it runs in the Linux container
+// has dropped to nobody (unprivileged), so that it runs in the Linux container
 // too.
 func TestWhenDCanBeMadeNowhereAndTheFormWithoutDDoesNotFitEveryRouteIsSkipped(t *testing.T) {
 	t.Parallel()
-	if os.Geteuid() == 0 {
-		runChild(t, "TestChildDNowhereAndNoSockdirFits", "/")
+	if !unprivileged(t) {
 		return
 	}
-	dNowhereAndNoSockdirFits(t)
-}
-
-// The body of the test above, as an unprivileged user when started as root.
-func TestChildDNowhereAndNoSockdirFits(t *testing.T) {
-	asChild(t)
-	if os.Geteuid() == 0 {
-		// nobody / nogroup. syscall's (not unix's) set the ids of every
-		// thread of the process.
-		if err := syscall.Setgroups(nil); err != nil {
-			t.Fatal(err)
-		}
-		if err := syscall.Setgid(65534); err != nil {
-			t.Fatal(err)
-		}
-		if err := syscall.Setuid(65534); err != nil {
-			t.Fatal(err)
-		}
-	}
-	dNowhereAndNoSockdirFits(t)
-}
-
-func dNowhereAndNoSockdirFits(t *testing.T) {
-	t.Helper()
 	ms := allMeans()
 	if len(ms) == 0 {
 		t.Skip("no route through D here")

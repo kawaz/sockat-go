@@ -254,11 +254,12 @@ func TestListenExErrorsAndAbstractNames(t *testing.T) {
 // rather than nil, and removes nothing. Once the file can be checked again, a
 // later call does nothing (discard runs once). A file that is merely gone is
 // nil (TestDiscardLeavesWhatReplacedTheSocket and the others). Root ignores
-// the permission, hence non-root only.
+// the permission, so as root it runs in a child that has dropped to nobody
+// (unprivileged), which makes it run in the Linux container too.
 func TestDiscardThatCannotCheckTheFileIsAnError(t *testing.T) {
 	t.Parallel()
-	if os.Geteuid() == 0 {
-		t.Skip("root ignores the directory's permission")
+	if !unprivileged(t) {
+		return
 	}
 	for _, p := range exPaths(t) {
 		l, discard := listenEx(t, p)

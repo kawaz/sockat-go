@@ -11,8 +11,16 @@ main@origin は v0.2.0 の後の README の 1 commit まで。それより後の
 
 ## 待っているもの (ハブの統括 → kawaz)
 
-- any 系を `_ex` に統合し、`_ex` の引数で経路の選び方 (受け入れる失うもの等) を指定する案を議論中。決まれば `atanycost` パッケージは無くなり、`ListenEx` の形が変わる見込み。決まるまで公開 API の形に手を入れない
 - release の OK。出す時は `just bump-version minor` (0.3.0) → `just push`
+
+## 次にやる (ハブの統括の依頼 2026-11-19、ハブ origin/main = 40a4b54c)
+
+Dial を新しい connect の順に作り直した後に着手する。実装・試験・README (日英)・DR を合わせて commit まで (push / VERSION は待ち)。読むもの: ハブの DR-0015、DR-0016、SPEC。
+
+- DR-0015: `atanycost` パッケージを無くし、既定の操作ごとに `_ex` (`ListenEx`、`DialEx`) を置く。引数は「最終手段を使うか」1 つだけ (既定は使わない)。Listen の最終手段は symlink-dir (持ち主だけの置き場 → 共有の置き場、今の atanycost の symlink)。Dial の最終手段は fork-cwd-direct (Go には fork が無いので理由付きで skipped に入って次へ)。戻り値は標準の型と losses・route・skipped、`ListenEx` は加えて discard。失敗時はエラーに route・skipped (`errors.Is` で errno)。型・項目・引数の形は Go の慣習で決め、案をハブに報告する
+- DR-0016: 経路の名前を変える (fork → fork-cwd、fork-sockdir → fork-cwd-sockdir、fork-direct → fork-cwd-direct、Dial の symlink → symlink-file、atanycost の symlink → symlink-dir)。Listen は Linux / Android 以外で standard の次に symlink-file を試す (失敗時に元のパスに物があればそのエラー、無いか確かめられなければ次へ)。macOS ではファイル名の上限が無くなる
+- SPEC の proc: 綴りが収まらない時も D を片付けず、後の経路と共有する (D は 1 回だけ作る)
+- 適合試験の CLI も新しい名前で出す。終わったらハブの `just conformance` を流して報告する
 
 ## 残り
 

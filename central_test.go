@@ -977,6 +977,117 @@ func TestTheSockdirRoutesNeedTheDirectorysFdAndASpellingThatFits(t *testing.T) {
 	assertNoSockatEntry(t, dir)
 }
 
+// When D can be made nowhere and the form without D does not fit either, a
+// bind has no route left, and ListenAny reports every route of the order as
+// tried and found unusable, in SPEC's order: standard (the path is too long),
+// the routes through D (thread-cwd, proc on Linux, then fork, which Go cannot
+// make), then, since D was made nowhere, the same means without D
+// (thread-cwd-sockdir, proc-sockdir on Linux, fork-sockdir), and last
+// ListenAny's own symlink. SPEC: when D was made nowhere and the bind went on
+// to the -sockdir routes, both the routes through D and the -sockdir routes are
+// in skipped; fork-sockdir whose spelling does not fit is ENAMETOOLONG; and
+// symlink's spelling (<place>/sockat.XXXXXXXXXX/<name>) is always longer than
+// the one without D, so it cannot fit either. No route bound, so none is
+// named, and the error is Listen's own ENAMETOOLONG (the premise, checked
+// through runWith with the same inputs).
+//
+// D is made nowhere: the only place given does not exist and the socket's
+// directory is not writable (0500). The file name is, for each means, the
+// longest one its spelling through D takes, so the route through D is tried
+// (it fits; only D is missing) and the form without D (8 bytes longer, plus
+// the fd of the socket's directory for proc) does not fit: R/<name> fits but
+// .sockat.XXXXXXXXXX/<name> does not for thread-cwd, and
+// /proc/self/fd/<D>/R/<name> fits (with a one-digit fd, the estimate made
+// before D) but /proc/self/fd/<fd>/.sockat.XXXXXXXXXX/<name> does not for proc.
+// Nothing is created anywhere: not in the socket's directory (its mtime is
+// unchanged), not in ListenAny's place, not at the path.
+//
+// As root, who may write in a read-only directory, it runs in a child that
+// has dropped to an unprivileged user, so that it runs in the Linux container
+// too.
+func TestWhenDCanBeMadeNowhereAndTheFormWithoutDDoesNotFitEveryRouteIsSkipped(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		runChild(t, "TestChildDNowhereAndNoSockdirFits", "/")
+		return
+	}
+	dNowhereAndNoSockdirFits(t)
+}
+
+// The body of the test above, as an unprivileged user when started as root.
+func TestChildDNowhereAndNoSockdirFits(t *testing.T) {
+	asChild(t)
+	if os.Geteuid() == 0 {
+		// nobody / nogroup. syscall's (not unix's) set the ids of every
+		// thread of the process.
+		if err := syscall.Setgroups(nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := syscall.Setgid(65534); err != nil {
+			t.Fatal(err)
+		}
+		if err := syscall.Setuid(65534); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dNowhereAndNoSockdirFits(t)
+}
+
+func dNowhereAndNoSockdirFits(t *testing.T) {
+	t.Helper()
+	ms := allMeans()
+	if len(ms) == 0 {
+		t.Skip("no route through D here")
+	}
+	// SPEC's order of the routes tried for a bind and found unusable here;
+	// proc and proc-sockdir are in it only where /proc is (Linux).
+	linux := runtime.GOOS == "linux"
+	want := []route{routeStandard, routeThreadCwd}
+	if linux {
+		want = append(want, routeProc)
+	}
+	want = append(want, routeFork, routeThreadCwdSockdir)
+	if linux {
+		want = append(want, routeProcSockdir)
+	}
+	want = append(want, routeForkSockdir, routeSymlink)
+	for _, m := range ms {
+		n := directMax - rNameLen - 1
+		if m.want == routeProc {
+			n -= len("/proc/self/fd/0/")
+		}
+		p := nest(t, tmpDir(t), 300, strings.Repeat("n", n))
+		dir := filepath.Dir(p)
+		if err := os.Chmod(dir, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Chmod(dir, 0o700) })
+		own := ownPlace(t)
+		cfg := m.cfg("/nonexistent")
+		cfg.anyBases = []string{own}
+		markUntouched(t, dir)
+		markUntouched(t, own)
+
+		_, _, err := runWith(opListen, p, cfg)
+		wantOpError(t, m.name+": the premise: Listen", opListen, p, err, syscall.ENAMETOOLONG)
+
+		ep, out, err := listenAny(p, cfg)
+		wantOpError(t, m.name+": listen any", opListen, p, err, syscall.ENAMETOOLONG)
+		if ep != nil {
+			t.Fatalf("%s: a listener with the error", m.name)
+		}
+		if got := skippedNames(t, out); out.route != "" || len(out.losses) != 0 || !slices.Equal(got, want) {
+			t.Fatalf("%s (%d-byte name): outcome %+v, want no route after %v", m.name, n, out, want)
+		}
+		assertUntouched(t, dir)
+		assertNoSockatEntry(t, dir)
+		assertUntouched(t, own)
+		if exists(p) {
+			t.Fatalf("%s: something was created at the path", m.name)
+		}
+	}
+}
+
 // A D that cannot be opened right after it is made: a umask taking the owner's
 // search bit (0177 makes mkdir(0700) give 0600) keeps an O_SEARCH open from
 // working (macOS; Linux opens D O_PATH, which needs no permission on D, so

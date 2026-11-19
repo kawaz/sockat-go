@@ -24,7 +24,7 @@ created: 2026-11-19
 - `abstractNames` を Linux / Android だけにする。illumos / Solaris では先頭 NUL を長さによらず `EINVAL`、`@` は普通のパスとして扱う
 - 短い `"@x"` を標準に渡すと Go の標準が NUL に書き換えてしまう。普通のパスとして bind させる手 (例: `./@x` にする、自前のソケット) が要るかを SPEC と照らして決める
 - DR-0002 と README の「abstract」の記述を直す
-- 試験: `TestALeadingNULIsEINVALWhereThereAreNoAbstractNames` を illumos でも走らせる (v0.3.0 では実装が SPEC と違うので、この issue を理由に illumos では飛ばしている)
+- 試験: `TestALeadingNULIsEINVALWhereThereAreNoAbstractNames` を illumos でも走らせる (v0.3.0 では実装が SPEC と違うので、この issue を理由に illumos では飛ばしている)。`TestTheLossesOfEachRoute` の `bindLosses(standard, "@sockat")` は illumos で「失うもの無し」を期待しているが、SPEC では相対パスなので `cwd-relative` になる。合わせて直す
 
 ## 経緯の要点
 

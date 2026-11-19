@@ -28,15 +28,16 @@ func longDir() (tmp, long string) {
 
 // The listener of a long path does not remove the socket file on Close, and
 // its Addr is not the path passed (SPEC "respelled"): remove the file with
-// discard, not by the spelling Addr reports. NoLastResort tries the routes
-// Listen tries, and no more.
+// discard, not by the spelling Addr reports. UseLastResort here so that the
+// example runs where Listen has no route for a long path (OpenBSD, illumos);
+// NoLastResort tries the routes Listen tries, and no more.
 func ExampleListenEx() {
 	tmp, dir := longDir()
 	defer os.RemoveAll(tmp)
 	path := filepath.Join(dir, "server.sock")
 
 	func() {
-		l, discard, _, err := sockat.ListenEx(path, sockat.NoLastResort)
+		l, discard, _, err := sockat.ListenEx(path, sockat.UseLastResort)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -133,12 +134,13 @@ func ExampleListenEx_recreatableSpelling() {
 
 // DialEx reports the route taken and the routes skipped before it, for a log;
 // a connect gives nothing up. The route names are for diagnostics: branch on
-// the losses, not on them.
+// the losses, not on them. The listen takes the last resort so that the
+// example runs where Listen has no route for a long path (OpenBSD, illumos).
 func ExampleDialEx() {
 	tmp, dir := longDir()
 	defer os.RemoveAll(tmp)
 	path := filepath.Join(dir, "server.sock")
-	l, discard, _, err := sockat.ListenEx(path, sockat.NoLastResort)
+	l, discard, _, err := sockat.ListenEx(path, sockat.UseLastResort)
 	if err != nil {
 		log.Fatal(err)
 	}

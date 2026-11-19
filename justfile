@@ -166,3 +166,7 @@ watch:
         exit 1
     fi
     "$ws" --sha "$(bump-semver vcs get commit-id --rev "$(bump-semver vcs get default-branch)")" kawaz/sockat-go
+
+# 適合試験の CLI (ハブの docs/design/conformance.md) を tmp.local/bin/sockat-conform に作る
+build-conform:
+    go build -o tmp.local/bin/sockat-conform ./internal/cmd/sockat-conform

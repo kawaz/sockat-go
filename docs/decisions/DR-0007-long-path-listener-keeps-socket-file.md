@@ -5,14 +5,14 @@
 
 ## Context
 
-Go の標準の listener は Close でソケットファイルを消す (`SetUnlinkOnClose` の既定が true。実測)。消すパスは listener が覚えているアドレスで、長いパスの経路ではそれが綴り (`/proc/self/fd/N/name`、相対パス、もう無い symlink、ファイル名だけ) になる。
+Go の標準の listener は Close でソケットファイルを消す (`SetUnlinkOnClose` の既定が true。実測)。消すパスは listener が覚えているアドレスで、長いパスの経路ではそれが綴り (`R/<ファイル名>`、`/proc/self/fd/N/R/<ファイル名>`、もう無い symlink) になる。
 
 ## Decision
 
 - 短いパスは標準のまま (Close で消える)
 - 長いパスの listener は `SetUnlinkOnClose(false)` にし、消さない
 - README の「長いパスで標準と違う点」と `Listen` の doc に書く。長いパスの listener に `SetUnlinkOnClose(true)` を呼ばないことも書く
-- 後でファイルを消したい利用者には `ListenEx(path) (*net.UnixListener, discard func() error, error)` を出す ([DR-0001](DR-0001-public-api.md))。`ListenEx` の listener は短いパスも `SetUnlinkOnClose(false)` にし、消すのは `discard` だけにする
+- 後でファイルを消したい利用者には `ListenEx` の `discard` を出す ([DR-0001](DR-0001-public-api.md))。`ListenEx` の listener は短いパスも `SetUnlinkOnClose(false)` にし、消すのは `discard` だけにする
 
 ## 理由
 

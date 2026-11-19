@@ -12,7 +12,7 @@ bindat / connectat (FreeBSD) は、標準では作れない呼び出しで自前
 - ソケットは net パッケージと同じ設定で作る: close-on-exec と非ブロッキング (`SOCK_CLOEXEC | SOCK_NONBLOCK`)
 - listen の backlog は net パッケージと同じ値 (FreeBSD は `kern.ipc.soacceptqueue`、65535 で頭打ち、取れなければ `SOMAXCONN`)
 - `net.FileListener` / `net.FileConn` で標準の型にする (net パッケージが複製を取り、poller に載せる)。元の fd は閉じる
-- それ以外の経路 (/proc、相対パス、symlink、スレッド cwd) は綴りを標準 (`net.ListenUnix` / `net.DialUnix`) に渡す
+- それ以外の経路 (/proc、相対パス、symlink-file・symlink-dir、スレッド cwd) は綴りを標準 (`net.ListenUnix` / `net.DialUnix`) に渡す
 
 ## 理由
 

@@ -13,10 +13,13 @@ Listen の試す順番:
 
 | 順 | Listen |
 |---|---|
-| 1 | 標準に渡す長さ以下なら標準にそのまま |
-| 2 | D を通す経路 (Linux / macOS は thread-cwd、FreeBSD は at (bindat)) |
-| 3 | proc (`/proc` を使える Linux) |
-| 4 | `ENAMETOOLONG` |
+| 1 | 標準に渡す長さ以下なら標準にそのまま (standard) |
+| 2 | symlink-file (Linux / Android 以外、[DR-0015](DR-0015-listen-through-file-symlink.md)) |
+| 3 | D を通す経路 (Linux / macOS は thread-cwd、FreeBSD は at (bindat)) |
+| 4 | proc (`/proc` を使える Linux) |
+| 5 | `ENAMETOOLONG` (`ListenEx` が最終手段を使う時は symlink-dir、[DR-0014](DR-0014-ex-last-resort-and-diagnostics.md)) |
+
+- SPEC の 5 番目の fork-cwd と D 無しの fork-cwd-sockdir は Go に無いので、`skipped` に `no fork route in sockat-go` で入れて次へ進む
 
 Dial は標準に渡す長さを超えると、OS ごとの「connect の順」で試す ([DR-0013](DR-0013-connect-order.md))。その中の thread-cwd・proc・at (connectat) と proc-held が D を使う。
 
@@ -37,7 +40,7 @@ D を通す経路 (SPEC のまま):
 - 作った直後の D を開けない時 (macOS の `O_SEARCH` で umask が持ち主の検索権限を削った等) は、名前を `fstatat(AT_SYMLINK_NOFOLLOW)` で引いて確認と同じ条件なら `unlinkat(AT_REMOVEDIR)` で消し (空のディレクトリしか消えない)、次の置き場へ (kawaz 裁定 D12-Q5)
 - 確認が通った後に 0700 にそろえられなければ (umask 0477 の非 root で開き直しが `EACCES` 等)、その置き場では作れないとみなし、D を片付けて次へ。
 - 片付け: R は作れた時だけ消す。D は確認が通り、名前の `(st_dev, st_ino)` が fd と一致する時だけ消す。確認に落ちた D は中身も含めて触らない
-- D は 1 回の呼び出しで 1 度だけ作り、D を使う手段 (Listen の thread-cwd → proc、Dial の connect の順の中の D を使う経路) で共有する。どこにも作れなかったら作り直さない
+- D は 1 回の呼び出しで 1 度だけ作り、D を使う手段 (Listen の thread-cwd → proc、Dial の connect の順の中の D を使う経路) で共有する。どこにも作れなかったら作り直さない。proc の綴りが D を開いた後に入らない時も、D を片付けずに後の経路へ進む。Listen では D を使う後の経路 (fork-cwd) が Go に無いので、D は D を通す経路を試し終えた所で片付ける
 
 - D をどこにも作れない時、Listen は D 無しの形で試す: ソケットのディレクトリに R (`.sockat.` + 乱数 10 文字、ソケットのディレクトリの realpath を指す) を作り、ソケットのディレクトリの fd を基準に `.sockat.XXXXXXXXXX/<ファイル名>` で、D を通す経路と同じ手段の順 (thread-cwd-sockdir (FreeBSD は at-sockdir) → proc-sockdir) に bind する。ソケットのディレクトリを開けない、綴りが収まらない、R を作れない時は `ENAMETOOLONG`。Dial は D 無しの形を使わず、connect の順の次の経路へ進む ([DR-0013](DR-0013-connect-order.md))
   - 例: `/proc` の無い Linux で umask 0477 の非 root は D を 0700 にそろえられず (どの置き場でも)、D 無しの形で bind する (試験で確かめた)
@@ -50,14 +53,14 @@ D を通す経路 (SPEC のまま):
 
 ## Consequences
 
-- ファイル名の上限は Listen で Linux 96 (/proc 版はおよそ 79)、macOS / FreeBSD 92
-- Go には fork が無いので、SPEC の bind の 4 (fork) と D 無しの fork (fork-sockdir) を作らない。次の環境の Listen は長いパスで `ENAMETOOLONG`: NetBSD / OpenBSD / illumos (D を通す経路の手段が無い)、Linux で seccomp の filter があり `/proc` も無い、macOS で `__pthread_fchdir` が使えない。Linux で filter があり `/proc` がある時は、ファイル名およそ 79 バイトまで
-- 長いパスの Listen / Dial のたびに D と R を作って消す
+- ファイル名の上限は、D を通す経路で Linux 96 (/proc 版はおよそ 79)、macOS / FreeBSD 92。macOS の Listen は symlink-file でファイル名の上限が無い ([DR-0015](DR-0015-listen-through-file-symlink.md))
+- Go には fork が無いので、SPEC の bind の fork-cwd と D 無しの fork-cwd-sockdir を作らない。次の環境の Listen は長いパスで `ENAMETOOLONG`: NetBSD / OpenBSD / illumos で bind が symlink を辿らない時 (D を通す経路の手段が無い)、Linux で seccomp の filter があり `/proc` も無い、macOS で `__pthread_fchdir` が使えず symlink-file の置き場も無い。Linux で filter があり `/proc` がある時は、ファイル名およそ 79 バイトまで
+- D を通す経路で届く長いパスの Listen / Dial は、そのたびに D と R を作って消す
 
 ## 判断の出所
 
 - 経路と順番: kawaz 裁定 (ハブの DR-0012) 2026-11-19
-- fork の無い Go で bind の 4 を作らないこと: kawaz 裁定 (D12-Q3 = a) 2026-11-19
+- fork の無い Go で bind の fork-cwd を作らないこと: kawaz 裁定 (D12-Q3 = a) 2026-11-19
 - D をどこにも作れない時の bind を D 無しの形で試すこと: kawaz 裁定 (D12-Q1 = a) 2026-11-19
 - macOS の D を `O_SEARCH` で開くこと: 実装側の判断、ハブの SPEC に取り入れ済み (f74cb86b) 2026-11-19
 - Linux は `/proc` の有無によらず D を `O_PATH` で開いて確かめること: 実装側の提案、ハブの SPEC に取り入れ済み (b442e602) 2026-11-19

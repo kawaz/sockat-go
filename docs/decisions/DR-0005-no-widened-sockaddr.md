@@ -9,7 +9,7 @@ SPEC は macOS の connect の順で、relative の次に 253 バイトまで入
 
 ## Decision
 
-- macOS でも広げた sockaddr は使わない。どの経路 (relative・thread-cwd・symlink) も普通の sockaddr だけを使う
+- macOS でも広げた sockaddr は使わない。どの経路 (relative・thread-cwd・symlink-file) も普通の sockaddr だけを使う
 - connect の順 ([DR-0013](DR-0013-connect-order.md)) の widened は、作らない経路として試した経路の記録に `no widened route in sockat-go` で入れ、次の thread-cwd へ進む
 
 ## 理由
@@ -22,7 +22,7 @@ SPEC は macOS の connect の順で、relative の次に 253 バイトまで入
 | 広げた形で bind した相手に connect して `net.FileConn` | 渡せるが、`RemoteAddr()` が nil の interface になる (`getpeername` の `EINVAL` を net パッケージが無視する)。`.String()` で panic する |
 
 - 標準の `DialUnix` は `getpeername` が失敗すると渡した綴りを相手のアドレスにするので nil にならない。広げた経路だけがアドレスの取得で落ちうるのは、SPEC の「カーネルが返すアドレスは長いパスでも取得で落ちない」に反する
-- 失うのは、relative が収まらず、thread-cwd が使えず (ファイル名が 92 バイトを超えるか `__pthread_fchdir` が使えない)、`TMPDIR` にも `/tmp` にも symlink を作れない時の、元のパスか相対パスが 253 バイト以内の connect だけ。普通の環境では Dial は symlink の経路でどこにでも届く
+- 失うのは、relative が収まらず、thread-cwd が使えず (ファイル名が 92 バイトを超えるか `__pthread_fchdir` が使えない)、`TMPDIR` にも `/tmp` にも symlink-file の symlink を作れない時の、元のパスか相対パスが 253 バイト以内の connect だけ。普通の環境では Dial は symlink-file でどこにでも届く
 
 ## Consequences
 

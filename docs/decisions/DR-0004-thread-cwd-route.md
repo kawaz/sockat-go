@@ -5,7 +5,7 @@
 
 ## Context
 
-SPEC の bind の最後の経路と `connect_any` 系の最後の経路は、ディレクトリに `fchdir` した子を fork し、子が bind / connect するもの。Go は runtime がマルチスレッドで、生の fork は使えない。一方、スレッドごとに cwd を持たせる手が macOS と Linux にある。
+SPEC の bind の fork-cwd (と D 無しの fork-cwd-sockdir) と、最終手段を使う `connect_ex` の fork-cwd-direct は、ディレクトリに `fchdir` した子を fork し、子が bind / connect するもの。Go は runtime がマルチスレッドで、生の fork は使えない。一方、スレッドごとに cwd を持たせる手が macOS と Linux にある。
 
 ## Decision
 

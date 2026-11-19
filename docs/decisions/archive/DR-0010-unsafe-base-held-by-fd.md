@@ -5,7 +5,7 @@
 
 ## Context
 
-ハブの [DR-0008](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0008-unsafe-base-held-by-fd.md) が SPEC に「fd で掴む形」を足した。Linux で seccomp の filter が掛かり (スレッド cwd の経路が使えない、[DR-0004](../DR-0004-thread-cwd-route.md))、`TMPDIR` も `/tmp` も安全な置き場でなく、ファイル名が `/proc` の綴りに収まらないと、connect が `ENAMETOOLONG` になる (hyoui の実測)。
+ハブの [DR-0008](https://github.com/kawaz/sockat/blob/main/docs/decisions/archive/DR-0008-unsafe-base-held-by-fd.md) が SPEC に「fd で掴む形」を足した。Linux で seccomp の filter が掛かり (スレッド cwd の経路が使えない、[DR-0004](../DR-0004-thread-cwd-route.md))、`TMPDIR` も `/tmp` も安全な置き場でなく、ファイル名が `/proc` の綴りに収まらないと、connect が `ENAMETOOLONG` になる (hyoui の実測)。
 
 ## Decision
 

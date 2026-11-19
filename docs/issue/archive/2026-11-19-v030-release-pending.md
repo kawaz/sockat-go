@@ -1,8 +1,9 @@
 ---
 title: v0.3.0 (中心の経路、ListenEx / DialEx、Listen の symlink-file、適合試験の CLI) の release 待ちと残り
-status: open
+status: resolved
 category: task
 created: 2026-11-19
+close_reason: implemented
 ---
 
 # v0.3.0 (中心の経路、ListenEx / DialEx、Listen の symlink-file、適合試験の CLI) の release 待ちと残り
@@ -16,3 +17,7 @@ main@origin は v0.2.0 の後の README の 1 commit まで。それより後の
 ## 残り
 
 - ListenEx で bind は通ったのにファイルを覚えられない分岐は試験で作れず未試験 (DR-0001)
+
+## 結果
+
+v0.3.0 を 2026-11-19 に公開した (tag v0.3.0 = 3434440a、CI は全 OS で通過)。残っていた未試験の分岐は [2026-11-19-listenex-not-recorded-untested.md](../2026-11-19-listenex-not-recorded-untested.md) に分けた。

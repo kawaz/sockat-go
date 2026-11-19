@@ -29,7 +29,7 @@ import (
 )
 
 // unsafePlace is a place that others can write to and that is not sticky
-// (mode 0777), so not safeBase: no place for symlink, but one for D.
+// (mode 0777), so not safeBase: no place for symlink-file, but one for D.
 func unsafePlace(t *testing.T) string {
 	t.Helper()
 	p := mkdirMode(t, tmpDir(t)+"/open", 0o777)
@@ -40,7 +40,7 @@ func unsafePlace(t *testing.T) string {
 }
 
 // heldCfg is the route order's inputs with the thread cwd off and the real
-// /proc, D placed in place, and bases as the places for symlink.
+// /proc, D placed in place, and bases as the places for symlink-file.
 func heldCfg(place string, bases ...string) *config {
 	c := procCfg(bases...)
 	c.dBases = []string{place}
@@ -73,7 +73,7 @@ func pastProc(t *testing.T) (string, *net.UnixListener) {
 }
 
 // A dial of a name past proc-direct and proc, with the thread cwd off, takes
-// proc-held, also with a safe place for symlink given: symlink is later in the
+// proc-held, also with a safe place for symlink-file given: symlink-file is later in the
 // connect order, and its place stays untouched. It reaches the listener at
 // the path (data flows both ways, the types are the net package's in working
 // order, the server sees this process as the peer), and D's place is empty
@@ -151,7 +151,7 @@ func TestAnotherUsersPlaceServesForProcHeld(t *testing.T) {
 
 // A dial through proc-held that fails is the result: ENOENT for a missing
 // socket, ECONNREFUSED for a socket nobody listens on, as they are, with D's
-// place empty afterwards (cleaned up after a failure too), and symlink, the
+// place empty afterwards (cleaned up after a failure too), and symlink-file, the
 // next route, not tried: the safe place for it stays untouched. A missing
 // directory is ENOENT before any place is looked at.
 func TestAFailureThroughProcHeldIsReturnedAndNotRetried(t *testing.T) {
@@ -185,8 +185,8 @@ func TestAFailureThroughProcHeldIsReturnedAndNotRetried(t *testing.T) {
 }
 
 // Without /proc (procSelfFD pointed at an empty directory, or at nothing)
-// there is no proc-held: the connect order is relative, thread-cwd, symlink.
-// With the thread cwd off and only an unsafe place for symlink, the dial is
+// there is no proc-held: the connect order is relative, thread-cwd, symlink-file.
+// With the thread cwd off and only an unsafe place for symlink-file, the dial is
 // ENAMETOOLONG, and nothing is made in either place (their mtime is
 // unchanged).
 func TestWithoutProcThereIsNoProcHeld(t *testing.T) {
@@ -210,7 +210,7 @@ func TestWithoutProcThereIsNoProcHeld(t *testing.T) {
 }
 
 // A listen never takes proc-held, or any route of a dial alone: it creates
-// nothing in a place for symlink, unsafe or not. With the thread cwd off, a
+// nothing in a place for symlink-file, unsafe or not. With the thread cwd off, a
 // 95-byte name is too long for proc, so the listen is ENAMETOOLONG; a short
 // name takes proc (D goes in the socket's directory here, procCfg giving no
 // place for D).
@@ -234,7 +234,7 @@ func TestAListenCreatesNothingInAnUnsafePlace(t *testing.T) {
 // ours and private, so proc-held uses it (opened O_PATH, which needs no read
 // permission, then chmod 0700 through /proc) rather than failing every dial
 // and leaving a directory behind each time: the dial arrives through
-// proc-held, D's place is empty afterwards, and the safe place for symlink
+// proc-held, D's place is empty afterwards, and the safe place for symlink-file
 // after it is not reached. The umask belongs to the whole process, hence the
 // child. The EACCES case only bites as non-root (root ignores the mode), so
 // the uid 1000 run is the one that pins 0477.
@@ -310,7 +310,7 @@ func TestADialThroughProcHeldFailsAtOnceOnAFullBacklog(t *testing.T) {
 }
 
 // The case that brought proc-held in (hyoui): under a seccomp filter (no
-// thread-cwd), with no place for symlink and a file name too long for
+// thread-cwd), with no place for symlink-file and a file name too long for
 // proc-direct and proc, a dial reaches the socket through proc-held, after
 // recording the routes before it as unusable, thread-cwd among them (not even
 // tried: unshare(2) is not called under a filter). A child process puts a

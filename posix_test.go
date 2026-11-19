@@ -4,11 +4,12 @@ package sockat
 
 // The routes of a dial that spell the path without D (every system but
 // FreeBSD): relative (the path relative to the cwd), first in the connect
-// order where /proc is not used, and symlink (a short symlink to the socket
+// order where /proc is not used, and symlink-file (a short symlink to the socket
 // file under the first safe place of TMPDIR, then /tmp), last in it. A
 // connect leaves no spelling behind with the peer (the connecting socket is
 // not bound), so these spellings need no random part; a listen never takes
-// them. With /proc, Linux has proc-direct and proc-held instead
+// relative, and takes symlink-file only where a bind follows a symlink
+// (symlinkfile_test.go). With /proc, Linux has proc-direct and proc-held instead
 // (os_linux_test.go, heldlink_linux_test.go).
 //
 // The tests reach them with fallbackCfg: no thread cwd and no /proc, so the
@@ -36,14 +37,14 @@ const noProc = "/nonexistent/proc/self/fd"
 
 // fallbackCfg is the route order's inputs with the routes through D out of
 // reach (no thread cwd, /proc made to look absent, so no means at all) and
-// bases as the places for symlink: a dial takes relative or symlink.
+// bases as the places for symlink-file: a dial takes relative or symlink-file.
 func fallbackCfg(bases ...string) *config {
 	return &config{tmpBases: bases, procSelfFD: noProc, threadCwd: false}
 }
 
 // centralCfg is the route order's inputs for the routes through D: D placed in
 // dBases (then the socket's directory), thread-cwd on, /proc looked
-// for where it is (Linux), and no place for symlink.
+// for where it is (Linux), and no place for symlink-file.
 func centralCfg(dBases ...string) *config {
 	return &config{dBases: dBases, procSelfFD: "/proc/self/fd", threadCwd: true}
 }
@@ -636,7 +637,7 @@ func TestChildDialFromEnv(t *testing.T) {
 // reaches the listener, nothing is created in the place or next to the
 // socket. A real failure stays what it is: a missing directory is ENOENT. A
 // listen with the routes through D out of reach is ENAMETOOLONG too: a listen
-// never takes relative or symlink.
+// never takes relative, and symlink-file's only place is too long.
 func TestWithNoRouteLeftAPathIsENAMETOOLONGAndNothingIsMade(t *testing.T) {
 	t.Parallel()
 	p := nest(t, tmpDir(t), 600, "s.sock")

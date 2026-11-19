@@ -226,9 +226,10 @@ func TestAMissingDirectoryIsENOENTBeforeDIsMade(t *testing.T) {
 // a dial through the whole connect order included (such a name is past
 // proc-direct on Linux). One byte more is told before anything is made: a
 // listen is then ENAMETOOLONG (Go has no fork, the SPEC's next way for a
-// bind) and nothing is made in the place for D. A dial goes on in the connect
+// bind; its inputs give symlink-file, which a listen tries first on macOS, no
+// place) and nothing is made in the place for D. A dial goes on in the connect
 // order: on Linux proc is longer still, so proc-held takes it (D made in the
-// place and removed, the symlink's place untouched); on macOS the symlink
+// place and removed, symlink-file's place untouched); on macOS symlink-file
 // under a safe place does (the place for D untouched).
 func TestTheRoutesThroughDCarryAFileNameOfDirectMaxLess11Bytes(t *testing.T) {
 	t.Parallel()
@@ -1089,7 +1090,7 @@ func TestTheSockdirRoutesNeedTheDirectorysFdAndASpellingThatFits(t *testing.T) {
 // /proc/self/fd/<D>/R/<name> fits (with a one-digit fd, the estimate made
 // before D) but /proc/self/fd/<fd>/.sockat.XXXXXXXXXX/<name> does not for proc.
 // Nothing is created anywhere: not in the socket's directory (its mtime is
-// unchanged), not in ListenAny's place, not at the path.
+// unchanged), not in symlink-dir's place, not at the path.
 //
 // As root, who may write in a read-only directory, it runs in a child that
 // has dropped to nobody (unprivileged), so that it runs in the Linux container
@@ -1250,8 +1251,8 @@ func TestChildUnopenableD(t *testing.T) {
 // ----- the connect order -----
 
 // The connect order where /proc is not used (SPEC "connect の順"): on Linux
-// without /proc relative, thread-cwd, symlink; on macOS relative, widened,
-// thread-cwd, symlink; then ENAMETOOLONG. Each route is reached by making the
+// without /proc relative, thread-cwd, symlink-file; on macOS relative, widened,
+// thread-cwd, symlink-file; then ENAMETOOLONG. Each route is reached by making the
 // ones before it unusable, through the whole order (runLong), and the routes
 // passed over are recorded in the order's sequence, after standard (the path
 // is long) and with none that is not in the order (proc-direct, proc,
@@ -1259,13 +1260,13 @@ func TestChildUnopenableD(t *testing.T) {
 // every time on macOS.
 //
 //   - near the cwd: relative, which makes nothing (the place for D and the
-//     place for symlink keep their mtime);
+//     place for symlink-file keep their mtime);
 //   - far from the cwd: thread-cwd where a thread may have a cwd of its own
 //     (D made in its place and removed), otherwise symlink;
 //   - far, the thread cwd off: symlink, under the safe place (the link made
 //     there and removed), D's place untouched;
-//   - far, the thread cwd off and only unsafe places for symlink (two):
-//     ENAMETOOLONG, symlink recorded once, nothing made anywhere.
+//   - far, the thread cwd off and only unsafe places for symlink-file (two):
+//     ENAMETOOLONG, symlink-file recorded once, nothing made anywhere.
 //
 // /proc is made to look absent (noProc) on Linux. Runs in a child process
 // whose cwd is a temporary directory, to have a socket near the cwd.

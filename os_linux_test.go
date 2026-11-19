@@ -22,7 +22,7 @@ import (
 
 // procCfg is the route order's inputs with the thread cwd off and the real
 // /proc: of the routes through D only proc and proc-held (with no place for D
-// but the socket's directory), and bases as the places for symlink.
+// but the socket's directory), and bases as the places for symlink-file.
 func procCfg(bases ...string) *config {
 	return &config{tmpBases: bases, procSelfFD: "/proc/self/fd", threadCwd: false}
 }
@@ -33,15 +33,15 @@ func procCfg(bases ...string) *config {
 // bytes longer, practically never fits where it does not), so proc is a
 // listen's way only:
 //
-//	| way         | path                          | inputs                                  | listen     | dial        |
-//	|-------------|-------------------------------|-----------------------------------------|------------|-------------|
-//	| standard    | directMax bytes               | (the public order)                      | standard   | standard    |
-//	| thread-cwd  | 600 bytes, a 92-byte name     | D in a place (proc-direct does not fit) | thread-cwd | thread-cwd  |
-//	| proc        | 600 bytes, name s.sock        | thread cwd off, D in a place            | proc       | proc-direct |
-//	| proc-direct | 600 bytes, an 85-byte name    | thread cwd off (proc does not fit)      | (listenAt) | proc-direct |
-//	| proc-held   | 600 bytes, a 97-byte name     | thread cwd off, D in an unsafe place    | (listenAt) | proc-held   |
-//	| symlink     | 600 bytes, a 97-byte name     | no means, no /proc; a safe place        | (listenAt) | symlink     |
-//	| relative    | directMax bytes below the cwd | no means, no /proc                      | (listenAt) | relative    |
+//	| way          | path                          | inputs                                  | listen     | dial         |
+//	|--------------|-------------------------------|-----------------------------------------|------------|--------------|
+//	| standard     | directMax bytes               | (the public order)                      | standard   | standard     |
+//	| thread-cwd   | 600 bytes, a 92-byte name     | D in a place (proc-direct does not fit) | thread-cwd | thread-cwd   |
+//	| proc         | 600 bytes, name s.sock        | thread cwd off, D in a place            | proc       | proc-direct  |
+//	| proc-direct  | 600 bytes, an 85-byte name    | thread cwd off (proc does not fit)      | (listenAt) | proc-direct  |
+//	| proc-held    | 600 bytes, a 97-byte name     | thread cwd off, D in an unsafe place    | (listenAt) | proc-held    |
+//	| symlink-file | 600 bytes, a 97-byte name     | no means, no /proc; a safe place        | (listenAt) | symlink-file |
+//	| relative     | directMax bytes below the cwd | no means, no /proc                      | (listenAt) | relative     |
 func ways(t *testing.T) []way {
 	t.Helper()
 	d := tmpDir(t)
@@ -60,14 +60,14 @@ func ways(t *testing.T) []way {
 		{"proc", nest(t, d+"/procd", 600, "s.sock"), procD, routeProc, routeProcDirect},
 		{"proc-direct", nest(t, d+"/proc", 600, n85), direct, "", routeProcDirect},
 		{"proc-held", nest(t, d+"/held", 600, n97), held, "", routeProcHeld},
-		{"symlink", nest(t, d+"/symlink", 600, n97), fallbackCfg(safe), "", routeSymlinkFile},
+		{"symlink-file", nest(t, d+"/symlink", 600, n97), fallbackCfg(safe), "", routeSymlinkFile},
 		{"relative", belowCwdPath(t, directMax, "s.sock"), fallbackCfg(), "", routeRelative},
 	}
 }
 
 // Proc-direct, the first of the connect order with /proc: a dial goes through
 // /proc/self/fd/<dirfd>/<name>, however long the directory part is, without
-// making anything: the place for D and the place for symlink are untouched.
+// making anything: the place for D and the place for symlink-file are untouched.
 // A listen never takes it: with the thread cwd off and an 85-byte name too
 // long for proc (which holds R/ too), a listen of the same path is
 // ENAMETOOLONG, also without making anything.
@@ -97,7 +97,7 @@ func TestADialTakesProcDirectFirstAndMakesNothing(t *testing.T) {
 // told before anything is made (the place for D keeps its mtime): a listen is
 // ENAMETOOLONG. A dial, its name too long for proc-direct too, passes over
 // thread-cwd and proc for the same reason and takes proc-held, whose spelling
-// holds no file name: D is made in its place (and removed), and symlink,
+// holds no file name: D is made in its place (and removed), and symlink-file,
 // later in the connect order, is not reached (its safe place is untouched).
 func TestAFileNamePastTheRoutesThroughDIsListenedNowhereAndDialedThroughProcHeld(t *testing.T) {
 	t.Parallel()
@@ -462,7 +462,7 @@ func TestChildWithoutProcUnderUmask0477(t *testing.T) {
 // ----- the connect order with /proc -----
 
 // The connect order with /proc (SPEC "connect の順"): proc-direct,
-// thread-cwd, proc, proc-held, symlink, then ENAMETOOLONG. Each route is
+// thread-cwd, proc, proc-held, symlink-file, then ENAMETOOLONG. Each route is
 // reached by making the ones before it unusable, through the whole order
 // (runLong), and the routes passed over are recorded in the order's
 // sequence, after standard (the path is long) and with none that is not in
@@ -479,7 +479,7 @@ func TestChildWithoutProcUnderUmask0477(t *testing.T) {
 //     socket's directory not opened (sdir nil), forced with dialFrom.
 //
 // Thread-cwd, proc and proc-held make D in its place and remove it. The safe
-// place for symlink, last in the order, is never reached (its mtime is
+// place for symlink-file, last in the order, is never reached (its mtime is
 // unchanged). Symlink and ENAMETOOLONG need D made nowhere:
 // TestWhenDCanBeMadeNowhereADialPassesTheRoutesThroughDWithoutRemakingD.
 func TestTheConnectOrderWithProc(t *testing.T) {
@@ -560,8 +560,8 @@ func TestTheConnectOrderWithProc(t *testing.T) {
 //     after proc-direct, proc-held for want of D;
 //   - D's name is drawn once per place (2), not again for proc-held after
 //     thread-cwd found no place (that would draw 4);
-//   - the dial goes on to symlink under the safe place; with no place for
-//     symlink either, it is ENAMETOOLONG with symlink recorded last.
+//   - the dial goes on to symlink-file under the safe place; with no place for
+//     symlink-file either, it is ENAMETOOLONG with symlink-file recorded last.
 //
 // Nothing is left in either place or the socket's directory. As root, who
 // may write in a read-only directory, it runs in a child that has dropped to
@@ -628,7 +628,7 @@ func TestWhenDCanBeMadeNowhereADialPassesTheRoutesThroughDWithoutRemakingD(t *te
 // is not opened (sdir nil), so proc-direct cannot be used, and the thread cwd
 // is off; the file name is 80 bytes (/proc/self/fd/<n>/ plus R/ plus 80 is
 // 107 with a one-digit fd, 108 with two). D's place is empty afterwards and
-// the safe place for symlink untouched. Runs in a child process, which first
+// the safe place for symlink-file untouched. Runs in a child process, which first
 // takes fds 0 to 9 so that D's fd has two digits.
 func TestDIsMadeOnceAndSharedByProcAndProcHeld(t *testing.T) {
 	t.Parallel()

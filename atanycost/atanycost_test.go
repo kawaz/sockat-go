@@ -224,8 +224,8 @@ func TestUnderASeccompFilterAnEightyTwoByteNameIsRecreatableSpelling(t *testing.
 		}
 		names = append(names, s.Name)
 	}
-	if strings.Join(names, ",") != "thread-cwd,proc" {
-		t.Fatalf("skipped %+v, want thread-cwd then proc", res.Skipped)
+	if strings.Join(names, ",") != "standard,thread-cwd,proc" {
+		t.Fatalf("skipped %+v, want standard, thread-cwd, then proc", res.Skipped)
 	}
 	t.Logf("skipped: %+v", res.Skipped)
 	defer l.Close()
@@ -307,4 +307,25 @@ func TestChildRelativePaths(t *testing.T) {
 		t.Fatalf("no socket at the relative path: %v", err)
 	}
 	l.Close()
+}
+
+// A short path goes to the standard library; when that bind fails (here
+// EADDRINUSE, a file being at the path), the route that failed is standard,
+// and nothing was skipped before it.
+func TestAShortPathsFailureNamesStandard(t *testing.T) {
+	t.Parallel()
+	d, err := os.MkdirTemp("/tmp", "sockat-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(d)
+	p := d + "/s.sock"
+	if err := os.WriteFile(p, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = atanycost.Listen(p)
+	var ae *atanycost.Error
+	if !errors.As(err, &ae) || !errors.Is(err, syscall.EADDRINUSE) || ae.Route != "standard" || len(ae.Skipped) != 0 {
+		t.Fatalf("%T %+v, want EADDRINUSE through standard", err, err)
+	}
 }

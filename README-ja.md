@@ -132,7 +132,9 @@ if err != nil {
 }
 defer os.Remove(path) // the path passed, not l.Addr().String()
 defer l.Close()
-fmt.Println("recreatable-spelling:", res.Has(atanycost.RecreatableSpelling))
+if res.Has(atanycost.RecreatableSpelling) {
+	log.Printf("%s: bound through a shared place", path)
+}
 ```
 
 ## 使ってはいけない書き方

@@ -46,6 +46,9 @@ func runLong(o op, path string, cfg *config) (endpoint, route, error) {
 	if _, err := realDir(dir); err != nil {
 		return nil, "", err
 	}
+	// The routes are tried from here: standard, first in their order, was
+	// not usable for the path's length.
+	cfg.trace.add(routeStandard, "path too long")
 	sdir, err := openDir(dir)
 	if err != nil {
 		sdir = nil

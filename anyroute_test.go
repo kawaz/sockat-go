@@ -88,7 +88,7 @@ var (
 // unusable before symlink, in the order tried: thread-cwd (turned off) where
 // the system has it, then proc (no /proc) where it has that.
 func noMeansSkipped() []route {
-	var rs []route
+	rs := []route{routeStandard}
 	if hasThreadCwd {
 		rs = append(rs, routeThreadCwd)
 	}
@@ -335,21 +335,21 @@ func TestListenAnyWhereListenReachesReportsThatRoutesLosses(t *testing.T) {
 		l, got := listenAnyAt(t, p, cfg)
 		// The first means here: thread-cwd where the system allows it, with
 		// nothing skipped; proc otherwise, after thread-cwd.
-		wantRoute, wantSkipped := routeThreadCwd, []route(nil)
+		wantRoute, wantSkipped := routeThreadCwd, []route{routeStandard}
 		if !threadCwdAvailable() {
-			wantRoute, wantSkipped = routeProc, []route{routeThreadCwd}
+			wantRoute, wantSkipped = routeProc, []route{routeStandard, routeThreadCwd}
 		}
 		if !slices.Equal(got.losses, respelled) || got.route != wantRoute || !slices.Equal(skippedNames(t, got), wantSkipped) {
 			t.Fatalf("a long path through D: %+v, want respelled through %s after %v", got, wantRoute, wantSkipped)
 		}
 		assertReachable(t, l, p)
 
-		// With the thread cwd off, Linux takes proc, after thread-cwd.
+		// With the thread cwd off, Linux takes proc, after standard (too long) and thread-cwd.
 		if runtime.GOOS == "linux" {
 			q := filepath.Dir(p) + "/q.sock"
 			cfg.threadCwd = false
 			l, got := listenAnyAt(t, q, cfg)
-			if got.route != routeProc || !slices.Equal(skippedNames(t, got), []route{routeThreadCwd}) {
+			if got.route != routeProc || !slices.Equal(skippedNames(t, got), []route{routeStandard, routeThreadCwd}) {
 				t.Fatalf("thread cwd off: %+v", got)
 			}
 			assertReachable(t, l, q)

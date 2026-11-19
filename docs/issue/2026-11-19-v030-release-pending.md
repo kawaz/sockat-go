@@ -13,10 +13,6 @@ main@origin は v0.2.0 の後の README の 1 commit まで。それより後の
 
 - release の OK。出す時は `just bump-version minor` (0.3.0) → `just push`
 
-## ハブへの報告 (統括が持つ)
-
-- `ListenEx` / `DialEx` の Go の形 ([DR-0014](../decisions/DR-0014-ex-last-resort-and-diagnostics.md)) と、ハブの `just conformance` で go の列が全部一致したこと
-
 ## 残り
 
 - ListenEx で bind は通ったのにファイルを覚えられない分岐は試験で作れず未試験 (DR-0001)

@@ -94,9 +94,17 @@ func centralRoute(o op, dir string, sdir *os.File, name string, cfg *config) (en
 	ep, r, err := throughD(o, sdir, real, name, thread, proc, cfg)
 	if errors.Is(err, errNoD) {
 		if o == opListen {
-			return withoutD(o, sdir, real, name, thread, proc, cfg)
+			ep, r, err = withoutD(o, sdir, real, name, thread, proc, cfg)
+			if errors.Is(err, errUnusable) {
+				cfg.trace.add(routeForkSockdir, noForkRoute)
+			}
+			return ep, r, err
 		}
 		return nil, "", errUnusable
+	}
+	if errors.Is(err, errUnusable) && o == opListen {
+		// SPEC's next route for a bind; Go cannot make it.
+		cfg.trace.add(routeFork, noForkRoute)
 	}
 	return ep, r, err
 }
@@ -449,3 +457,6 @@ func (t *trace) skipMeans(rs routes, reason string) {
 		}
 	}
 }
+
+// noForkRoute is the reason the fork routes are skipped: Go cannot fork bare.
+const noForkRoute = "no fork route in sockat-go"

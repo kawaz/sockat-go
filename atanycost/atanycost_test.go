@@ -224,8 +224,8 @@ func TestUnderASeccompFilterAnEightyTwoByteNameIsRecreatableSpelling(t *testing.
 		}
 		names = append(names, s.Name)
 	}
-	if strings.Join(names, ",") != "standard,thread-cwd,proc" {
-		t.Fatalf("skipped %+v, want standard, thread-cwd, then proc", res.Skipped)
+	if strings.Join(names, ",") != "standard,thread-cwd,proc,fork" {
+		t.Fatalf("skipped %+v, want standard, thread-cwd, proc, then fork (which Go cannot make)", res.Skipped)
 	}
 	t.Logf("skipped: %+v", res.Skipped)
 	defer l.Close()

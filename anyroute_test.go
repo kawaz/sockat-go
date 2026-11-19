@@ -86,7 +86,7 @@ var (
 
 // noMeansSkipped is what noMeansCfg makes the routes through D report as
 // unusable before symlink, in the order tried: thread-cwd (turned off) where
-// the system has it, then proc (no /proc) where it has that.
+// the system has it, then proc (no /proc) where it has that, then fork.
 func noMeansSkipped() []route {
 	rs := []route{routeStandard}
 	if hasThreadCwd {
@@ -95,7 +95,8 @@ func noMeansSkipped() []route {
 	if hasProc {
 		rs = append(rs, routeProc)
 	}
-	return rs
+	// SPEC's next route for a bind, which Go cannot make: skipped as such.
+	return append(rs, routeFork)
 }
 
 // assertReachable dials p through the public order and exchanges data with

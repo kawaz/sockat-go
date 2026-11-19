@@ -54,10 +54,12 @@ const (
 	routeThreadCwd route = "thread-cwd" // a thread whose own cwd is D (Linux, macOS)
 	routeProc      route = "proc"       // /proc/self/fd/<D>/R/<name> (Linux)
 	routeAt        route = "at"         // bindat(2) / connectat(2) on D (FreeBSD)
+	routeFork      route = "fork"       // SPEC's; Go has no fork route (named in atanycost's skipped)
 	// A bind's form without D: .sockat.R/<name> relative to the socket's directory.
 	routeThreadCwdSockdir route = "thread-cwd-sockdir"
 	routeProcSockdir      route = "proc-sockdir"
 	routeAtSockdir        route = "at-sockdir"
+	routeForkSockdir      route = "fork-sockdir" // SPEC's; Go has no fork route
 	// The fallback routes of a dial.
 	routeProcDirect route = "proc-direct" // /proc/self/fd/<dirfd>/<name> (Linux)
 	routeProcHeld   route = "proc-held"   // /proc/self/fd/<D>/s, s a symlink to the file (Linux)

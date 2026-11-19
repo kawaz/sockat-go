@@ -1,4 +1,4 @@
-# DR-0011: 長いパスは自分専用のディレクトリ D と乱数の symlink R を通す (中心の経路)
+# DR-0011: 長いパスは自分専用のディレクトリ D と乱数の symlink R を通す
 
 - Status: Accepted
 - Date: 2026-11-19
@@ -9,29 +9,20 @@
 
 ## Decision
 
-試す順番 (Listen と Dial):
+Listen の試す順番:
 
-| 順 | Listen | Dial |
-|---|---|---|
-| 1 | 標準に渡す長さ以下なら標準にそのまま | 同じ |
-| 2 | 中心の経路 (Linux / macOS はスレッド cwd、FreeBSD は bindat) | 中心の経路 (Linux / macOS はスレッド cwd、FreeBSD は connectat) |
-| 3 | 中心の経路の /proc 版 (`/proc` を使える Linux) | 同左 |
-| 4 | `ENAMETOOLONG` | 予備の経路 |
-| 5 | | `ENAMETOOLONG` |
-
-Dial の予備の経路:
-
-| OS | 試す順番 |
+| 順 | Listen |
 |---|---|
-| Linux (`/proc` を使える) | /proc → (置き場ごとに) 安全なら symlink、安全でなければ fd で掴む形 ([DR-0010](DR-0010-unsafe-base-held-by-fd.md)) |
-| Linux (`/proc` を使えない) | 相対パス → symlink |
-| macOS | 相対パス → symlink (広げた sockaddr は使わない、[DR-0005](DR-0005-no-widened-sockaddr.md)) |
-| FreeBSD | connectat (ソケットのディレクトリの fd とファイル名) |
-| NetBSD / OpenBSD / illumos | 相対パス → symlink |
+| 1 | 標準に渡す長さ以下なら標準にそのまま |
+| 2 | D を通す経路 (Linux / macOS は thread-cwd、FreeBSD は at (bindat)) |
+| 3 | proc (`/proc` を使える Linux) |
+| 4 | `ENAMETOOLONG` |
 
-中心の経路 (SPEC のまま):
+Dial は標準に渡す長さを超えると、OS ごとの「connect の順」で試す ([DR-0013](DR-0013-connect-order.md))。その中の thread-cwd・proc・at (connectat) と proc-held が D を使う。
 
-- 最初にソケットのディレクトリを `stat` で引き、realpath を取る。無ければ `ENOENT`、ディレクトリでなければ `ENOTDIR`、realpath を引けなければそのエラー (長さの判定や D を作るより前。`ENAMETOOLONG` に化けさせない)。realpath は絶対パスにしてから成分ごとに引く (macOS の getcwd は消された cwd の綴りをそのまま返すので、"." だけを引くと実在しないパスを実パスとみなす)。fd が要る経路 (置き場としてのソケットのディレクトリ、Dial の予備の /proc と connectat) のためにそれを開き、開けなければ (O_RDONLY で開く OS で読み取り権限が無い等) その経路は使えないとして次へ
+D を通す経路 (SPEC のまま):
+
+- 最初にソケットのディレクトリを `stat` で引き、realpath を取る。無ければ `ENOENT`、ディレクトリでなければ `ENOTDIR`、realpath を引けなければそのエラー (長さの判定や D を作るより前。`ENAMETOOLONG` に化けさせない)。realpath は絶対パスにしてから成分ごとに引く (macOS の getcwd は消された cwd の綴りをそのまま返すので、"." だけを引くと実在しないパスを実パスとみなす)。fd が要る経路 (置き場としてのソケットのディレクトリ、Dial の proc-direct と at-direct) のためにそれを開き、開けなければ (O_RDONLY で開く OS で読み取り権限が無い等) その経路は使えないとして次へ
 - 長さ (`R/<ファイル名>` = 11 + ファイル名が sockaddr に入るか) と手段を使えるか (seccomp の filter、`/proc`) を先に確かめ、使えなければ何も作らない
 - 置き場 `${TMPDIR:-/tmp}` (相対パスも可) → `/tmp` → ソケットのディレクトリ (名前は `.sockat.`) の順に、`mkdirat` で 0700 の D を作る
 - D を開いて `fstat` で「ディレクトリ・持ち主が実効 uid・group と other に権限が無い」を確かめ、0700 にそろえる
@@ -46,8 +37,9 @@ Dial の予備の経路:
 - 作った直後の D を開けない時 (macOS の `O_SEARCH` で umask が持ち主の検索権限を削った等) は、名前を `fstatat(AT_SYMLINK_NOFOLLOW)` で引いて確認と同じ条件なら `unlinkat(AT_REMOVEDIR)` で消し (空のディレクトリしか消えない)、次の置き場へ (kawaz 裁定 D12-Q5)
 - 確認が通った後に 0700 にそろえられなければ (umask 0477 の非 root で開き直しが `EACCES` 等)、その置き場では作れないとみなし、D を片付けて次へ。
 - 片付け: R は作れた時だけ消す。D は確認が通り、名前の `(st_dev, st_ino)` が fd と一致する時だけ消す。確認に落ちた D は中身も含めて触らない
+- D は 1 回の呼び出しで 1 度だけ作り、D を使う手段 (Listen の thread-cwd → proc、Dial の connect の順の中の D を使う経路) で共有する。どこにも作れなかったら作り直さない
 
-- D をどこにも作れない時、Listen は D 無しの形で試す: ソケットのディレクトリに R (`.sockat.` + 乱数 10 文字、ソケットのディレクトリの realpath を指す) を作り、ソケットのディレクトリの fd を基準に `.sockat.XXXXXXXXXX/<ファイル名>` で、中心の経路と同じ手段の順 (スレッド cwd (FreeBSD は bindat) → /proc 版) に bind する。ソケットのディレクトリを開けない、綴りが収まらない、R を作れない時は `ENAMETOOLONG`。Dial は D 無しの形を使わず予備の経路へ
+- D をどこにも作れない時、Listen は D 無しの形で試す: ソケットのディレクトリに R (`.sockat.` + 乱数 10 文字、ソケットのディレクトリの realpath を指す) を作り、ソケットのディレクトリの fd を基準に `.sockat.XXXXXXXXXX/<ファイル名>` で、D を通す経路と同じ手段の順 (thread-cwd-sockdir (FreeBSD は at-sockdir) → proc-sockdir) に bind する。ソケットのディレクトリを開けない、綴りが収まらない、R を作れない時は `ENAMETOOLONG`。Dial は D 無しの形を使わず、connect の順の次の経路へ進む ([DR-0013](DR-0013-connect-order.md))
   - 例: `/proc` の無い Linux で umask 0477 の非 root は D を 0700 にそろえられず (どの置き場でも)、D 無しの形で bind する (試験で確かめた)
 
 ## 理由
@@ -59,7 +51,7 @@ Dial の予備の経路:
 ## Consequences
 
 - ファイル名の上限は Listen で Linux 96 (/proc 版はおよそ 79)、macOS / FreeBSD 92
-- Go には fork が無いので、SPEC の bind の 4 (中心の経路を fork で) と D 無しの fork を作らない。次の環境の Listen は長いパスで `ENAMETOOLONG`: NetBSD / OpenBSD / illumos (中心の経路の手段が無い)、Linux で seccomp の filter があり `/proc` も無い、macOS で `__pthread_fchdir` が使えない。Linux で filter があり `/proc` がある時は、ファイル名およそ 79 バイトまで
+- Go には fork が無いので、SPEC の bind の 4 (fork) と D 無しの fork (fork-sockdir) を作らない。次の環境の Listen は長いパスで `ENAMETOOLONG`: NetBSD / OpenBSD / illumos (D を通す経路の手段が無い)、Linux で seccomp の filter があり `/proc` も無い、macOS で `__pthread_fchdir` が使えない。Linux で filter があり `/proc` がある時は、ファイル名およそ 79 バイトまで
 - 長いパスの Listen / Dial のたびに D と R を作って消す
 
 ## 判断の出所

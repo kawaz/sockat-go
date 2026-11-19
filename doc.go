@@ -31,29 +31,34 @@
 // the kernel is given R/<name> relative to D. R and D are removed afterwards,
 // so the spelling the kernel keeps (Addr and the like) names nothing wherever
 // it is resolved later. D goes in $TMPDIR (or /tmp), failing that /tmp,
-// failing that the socket's directory (as .sockat.XXXXXXXXXX). The means of
-// making the call relative to D:
+// failing that the socket's directory (as .sockat.XXXXXXXXXX); it is made at
+// most once per call. The routes, tried in this order (the names are the
+// specification's):
 //
-//	| System          | Listen                     | Dial                                       |
-//	|-----------------|----------------------------|--------------------------------------------|
-//	| Linux, Android  | thread cwd, /proc variant  | thread cwd, /proc variant, fallback routes |
-//	| macOS           | thread cwd                 | thread cwd, fallback routes                |
-//	| FreeBSD         | bindat                     | connectat, fallback route                  |
-//	| NetBSD, OpenBSD | none (ENAMETOOLONG)        | fallback routes                            |
-//	| illumos, other  | none (ENAMETOOLONG)        | fallback routes                            |
+//	| System              | Listen              | Dial                                              |
+//	|---------------------|---------------------|---------------------------------------------------|
+//	| Linux with /proc    | thread-cwd, proc    | proc-direct, thread-cwd, proc, proc-held, symlink |
+//	| Linux without /proc | thread-cwd          | relative, thread-cwd, symlink                     |
+//	| macOS               | thread-cwd          | relative, thread-cwd, symlink                     |
+//	| FreeBSD             | at (bindat)         | at-direct, at (connectat)                         |
+//	| NetBSD, OpenBSD     | none (ENAMETOOLONG) | relative, symlink                                 |
+//	| illumos, other      | none (ENAMETOOLONG) | relative, symlink                                 |
 //
-// Thread cwd is a throwaway goroutine locked to its own OS thread that moves
+// Thread-cwd is a throwaway goroutine locked to its own OS thread that moves
 // that thread's working directory (and no other's) into D; the goroutine ends
 // without unlocking, so the thread is discarded. Linux uses unshare(CLONE_FS),
 // but not under a seccomp filter (such as Docker's default profile); macOS
-// uses __pthread_fchdir. The /proc variant passes /proc/self/fd/<D>/R/<name>.
+// uses __pthread_fchdir. Proc passes /proc/self/fd/<D>/R/<name>, at passes D's
+// fd to bindat / connectat.
 //
-// The fallback routes of Dial are, on Linux with /proc, /proc/self/fd/<dirfd>/<name>
-// and then a symlink to the socket file (in a safe place, or held by the fd
-// of a directory of sockat's own); elsewhere the path relative to the cwd and
-// then the symlink; on FreeBSD connectat on the socket's directory. Go cannot
-// fork, so there is no fork route: a Listen that the central route cannot
-// make is ENAMETOOLONG.
+// Dial tries first what needs no writing and no thread, as a connect leaves
+// no spelling behind: proc-direct passes /proc/self/fd/<dirfd>/<name>, relative
+// the path relative to the cwd, at-direct the socket's directory fd to
+// connectat. Proc-held passes /proc/self/fd/<D>/s, s a symlink in D to the
+// socket file; symlink a symlink to the socket file in a place no other user
+// can replace it in ($TMPDIR, /tmp). Go cannot fork, so there is no fork
+// route: a Listen that no route through D can make is ENAMETOOLONG. The
+// specification's widened sockaddr (macOS) is not used either.
 //
 // None of these changes the working directory of the process or of the
 // calling thread, and all of them can be used from any goroutine. When no
@@ -77,9 +82,9 @@
 //     "dir/..") is EINVAL, and nothing is created.
 //   - The directory is looked up first (resolved to a real path for R); a
 //     rename or a symlink repointed in between is not seen.
-//   - The relative route (Dial's fallback) is exposed to another goroutine's
-//     os.Chdir: when the cwd changed during the call, the result is discarded
-//     and an error is returned.
+//   - Dial's relative route is exposed to another goroutine's os.Chdir: when
+//     the cwd changed during the call, the result is discarded and an error is
+//     returned.
 //   - If the process dies before removing them, sockat.XXXXXXXXXX (D, a
 //     symlink) can be left in $TMPDIR or /tmp, and .sockat.XXXXXXXXXX (D) in
 //     the socket's directory.

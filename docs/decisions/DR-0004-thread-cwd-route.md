@@ -1,20 +1,20 @@
-# DR-0004: fork の代わりにスレッドだけ cwd を移す経路を最後に試す
+# DR-0004: fork の代わりにスレッドだけ cwd を移す経路 (thread-cwd) を使う
 
 - Status: Accepted
 - Date: 2026-11-18
 
 ## Context
 
-SPEC の最後の経路は、ディレクトリに `fchdir` した子を fork し、子がファイル名で bind / connect するもの。Go は runtime がマルチスレッドで、生の fork は使えない。一方、スレッドごとに cwd を持たせる手が macOS と Linux にある。
+SPEC の bind の最後の経路と `connect_any` 系の最後の経路は、ディレクトリに `fchdir` した子を fork し、子が bind / connect するもの。Go は runtime がマルチスレッドで、生の fork は使えない。一方、スレッドごとに cwd を持たせる手が macOS と Linux にある。
 
 ## Decision
 
-- `runtime.LockOSThread` した使い捨ての goroutine で、そのスレッドだけ cwd を中心の経路の D ([DR-0011](DR-0011-central-route.md)) に移し、`R/<ファイル名>` で標準を呼ぶ。スレッドは sockat が起こした goroutine のもので、呼び出し元のスレッドには触らない
+- `runtime.LockOSThread` した使い捨ての goroutine で、そのスレッドだけ cwd を D ([DR-0011](DR-0011-central-route.md)) に移し、`R/<ファイル名>` で標準を呼ぶ。スレッドは sockat が起こした goroutine のもので、呼び出し元のスレッドには触らない
   - Linux: `unshare(CLONE_FS)` → `fchdir`。seccomp の filter が掛かっている時 (`prctl(PR_GET_SECCOMP)` が 0 でない) は `unshare` を呼ばない
   - macOS: `__pthread_fchdir` (syscall 349、libSystem の `pthread_fchdir_np` の中身)
 - goroutine は Unlock せずに終える。runtime はそのスレッドを捨て、他の goroutine に渡さない。新しいスレッドは locked なスレッドからは作られないので、cwd は他のスレッドに移らない
-- 中心の経路の最初の手段として、Listen も Dial も試す ([DR-0011](DR-0011-central-route.md))
-- 使えないとみなす時: Linux で seccomp の filter が掛かっている・`prctl` か `unshare` が失敗した、macOS で `ENOSYS`。その時は中心の経路の次の手段 (/proc 版) へ進む。`unshare` の後の `fchdir` の失敗は本当の失敗として返す
+- Listen は D を通す経路の最初の手段として試す ([DR-0011](DR-0011-central-route.md))。Dial は connect の順の中で試す (Linux は proc-direct か relative の次、macOS は relative と widened の次、[DR-0013](DR-0013-connect-order.md))
+- 使えないとみなす時: Linux で seccomp の filter が掛かっている・`prctl` か `unshare` が失敗した、macOS で `ENOSYS`。その時は次の経路へ進む (Listen は proc、Dial は connect の順の次)。`unshare` の後の `fchdir` の失敗は本当の失敗として返す
 - NetBSD / OpenBSD / illumos にはスレッド単位の cwd が無いので、この経路は無い
 
 実測 (macOS 26.5、Linux の docker arm64 で root と uid 1000、go 1.27):
@@ -43,5 +43,6 @@ SPEC の最後の経路は、ディレクトリに `fchdir` した子を fork �
 
 ## 判断の出所
 
-- この経路を Listen / Dial の最後の手にすること: kawaz 裁定 (HB-Q4) 2026-11-18
+- fork の代わりにこの経路を使うこと: kawaz 裁定 (HB-Q4) 2026-11-18
+- Dial での位置 (connect の順): kawaz 裁定 (ハブの DR-0012) 2026-11-19
 - seccomp の filter の下で `unshare` を呼ばないこと: ハブの DR-0005 2026-11-18

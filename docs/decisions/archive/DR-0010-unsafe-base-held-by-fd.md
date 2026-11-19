@@ -1,11 +1,11 @@
 # DR-0010: /proc を使える Linux の Dial は、安全でない置き場に自分専用のディレクトリを作り fd で掴んで使う
 
-- Status: Accepted
+- Status: Superseded by DR-0013
 - Date: 2026-11-18
 
 ## Context
 
-ハブの [DR-0008](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0008-unsafe-base-held-by-fd.md) が SPEC に「fd で掴む形」を足した。Linux で seccomp の filter が掛かり (スレッド cwd の経路が使えない、[DR-0004](DR-0004-thread-cwd-route.md))、`TMPDIR` も `/tmp` も安全な置き場でなく、ファイル名が `/proc` の綴りに収まらないと、connect が `ENAMETOOLONG` になる (hyoui の実測)。
+ハブの [DR-0008](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0008-unsafe-base-held-by-fd.md) が SPEC に「fd で掴む形」を足した。Linux で seccomp の filter が掛かり (スレッド cwd の経路が使えない、[DR-0004](../DR-0004-thread-cwd-route.md))、`TMPDIR` も `/tmp` も安全な置き場でなく、ファイル名が `/proc` の綴りに収まらないと、connect が `ENAMETOOLONG` になる (hyoui の実測)。
 
 ## Decision
 

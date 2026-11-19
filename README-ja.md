@@ -163,36 +163,31 @@ if res.Has(atanycost.RecreatableSpelling) {
 | Linux / Android / illumos | 107 バイトまで |
 | macOS / FreeBSD / NetBSD / OpenBSD | 103 バイトまで |
 
-それを超えるパスは、自分専用のディレクトリ D を作って fd で掴み、その中にソケットのディレクトリを指す乱数の名前の symlink R を作り、D を基準に `R/<ファイル名>` で bind / connect する (中心の経路)。終わったら R と D を消す。
+それを超えるパスは、自分専用のディレクトリ D を作って fd で掴み、その中にソケットのディレクトリを指す乱数の名前の symlink R を作り、D を基準に `R/<ファイル名>` で bind / connect する (D を通す経路)。終わったら R と D を消す。Dial は、書き込みもスレッドも要らない経路 (proc-direct、relative、at-direct) を先に試し、D を作る経路とスレッドを立てる経路をその後にする ([SPEC の「connect の順」](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#connect-の順))。
 
-経路は [SPEC の「経路の名前」](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#経路の名前)で呼ぶ。
+経路は [SPEC の「経路の名前」](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#経路の名前)で呼ぶ。左から順に試し、最初に使えた経路で bind / connect する。
 
 | OS | Listen | Dial |
 |---|---|---|
-| Linux / Android | thread-cwd → proc | thread-cwd → proc → 予備の経路 |
-| macOS | thread-cwd | thread-cwd → 予備の経路 |
-| FreeBSD | at (bindat) | at (connectat) → 予備の経路 |
-| NetBSD / OpenBSD / illumos / その他の Unix | なし (`ENAMETOOLONG`) | 予備の経路だけ |
+| Linux / Android (`/proc` を使える) | thread-cwd → proc | proc-direct → thread-cwd → proc → proc-held → symlink |
+| Linux / Android (`/proc` を使えない) | thread-cwd | relative → thread-cwd → symlink |
+| macOS | thread-cwd | relative → (widened は無い) → thread-cwd → symlink |
+| FreeBSD | at (bindat) | at-direct → at (connectat) |
+| NetBSD / OpenBSD / illumos / その他の Unix | なし (`ENAMETOOLONG`) | relative → symlink |
 | Windows | 対象外 | 対象外 |
 
 - **D の置き場**: `${TMPDIR:-/tmp}`、作れなければ `/tmp`、それも作れなければソケットのディレクトリ (名前は `.sockat.XXXXXXXXXX`)。置き場が深くても、他人が書ける所でも使える (D を名前でなく fd で辿り、作ってから開くまでのすり替えは持ち主と権限で弾く)。D をどこにも作れない時、Listen は D 無しの形 (thread-cwd-sockdir → proc-sockdir、FreeBSD は at-sockdir) で試す: ソケットのディレクトリに R (`.sockat.XXXXXXXXXX`) を作り、そのディレクトリの fd を基準に `.sockat.XXXXXXXXXX/<ファイル名>` で bind する (ファイル名は Linux 88、macOS / FreeBSD 84 まで、proc-sockdir はおよそ 72)
 - **thread-cwd**: OS スレッドに固定した使い捨ての goroutine で、そのスレッドだけ cwd を D に移し、`R/<ファイル名>` で渡す。スレッドは使い終わったら捨てる (Unlock せずに goroutine を終える)。Linux は `unshare(CLONE_FS)` (seccomp の filter が掛かった環境では使わない。docker の既定等)、macOS は `__pthread_fchdir`
 - **proc**: `/proc/self/fd/<D の fd>/R/<ファイル名>` で渡す。スレッドを使わない
 - **at**: `bindat(2)` / `connectat(2)` に D の fd と `R/<ファイル名>` を渡す
+- D は 1 回の呼び出しで 1 度だけ作り、D を使う経路 (thread-cwd、proc、proc-held、at) で共有する。どこにも作れなければ、D を使う経路はどれも飛ばす (作り直さない)
 
-Dial の予備の経路 (中心の経路が使えない時):
-
-| OS | 試す順番 |
-|---|---|
-| Linux / Android (`/proc` を使える) | proc-direct → (置き場ごとに) symlink か proc-held |
-| Linux / Android (`/proc` を使えない) | relative → symlink |
-| macOS / NetBSD / OpenBSD / illumos / その他 | relative → symlink |
-| FreeBSD | at-direct |
+Dial だけが使う経路 (connect した側のソケットは bind されず、綴りが相手に残らないので、R を挟まない):
 
 - **proc-direct**: ソケットのディレクトリを開き、`/proc/self/fd/<fd>/<ファイル名>` で渡す
 - **relative**: cwd からの相対パスが渡せる長さなら、それで渡す。文字列を書き直すだけで、cwd は変えない
+- **proc-held**: D の中にソケットのファイルを指す symlink `s` を置き、`/proc/self/fd/<D の fd>/s` で渡す。綴りにファイル名が出ないので、ファイル名の長さによらず届く
 - **symlink**: `TMPDIR` か `/tmp` の、他人が差し替えられない置き場に、ソケットのファイルを指す短い symlink を作って渡し、すぐ消す
-- **proc-held**: `/proc` を使える Linux で、他人が書ける置き場に自分専用のディレクトリを作って fd で掴み、その中に symlink を置いて `/proc/self/fd/<fd>/s` で渡す
 - **at-direct**: `connectat(2)` にソケットのディレクトリの fd とファイル名を渡す
 
 どの経路もプロセスの cwd も呼び出し元のスレッドの cwd も変えないので、どの goroutine から呼んでもよい。
@@ -202,7 +197,7 @@ Dial の予備の経路 (中心の経路が使えない時):
 | 経路 | Go 版 | 理由 |
 |---|---|---|
 | fork (bind の最後の手、D 無しの fork、`connect_any` 系) | なし | Go の runtime では生の fork を使えない。そのため `connect_any` 系も無い |
-| widened (macOS の Dial の予備) | なし | 自前のソケットを標準の型に渡すと、相手が広げた形で bind している時に `RemoteAddr()` が nil になる (`syscall` が `sockaddr_un` より長いアドレスを断る) |
+| widened (macOS の Dial の 2 番目) | なし (飛ばして thread-cwd へ進む) | 自前のソケットを標準の型に渡すと、相手が広げた形で bind している時に `RemoteAddr()` が nil になる (`syscall` が `sockaddr_un` より長いアドレスを断る) |
 
 **fork が無いので、次の環境では長いパスの Listen が `ENAMETOOLONG` になる:**
 
@@ -218,13 +213,14 @@ Dial の予備の経路 (中心の経路が使えない時):
 
 | OS | Listen | Dial |
 |---|---|---|
-| Linux | ファイル名 > 96。seccomp の filter が掛かった環境ではおよそ 79 (proc)、`/proc` も無ければ全部 | ファイル名 > 96 で、予備の経路 (proc-direct、symlink、proc-held) も使えない時 |
-| macOS | ファイル名 > 92 | ファイル名 > 92 で、相対パス > 103、symlink も使えない時 |
+| Linux (`/proc` あり) | ファイル名 > 96。seccomp の filter が掛かった環境ではおよそ 79 (proc) | 届く (proc-held) |
+| Linux (`/proc` 無し) | ファイル名 > 96。seccomp の filter が掛かった環境では全部 | thread-cwd が使えず (ファイル名 > 96 かスレッド cwd が使えない)、相対パス > 107 で、symlink も使えない時 |
+| macOS | ファイル名 > 92 | thread-cwd が使えず (ファイル名 > 92 かスレッド cwd が使えない)、相対パス > 103 で、symlink も使えない時 |
 | FreeBSD | ファイル名 > 92 | ファイル名 > 103 |
 | NetBSD / OpenBSD | 全部 | 相対パス > 103 で symlink も使えない時 |
 | illumos | 全部 | 相対パス > 107 で symlink も使えない時 |
 
-`/tmp` に symlink を作れる普通の環境では、Dial はディレクトリの深さにもファイル名の長さにもよらず届く。
+`/proc` のある Linux で D を作れる時と、FreeBSD 以外で `/tmp` に symlink を作れる普通の環境では、Dial はディレクトリの深さにもファイル名の長さにもよらず届く。D をどこにも作れない時、Dial は D を使わない経路 (proc-direct、relative、at-direct、symlink) の分だけ届く。
 
 パス全体が `PATH_MAX` (macOS 1024、Linux 4096 バイト) を超えるパスは、他のシステムコールでも開けないので sockat の責務外で、`ENAMETOOLONG` になる。
 
@@ -237,8 +233,8 @@ Dial の予備の経路 (中心の経路が使えない時):
 - **listener の Close でソケットファイルを消さない**。標準 (と短いパス) は消す。長いパスの listener が覚えているアドレスはカーネルに渡した綴りなので、`SetUnlinkOnClose(true)` を呼ばない。消すなら `ListenEx` の `discard` を使う
 - **`Addr()` / `LocalAddr()` / `RemoteAddr()` は渡したパスを返さない**。カーネルに渡した綴り `R/<ファイル名>` (proc は `/proc/self/fd/<fd>/R/<ファイル名>`) を返す。R はもう無いので、その綴りを消したり stat したりしても何にも当たらないが、他のプロセスに渡して繋がせる用途には使えない。元のパスは自分で持っておく
 - **名前で終わらないパス** (`dir/`、`dir/.`、`dir/..`) は何も作らずに `EINVAL`
-- **ディレクトリを先に引く**: 中心の経路は R を作る時にソケットのディレクトリを realpath で引く。予備の経路の /proc・相対パス・connectat はディレクトリを引いてからファイル名で渡す。その間の rename や symlink の張り替えは反映されない
-- **他の goroutine の `os.Chdir`**: 相対パスの経路 (Dial の予備) の途中で cwd が変わったら、結果を捨ててエラーを返す
+- **ディレクトリを先に引く**: D を通す経路は R を作る時にソケットのディレクトリを realpath で引く。proc-direct・relative・at-direct はディレクトリを引いてからファイル名で渡す。その間の rename や symlink の張り替えは反映されない
+- **他の goroutine の `os.Chdir`**: relative (Dial) の途中で cwd が変わったら、結果を捨ててエラーを返す
 - **D 無しの形の差し替え**: sticky でなく他人も書けるソケットのディレクトリでは、D 無しの形 (Listen) の R を作ってから bind するまでに R を差し替えられ、別のディレクトリに bind しうる (同じ名前が既にあれば `EADDRINUSE` で、上書きはしない)
 - **残骸**: 消す前にプロセスが死ぬと、`sockat.XXXXXXXXXX` (D、symlink) が置き場に、`.sockat.XXXXXXXXXX` (D) がソケットのディレクトリに残る
 

@@ -29,8 +29,9 @@ func procCfg(bases ...string) *config {
 
 // ways are the Linux routes, each with its own socket path and the route
 // order's inputs that force it. With /proc a dial takes proc-direct for a name
-// that fits it (proc-direct is first in the connect order, and proc, 11 bytes
-// longer, never fits where it does not), so proc is a listen's way only:
+// that fits it (proc-direct is first in the connect order, and proc, about 11
+// bytes longer, practically never fits where it does not), so proc is a
+// listen's way only:
 //
 //	| way         | path                          | inputs                                  | listen     | dial        |
 //	|-------------|-------------------------------|-----------------------------------------|------------|-------------|
@@ -473,9 +474,9 @@ func TestChildWithoutProcUnderUmask0477(t *testing.T) {
 //     thread may have a cwd of its own; otherwise (a seccomp filter) proc is
 //     too long for it as well, and proc-held takes it;
 //   - a name of 95 bytes with the thread cwd off: proc-held;
-//   - proc, whose spelling is 11 bytes longer than proc-direct's, is reached
-//     only where proc-direct cannot be used for another reason: the socket's
-//     directory not opened (sdir nil), forced with dialFrom.
+//   - proc, whose spelling is about 11 bytes longer than proc-direct's, is
+//     reached only where proc-direct cannot be used for another reason: the
+//     socket's directory not opened (sdir nil), forced with dialFrom.
 //
 // Thread-cwd, proc and proc-held make D in its place and remove it. The safe
 // place for symlink, last in the order, is never reached (its mtime is

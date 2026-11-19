@@ -554,21 +554,31 @@ func listenAt(t *testing.T, p string) *net.UnixListener {
 	return l
 }
 
+// abstractNamespace reports whether the kernel has abstract socket names, so
+// that a name the net package reads as abstract ('@' or a leading NUL) can be
+// bound: Linux and Android alone (SPEC "短いパス"). abstractNames is wider:
+// on illumos the net package reads them as abstract too, but the kernel has
+// no such names and the bind fails.
+var abstractNamespace = runtime.GOOS == "linux" || runtime.GOOS == "android"
+
 // longListen reports whether a listen of a long path has a route here: the
-// routes through D have a means (a thread cwd on Linux and macOS, /proc on Linux,
-// bindat on FreeBSD). NetBSD, OpenBSD and illumos have none, and Go has no
-// fork: there a listen of a long path is ENAMETOOLONG.
+// routes through D have a means (a thread cwd on Linux and macOS, /proc on
+// Linux, bindat on FreeBSD), or a listen tries symlink-file and bind(2)
+// follows the symlink (NetBSD; macOS too). OpenBSD and illumos have neither,
+// and Go has no fork: there a listen of a long path is ENAMETOOLONG.
 func longListen() bool {
 	switch runtime.GOOS {
 	case "linux", "android", "darwin", "ios", "freebsd":
 		return true
 	}
-	return false
+	return listenTriesSymlinkFile && bindFollowsSymlink()
 }
 
-// listenPublic is Listen(p) where a listen of a long path has a route; where
-// it has none, it checks that Listen(p) is ENAMETOOLONG and makes the
-// listener with listenAt instead.
+// listenPublic is Listen(p) where a listen of a long path has a route (the
+// listen must succeed: through D, or symlink-file on NetBSD); where it has
+// none (OpenBSD, illumos), it checks that Listen(p) is ENAMETOOLONG and makes
+// the listener with listenAt instead. So a test using it checks one of the
+// two on every system.
 func listenPublic(t *testing.T, p string) *net.UnixListener {
 	t.Helper()
 	l, err := Listen(p)

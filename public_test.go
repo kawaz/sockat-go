@@ -108,11 +108,11 @@ func losses(r sockat.Result) []string {
 
 // longRoutes are the routes a listen of a long path may take here, with or
 // without the last resort, where the default routes reach it: symlink-file
-// where bind(2) follows a symlink (not Linux, where a listen does not try
-// it), then the routes through D.
+// where a listen tries it and bind(2) follows a symlink (macOS, NetBSD), then
+// the routes through D.
 func longRoutes() []string {
 	rs := []string{"thread-cwd", "proc", "at"}
-	if runtime.GOOS != "linux" && sockat.BindFollowsSymlinkHere() {
+	if sockat.ListenTriesSymlinkFileHere && sockat.BindFollowsSymlinkHere() {
 		rs = append(rs, "symlink-file")
 	}
 	return rs
@@ -152,14 +152,14 @@ func TestListenExReportsTheLossesAndTheRoute(t *testing.T) {
 }
 
 // longListen: a listen of a long path has a route here without the last
-// resort: through D (Linux, macOS, FreeBSD), or symlink-file where bind(2)
-// follows a symlink.
+// resort: through D (Linux, macOS, FreeBSD), or symlink-file where a listen
+// tries it and bind(2) follows a symlink (NetBSD).
 func longListen() bool {
 	switch runtime.GOOS {
 	case "linux", "darwin", "freebsd":
 		return true
 	}
-	return sockat.BindFollowsSymlinkHere()
+	return sockat.ListenTriesSymlinkFileHere && sockat.BindFollowsSymlinkHere()
 }
 
 // A failure is a *sockat.RouteError with no listener and an empty Result. It
@@ -169,12 +169,16 @@ func longListen() bool {
 //   - a missing directory: ENOENT from the lookup before any route; no Route,
 //     nothing skipped;
 //   - a file already at a long path: EADDRINUSE from the route that bound
-//     (where a listen has one): symlink-file where a listen tries it (it
-//     finds the file at the path), a route through D on Linux;
+//     (where a listen has one): symlink-file where a listen tries it (macOS,
+//     NetBSD: the bind through the link fails and the file is found at the
+//     path, which makes the failure real, SPEC "試す順番"), otherwise the
+//     first route through D the system has (Linux: thread-cwd or proc;
+//     FreeBSD: at), symlink-file not being tried there;
 //   - a 254-byte file name: ENAMETOOLONG with the last resort, every route
 //     unusable, so no Route, and the routes skipped end with symlink-dir, the
-//     last tried. Where bind(2) follows a symlink (macOS), symlink-file
-//     reaches such a name: no failure there.
+//     last tried. Where a listen tries symlink-file and bind(2) follows a
+//     symlink (macOS, NetBSD), symlink-file reaches such a name: no failure
+//     there.
 func TestAListenExFailureIsARouteErrorWithTheRouteThatFailed(t *testing.T) {
 	t.Parallel()
 	check := func(what, path string, errno syscall.Errno) *sockat.RouteError {
@@ -205,7 +209,7 @@ func TestAListenExFailureIsARouteErrorWithTheRouteThatFailed(t *testing.T) {
 		defer l.Close()
 		re = check("an existing socket", p, syscall.EADDRINUSE)
 		want := []string{"thread-cwd", "proc", "at"}
-		if runtime.GOOS != "linux" {
+		if sockat.ListenTriesSymlinkFileHere {
 			want = []string{"symlink-file"}
 		}
 		if !slices.Contains(want, re.Route) {
@@ -214,7 +218,7 @@ func TestAListenExFailureIsARouteErrorWithTheRouteThatFailed(t *testing.T) {
 	}
 
 	name := tmpDir(t) + "/" + strings.Repeat("n", 254)
-	if runtime.GOOS != "linux" && sockat.BindFollowsSymlinkHere() {
+	if sockat.ListenTriesSymlinkFileHere && sockat.BindFollowsSymlinkHere() {
 		l, discard, res, err := sockat.ListenEx(name, sockat.UseLastResort)
 		if err != nil || res.Route != "symlink-file" || strings.Join(losses(res), ",") != "respelled" {
 			t.Fatalf("a 254-byte name where bind follows a symlink: %+v, %v", res, err)

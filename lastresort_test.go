@@ -320,8 +320,9 @@ func TestALastResortFailureIsReturnedAndNotRetried(t *testing.T) {
 
 // Where Listen itself reaches the path, the last resort is not taken: the
 // result is Listen's, with that route's loss: none for a short path (the net
-// package itself) and for an abstract name, respelled for a long path through
-// D. symlink-dir's places are not touched then.
+// package itself) and for an abstract name (where the kernel has abstract
+// names: Linux, Android), respelled for a long path through D. symlink-dir's
+// places are not touched then.
 func TestTheLastResortWhereListenReachesReportsThatRoutesLosses(t *testing.T) {
 	t.Parallel()
 	own := ownPlace(t)
@@ -359,7 +360,7 @@ func TestTheLastResortWhereListenReachesReportsThatRoutesLosses(t *testing.T) {
 			assertReachable(t, l, q)
 		}
 	}
-	if abstractNames {
+	if abstractNamespace {
 		name := "@sockat-any-" + t.Name()
 		l, got := listenLastResort(t, name, noMeansCfg(own))
 		if len(got.Losses) != 0 || got.Route != string(routeStandard) {

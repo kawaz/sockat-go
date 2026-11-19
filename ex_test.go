@@ -21,8 +21,9 @@ import (
 )
 
 // exPaths are a short path (the net package itself) and a long one (the
-// routes through D), each in a directory of its own. The long one only where a
-// listen of a long path has a route (not on NetBSD, OpenBSD, illumos).
+// routes through D, or symlink-file on NetBSD), each in a directory of its
+// own. The long one only where a listen of a long path has a route (not on
+// OpenBSD, illumos).
 func exPaths(t *testing.T) []string {
 	t.Helper()
 	ps := []string{tmpDir(t) + "/s.sock"}
@@ -309,7 +310,8 @@ func TestChildListenExWithACwdChange(t *testing.T) {
 }
 
 // A path ListenEx refuses comes back with its error and no listener or
-// discard; an abstract name (Linux) has no file, so its discard does nothing.
+// discard; an abstract name (where the kernel has abstract names: Linux,
+// Android) has no file, so its discard does nothing.
 func TestListenExErrorsAndAbstractNames(t *testing.T) {
 	t.Parallel()
 	d := tmpDir(t)
@@ -317,7 +319,7 @@ func TestListenExErrorsAndAbstractNames(t *testing.T) {
 	if !errors.Is(err, syscall.ENOENT) || l != nil || discard != nil {
 		t.Fatalf("%v, %v, %v", l, discard != nil, err)
 	}
-	if !abstractNames {
+	if !abstractNamespace {
 		return
 	}
 	l, discard, _, err = ListenEx("@sockat-ex-"+t.Name(), NoLastResort)

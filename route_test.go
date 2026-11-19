@@ -35,8 +35,9 @@ func TestDirectMaxIsSunPathLessTheNUL(t *testing.T) {
 // bytes and refuses one byte more. Then run sends the directMax-byte path to
 // the net package unchanged (routeStandard) and the one a byte longer down the
 // routes (anything else), with the socket at the given path either way (on
-// the systems where a listen of a long path has no route, the listen is
-// ENAMETOOLONG and only the dial goes down the routes).
+// the systems where a listen of a long path has no route, OpenBSD and
+// illumos, the listen is ENAMETOOLONG and only the dial goes down the routes;
+// NetBSD's listen has symlink-file, longListen).
 func TestAPathTheNetPackageAcceptsGoesToItAndOneByteMoreDoesNot(t *testing.T) {
 	t.Parallel()
 	std := tmpDir(t)
@@ -138,7 +139,8 @@ func TestOnlyAShortPathsListenerRemovesItsSocketFileOnClose(t *testing.T) {
 // sun_path on every system) and 253 / 254 (where SPEC's widened sockaddr on
 // macOS would end; sockat-go does not use it, so nothing may change there) to
 // 600: no route puts the directory in the sockaddr. Where a listen of a long
-// path has no route, only the dial is the public API's.
+// path has no route (OpenBSD, illumos), the listen is checked to be
+// ENAMETOOLONG and only the dial is the public API's (listenPublic).
 func TestLongPathsListenAtTheGivenPathAndAcceptConnections(t *testing.T) {
 	t.Parallel()
 	for _, total := range []int{directMax + 1, 150, 253, 254, 300, 600} {
@@ -165,7 +167,9 @@ func TestLongPathsListenAtTheGivenPathAndAcceptConnections(t *testing.T) {
 // socket nobody listens on ECONNREFUSED. A route must not turn these into
 // "try the next route" and end up reporting something else, or creating the
 // socket elsewhere. The short path is the net package's own answer, for
-// comparison.
+// comparison. A listen on an existing socket at a long path is checked only
+// where a listen of a long path has a route (through D, or symlink-file,
+// which finds the socket at the path and returns its EADDRINUSE).
 func TestFailuresAreTheKernelsErrorsAsNetOpErrors(t *testing.T) {
 	t.Parallel()
 	for _, total := range []int{60, 150, 300, 600} {
@@ -361,15 +365,20 @@ func TestAddressesOfALongPathCanBeRead(t *testing.T) {
 	}
 }
 
-// Where the net package has no abstract socket names (macOS and the BSDs),
-// a leading NUL is a NUL like any other: EINVAL whatever the length, and
-// nothing is created (the net package would cut the path at the NUL, here to
-// the empty path, or to the bytes before a later NUL). A leading '@' is an
-// ordinary byte there and names a file.
+// Where the kernel has no abstract socket names (all but Linux and Android,
+// SPEC "短いパス"), a leading NUL is a NUL like any other: EINVAL whatever the
+// length, and nothing is created (the net package would cut the path at the
+// NUL, here to the empty path, or to the bytes before a later NUL). A leading
+// '@' is an ordinary byte there and names a file. On illumos the net package
+// reads a leading NUL as abstract and sockat-go hands it over (abstractNames),
+// which differs from SPEC: skipped there until the implementation follows it.
 func TestALeadingNULIsEINVALWhereThereAreNoAbstractNames(t *testing.T) {
 	t.Parallel()
+	if abstractNamespace {
+		t.Skip("a leading NUL is an abstract name here (TestAbstractNamesGoToTheNetPackageAsTheyAre)")
+	}
 	if abstractNames {
-		t.Skip("the net package reads a leading NUL as an abstract name here (TestAbstractNamesGoToTheNetPackageAsTheyAre)")
+		t.Skip("illumos: abstractNames is on here but the kernel has no abstract namespace; the implementation differs from SPEC (docs/issue/2026-11-19-illumos-abstract-names.md)")
 	}
 	d := tmpDir(t)
 	markUntouched(t, d)
@@ -416,12 +425,18 @@ func TestADirectoryPartThatIsAFileIsENOTDIR(t *testing.T) {
 	assertUntouched(t, base)
 }
 
-// The real path of the socket's directory can fail to resolve although stat
-// finds it: a process whose cwd was removed can still stat "." but not get its
-// path. A long relative path there ("./" + a long file name) must fail with
-// that error (ENOENT), decided before anything else: not ENAMETOOLONG, and
-// nothing made in the place for D. The cwd belongs to the whole process,
-// hence a child, whose cwd the test removes.
+// The socket's directory of a long relative path ("./" + a long file name)
+// may be a cwd that was removed: the process still has it, but it has no path
+// any more. The lookup of the directory comes before anything else (SPEC
+// "長いパスの経路と試す順番"), so the listen and the dial fail with the
+// lookup's error, not ENAMETOOLONG, and nothing is made in the place for D.
+// Which step fails depends on the system: stat(".") still finds the removed
+// cwd on Linux, macOS, FreeBSD and NetBSD, and then its real path cannot be
+// resolved (ENOENT); on OpenBSD stat(".") itself fails (ENOENT), and then
+// that is the error. The child checks whichever its system gives. The cwd
+// belongs to the whole process, hence a child; and since illumos refuses to
+// remove the caller's own cwd (rmdir(2) EINVAL), the child has it removed by
+// another process (a grandchild whose cwd is /), the same on every system.
 func TestADirectoryWhoseRealPathCannotBeResolvedIsThatError(t *testing.T) {
 	t.Parallel()
 	base := tmpDir(t)
@@ -440,20 +455,34 @@ func TestChildRealPathOfARemovedCwd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(cwd); err != nil {
-		t.Fatal(err)
+	runChild(t, "TestChildRemoveDir", "/", "SOCKAT_DIR="+cwd)
+	if exists(cwd) {
+		t.Fatalf("%s is still there", cwd)
 	}
 	os.Unsetenv("PWD")
+	want := syscall.ENOENT
 	if _, err := os.Stat("."); err != nil {
-		t.Skipf("stat of a removed cwd fails here too (%v): the case does not arise", err)
+		if !errors.As(err, &want) {
+			t.Fatalf("stat of the removed cwd: %v, not an errno", err)
+		}
+		t.Logf("stat of the removed cwd fails here (%v): that is the error to come", err)
 	}
 	cfg := configFromTmpdir(os.Getenv("SOCKAT_BASE"))
 	cfg.dBases = []string{os.Getenv("SOCKAT_BASE")}
 	p := "./" + strings.Repeat("n", directMax)
 	for _, o := range []op{opListen, opDial} {
 		_, _, err := runLong(o, p, cfg)
-		if !errors.Is(err, syscall.ENOENT) {
-			t.Fatalf("%s: %v, want ENOENT", o.netName(), err)
+		if !errors.Is(err, want) || errors.Is(err, syscall.ENAMETOOLONG) {
+			t.Fatalf("%s: %v, want %v", o.netName(), err, want)
 		}
+	}
+}
+
+// TestChildRemoveDir removes the empty directory $SOCKAT_DIR, from a process
+// other than the one whose cwd it is.
+func TestChildRemoveDir(t *testing.T) {
+	asChild(t)
+	if err := os.Remove(os.Getenv("SOCKAT_DIR")); err != nil {
+		t.Fatal(err)
 	}
 }

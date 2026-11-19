@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -368,17 +369,13 @@ func TestAddressesOfALongPathCanBeRead(t *testing.T) {
 // Where the kernel has no abstract socket names (all but Linux and Android,
 // SPEC "短いパス"), a leading NUL is a NUL like any other: EINVAL whatever the
 // length, and nothing is created (the net package would cut the path at the
-// NUL, here to the empty path, or to the bytes before a later NUL). A leading
-// '@' is an ordinary byte there and names a file. On illumos the net package
-// reads a leading NUL as abstract and sockat-go hands it over (abstractNames),
-// which differs from SPEC: skipped there until the implementation follows it.
+// NUL, here to the empty path, or to the bytes before a later NUL, and on
+// illumos read it as an abstract name the kernel does not have). A leading
+// '@' is an ordinary byte there and names a file.
 func TestALeadingNULIsEINVALWhereThereAreNoAbstractNames(t *testing.T) {
 	t.Parallel()
-	if abstractNamespace {
-		t.Skip("a leading NUL is an abstract name here (TestAbstractNamesGoToTheNetPackageAsTheyAre)")
-	}
 	if abstractNames {
-		t.Skip("illumos: abstractNames is on here but the kernel has no abstract namespace; the implementation differs from SPEC (docs/issue/2026-11-19-illumos-abstract-names.md)")
+		t.Skip("a leading NUL is an abstract name here (TestAbstractNamesGoToTheNetPackageAsTheyAre)")
 	}
 	d := tmpDir(t)
 	markUntouched(t, d)
@@ -398,6 +395,86 @@ func TestALeadingNULIsEINVALWhereThereAreNoAbstractNames(t *testing.T) {
 	defer l.Close()
 	if !isSocket(at) {
 		t.Fatal("a leading '@' in a file name did not name a file")
+	}
+}
+
+// Where the kernel has no abstract socket names (all but Linux and Android),
+// a path that starts with '@' is a relative path like any other (SPEC "短いパス"):
+// a short one is bound through the standard library as the file "@..." in the
+// cwd, loses cwd-relative as every relative path taken as it is does, is
+// and reached by a dial of the same path. On illumos the net package would
+// read the '@' as an abstract name, which that kernel lacks (ENOENT);
+// sockat-go hands it "./@..." there instead (DR-0002), so the kernel keeps
+// that spelling, which still names the same file, and Close removes the file
+// as the net package does for any path it binds. Elsewhere the listener is
+// the net package's own for "@...", whose Close leaves the file (the net
+// package skips the removal of any address that starts with '@'). Where "./" makes the spelling longer than the
+// standard library takes (a path of directMax bytes), the path goes through
+// the routes as a long one, and a dial still reaches the file; elsewhere such
+// a path is still the standard library's. Runs in a child whose cwd is a fresh
+// directory, since the paths are relative to it.
+func TestALeadingAtIsAPathWhereThereAreNoAbstractNames(t *testing.T) {
+	t.Parallel()
+	if abstractNames {
+		t.Skip("a leading '@' is an abstract name here (TestAbstractNamesGoToTheNetPackageAsTheyAre)")
+	}
+	if !inTmpCwd(t) {
+		return
+	}
+	const p = "@s.sock"
+	l, _, res, err := ListenEx(p, NoLastResort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	if res.Route != string(routeStandard) || !slices.Equal(res.Losses, []Loss{CwdRelative}) {
+		t.Fatalf("%q: %+v, want [cwd-relative] through standard", p, res)
+	}
+	if !isSocket(p) {
+		t.Fatalf("%q did not name the file %q in the cwd", p, p)
+	}
+	if a := l.Addr().String(); !isSocket(a) {
+		t.Fatalf("the listener's address %q does not name the socket file", a)
+	}
+	c, err := Dial(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ping(t, l, c)
+
+	const q = "@t.sock"
+	lq, err := Listen(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isSocket(q) {
+		t.Fatalf("%q did not name the file %q in the cwd", q, q)
+	}
+	lq.Close()
+	_, err = os.Lstat(q)
+	if stdReadsAtAsAbstract && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Close left %q (bound as \"./%s\"): %v", q, q, err)
+	}
+	if !stdReadsAtAsAbstract && err != nil {
+		t.Fatalf("Close removed %q, which the net package leaves: %v", q, err)
+	}
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	edge := "@" + strings.Repeat("e", directMax-1)
+	le := listenAt(t, filepath.Join(wd, edge))
+	ep, r, err := runWith(opDial, edge, nil)
+	ce := must{t}.conn(ep, err)
+	defer ce.Close()
+	ping(t, le, ce)
+	if stdReadsAtAsAbstract && r == routeStandard {
+		t.Fatalf("%d bytes from '@': went through standard, whose spelling \"./\" + path does not fit", len(edge))
+	}
+	if !stdReadsAtAsAbstract && r != routeStandard {
+		t.Fatalf("%d bytes from '@': %s, want standard (the path as it is)", len(edge), r)
 	}
 }
 

@@ -1,7 +1,7 @@
-//go:build linux || android || illumos || solaris
+//go:build linux || android
 
 package sockat
 
-// abstractNames: the standard library reads a leading '@' as an abstract
-// socket name here.
+// abstractNames: the kernel has abstract socket names, and the standard
+// library reads a leading NUL or '@' as one (SPEC "短いパス", DR-0002).
 const abstractNames = true

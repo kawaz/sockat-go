@@ -554,13 +554,6 @@ func listenAt(t *testing.T, p string) *net.UnixListener {
 	return l
 }
 
-// abstractNamespace reports whether the kernel has abstract socket names, so
-// that a name the net package reads as abstract ('@' or a leading NUL) can be
-// bound: Linux and Android alone (SPEC "短いパス"). abstractNames is wider:
-// on illumos the net package reads them as abstract too, but the kernel has
-// no such names and the bind fails.
-var abstractNamespace = runtime.GOOS == "linux" || runtime.GOOS == "android"
-
 // longListen reports whether a listen of a long path has a route here: the
 // routes through D have a means (a thread cwd on Linux and macOS, /proc on
 // Linux, bindat on FreeBSD), or a listen tries symlink-file and bind(2)

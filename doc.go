@@ -92,8 +92,14 @@
 //
 //   - A path containing a NUL byte is EINVAL, whatever its length (the net
 //     package would cut the path short there and bind some other path). An
-//     abstract socket name (a leading NUL, or '@', on Linux) is handed to the
-//     net package as is.
+//     abstract socket name (a leading NUL, or '@', on Linux and Android) is
+//     handed to the net package as is. Where the kernel has no abstract
+//     sockets (illumos included), a leading NUL is EINVAL too.
+//   - On illumos, a path that starts with '@' names the file "@..." in the
+//     current directory. The net package would read the '@' as an abstract
+//     name, which the kernel there does not have, so the path is handed to it
+//     with "./" in front: the listener's Addr is "./@...", and a path of 106
+//     or 107 bytes, which no longer fits, is treated as a long path.
 //   - The listener of a long path does not remove the socket file on Close.
 //     Its address is the spelling handed to the kernel, so do not call
 //     SetUnlinkOnClose(true) on it; use [ListenEx]'s discard.

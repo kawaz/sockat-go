@@ -120,7 +120,7 @@ func relativeTo(target, cwd string) (rel string, ok bool) {
 
 // asSpelling makes a relative spelling safe to hand to the standard library:
 // one that starts with '@' gets "./" in front, because Go's net package reads
-// a leading '@' as an abstract socket name on Linux (and illumos).
+// a leading '@' as an abstract socket name on Linux, Android and illumos.
 func asSpelling(rel string) string {
 	if strings.HasPrefix(rel, "@") {
 		return "./" + rel

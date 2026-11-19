@@ -360,7 +360,7 @@ func TestTheLastResortWhereListenReachesReportsThatRoutesLosses(t *testing.T) {
 			assertReachable(t, l, q)
 		}
 	}
-	if abstractNamespace {
+	if abstractNames {
 		name := "@sockat-any-" + t.Name()
 		l, got := listenLastResort(t, name, noMeansCfg(own))
 		if len(got.Losses) != 0 || got.Route != string(routeStandard) {
@@ -376,7 +376,8 @@ func TestTheLastResortWhereListenReachesReportsThatRoutesLosses(t *testing.T) {
 //   - standard: nothing for an absolute path; cwd-relative for a relative
 //     one (the kernel keeps it as given, to be resolved against whatever the
 //     cwd is later); nothing for an abstract name, which is no path (on
-//     Linux; elsewhere "@x" is a relative path like any other);
+//     Linux and Android; elsewhere, illumos included, "@x" is a relative
+//     path like any other);
 //   - every other route: respelled (the kernel keeps a spelling, not the
 //     path), whether the path was absolute or relative.
 func TestTheLossesOfEachRoute(t *testing.T) {

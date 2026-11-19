@@ -176,7 +176,7 @@ func TestRelativeToIsFalseWhenItCannotNameAFileBelow(t *testing.T) {
 }
 
 // Go's net package reads a leading '@' as the name of an abstract socket on
-// Linux (and illumos), with no file anywhere. A relative spelling a route
+// Linux, Android and illumos, with no file anywhere. A relative spelling a route
 // makes for a file (the relative path, a bare file name) must therefore never
 // start with '@': "./" in front keeps it a path to the same file. Only a
 // leading '@' matters; one anywhere else is an ordinary byte.

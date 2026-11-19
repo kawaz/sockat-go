@@ -112,10 +112,12 @@ var errCwdChanged = errors.New("the current directory changed while binding / co
 
 // run binds (and listens) or connects to path, trying the routes in order.
 //
-// A path the standard library accepts goes to it as is, before anything else
-// is looked at (the environment included). So does an abstract socket name.
-// A NUL anywhere else is EINVAL, whatever the length: the standard library
-// would cut the path short there and bind / connect some other path.
+// A path the standard library accepts goes to it as is (stdSpelling), before
+// anything else is looked at (the environment included). So does an abstract
+// socket name (Linux, Android). A NUL anywhere else, a leading one too where
+// the kernel has no abstract names, is EINVAL, whatever the length: the
+// standard library would cut the path short there and bind / connect some
+// other path.
 func run(o op, path string) (endpoint, route, error) {
 	return runTraced(o, path, nil, nil)
 }
@@ -136,8 +138,11 @@ func runTraced(o op, path string, cfg *config, tr *trace) (endpoint, route, erro
 	if strings.IndexByte(path, 0) >= 0 {
 		return nil, "", opError(o, path, fmt.Errorf("socket path must not contain a NUL byte: %w", syscall.EINVAL))
 	}
-	if len(path) <= directMax {
-		ep, err := viaStd(o, path, true)
+	if s := stdSpelling(path); len(s) <= directMax {
+		ep, err := viaStd(o, s, true)
+		if err != nil && s != path {
+			err = opError(o, path, unwrapOpError(err))
+		}
 		return ep, routeStandard, err
 	}
 	if cfg == nil {
@@ -155,13 +160,32 @@ func runTraced(o op, path string, cfg *config, tr *trace) (endpoint, route, erro
 	return ep, r, nil
 }
 
-// abstractName reports whether the standard library reads path as the name
-// of an abstract socket (a leading NUL, or Go's '@' for it, on Linux and
-// illumos). Such a name has no place in the file system, so no route applies
+// abstractName reports whether path is the name of an abstract socket (a
+// leading NUL, or Go's '@' for it) where the kernel has such names (Linux,
+// Android). Such a name has no place in the file system, so no route applies
 // and the NUL check does not either; the standard library alone decides,
 // whatever the length.
 func abstractName(path string) bool {
 	return abstractNames && (strings.HasPrefix(path, "@") || strings.HasPrefix(path, "\x00"))
+}
+
+// stdSpelling is what path is handed to the standard library as, when it is
+// short enough: path itself, except where the standard library would read a
+// leading '@' as an abstract name that the kernel does not have (illumos).
+// There "./" goes in front, so the bind / connect is of the file "@..." in
+// the cwd, as the path means on that system. When that no longer fits, the
+// path goes through the routes like any other long path.
+//
+// Design rationale: SPEC hands a short path to the standard library as it is,
+// but Go's standard library on illumos rewrites a leading '@' to a NUL and
+// the kernel then fails (ENOENT). "./" is the shortest spelling of the same
+// relative path that it leaves alone, at the cost of two bytes and of the
+// kernel keeping "./@..." (the listener's Addr). DR-0002.
+func stdSpelling(path string) string {
+	if stdReadsAtAsAbstract && !abstractNames {
+		return asSpelling(path)
+	}
+	return path
 }
 
 // viaStd binds (and listens) or connects through the standard library with

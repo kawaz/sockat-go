@@ -1,8 +1,9 @@
 ---
 title: illumos / Solaris で先頭が NUL や @ のパスを abstract として標準に渡している (SPEC では abstract の無い OS)
-status: open
+status: resolved
 category: bug
 created: 2026-11-19
+close_reason: implemented
 ---
 
 # illumos / Solaris で先頭が NUL や @ のパスを abstract として標準に渡している (SPEC では abstract の無い OS)
@@ -29,3 +30,7 @@ created: 2026-11-19
 ## 経緯の要点
 
 v0.3.0 は試験の直しだけで出す (試験以外の .go を変えると版の検査で 0.3.1 になるため)。この修正は v0.3.0 の直後に v0.3.1 として入れる。
+
+## 結果
+
+`abstractNames` を Linux / Android だけにし、illumos / Solaris では先頭の NUL を長さによらず `EINVAL`、`@` で始まるパスを `./` を付けて標準に渡す形にした (`stdSpelling`。`./` を付けて 107 バイトを超える時は長いパスとして経路へ。理由と SPEC との違い (`Addr()` が `./@...`、106・107 バイトの Listen が `ENAMETOOLONG`) は DR-0002)。`TestALeadingNULIsEINVALWhereThereAreNoAbstractNames` の illumos の skip を外し、`@` が cwd のファイルとして bind される試験 (`TestALeadingAtIsAPathWhereThereAreNoAbstractNames`) を Linux / Android 以外の全 OS で走らせる。試験の判定は実装の `abstractNames` 1 つにそろえた。

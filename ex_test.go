@@ -319,7 +319,7 @@ func TestListenExErrorsAndAbstractNames(t *testing.T) {
 	if !errors.Is(err, syscall.ENOENT) || l != nil || discard != nil {
 		t.Fatalf("%v, %v, %v", l, discard != nil, err)
 	}
-	if !abstractNamespace {
+	if !abstractNames {
 		return
 	}
 	l, discard, _, err = ListenEx("@sockat-ex-"+t.Name(), NoLastResort)

@@ -15,7 +15,7 @@ Status は各 DR ファイルの `Status:` 行が正本。
 | DR | 状態 | 説明 |
 |---|---|---|
 | [DR-0001](DR-0001-public-api.md) | ✅ 実装済 | 公開 API は `Listen` / `Dial` と `ListenEx` / `DialEx` で、標準の具体型を返す (`ListenEx` は discard 関数も) |
-| [DR-0002](DR-0002-standard-handles-paths-it-accepts.md) | ✅ 実装済 | 標準が受け付けるパスと Linux の `@` は標準にそのまま渡す。NUL は長さによらず `EINVAL` |
+| [DR-0002](DR-0002-standard-handles-paths-it-accepts.md) | ✅ 実装済 | 標準が受け付けるパスと Linux / Android の abstract の名前は標準にそのまま渡す (illumos の `@` は `./` を付けて普通のパスに)。それ以外の NUL は長さによらず `EINVAL` |
 | [DR-0004](DR-0004-thread-cwd-route.md) | ✅ 実装済 | fork の代わりに、スレッドだけ cwd を移す経路 (thread-cwd) を使う |
 | [DR-0005](DR-0005-no-widened-sockaddr.md) | ✅ 実装済 | macOS の広げた sockaddr の経路 (widened) は作らず、connect の順では使えない経路として次へ進む (標準の型に渡すとアドレスの取得で落ちる) |
 | [DR-0006](DR-0006-own-socket-into-net.md) | ✅ 実装済 | 自前のソケット (FreeBSD の bindat) は標準と同じ設定で作り、`net.FileListener` / `FileConn` で渡す |

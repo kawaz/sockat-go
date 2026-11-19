@@ -52,22 +52,23 @@ l, res, err := atanycost.Listen(path) // l は *net.UnixListener
 if err != nil {
 	return err
 }
-if res.Level == atanycost.SharedSymlink {
+if res.Has(atanycost.RecreatableSpelling) {
 	log.Printf("%s: bound through a shared place (route %s, skipped %v)", path, res.Route, res.Skipped)
 }
 ```
 
 - `sockat.Listen` と同じ経路を試し、`ENAMETOOLONG` の時だけ置き場の symlink (ソケットのディレクトリを指す、`<置き場>/sockat.XXXXXXXXXX/<ファイル名>`、bind の後すぐ消す) を試す。置き場は `XDG_RUNTIME_DIR`・`TMPDIR`・`/tmp` のうち、自分だけが書ける所を先に、無ければ共有の所 (sticky の `/tmp` 等)
-- `res.Level` は通った経路で失ったもの ([SPEC の「失ったものの段階」](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#失ったものの段階))。値に大小は無い (`Forked` と `SharedSymlink` はどちらも `Respelled` を含むが互いを含まない)。値は将来増えうる。知らない値は「標準ではない (何かを失った、中身は分からない)」とだけ読む
+- `res.Losses` は通った経路で失ったものの名前の並び ([SPEC の「失うもの」](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#失うもの))。何も失わなければ空。名前に大小や包含は無い。名前は将来増えうるので、知らない名前は「何かを失った」とだけ読む
 - FreeBSD では at が常に使え、symlink の綴りは at の綴りより必ず長いので、`atanycost.Listen` が `sockat.Listen` より遠くに届くことは無い
 - `res.Route` は通った経路の名前、`res.Skipped` はそれより前に試して使えなかった経路の並び (試した順) と理由。どちらも診断用 (ログ等) で、中身は約束しない
+- 失敗した時のエラーは `*atanycost.Error` で、`Route` (実際に bind して失敗した経路。全部使えなかった `ENAMETOOLONG` では空) と `Skipped` を持つ。中は標準と同じ `*net.OpError` で、`errors.Is(err, syscall.ENOENT)` 等が効く
 
-| `Level` | 失ったもの |
-|---|---|
-| `None` | 無し (標準) |
-| `Respelled` | カーネルが覚えるアドレスが元のパスでない。Close でファイルが消えない |
-| `Forked` | Go には fork の経路が無いので来ない (他の言語と値をそろえるため) |
-| `SharedSymlink` | `Respelled` に加え、他の利用者が綴りを作り直せる (覚えている綴りで消すと、相手の選んだディレクトリのファイルを消させうる) |
+| `Loss` | 失ったもの | 付く時 |
+|---|---|---|
+| `Respelled` (`respelled`) | カーネルが覚えるアドレスが元のパスでない。Close でファイルが消えない (元のパスで消す) | 標準以外の経路で bind した |
+| `RecreatableSpelling` (`recreatable-spelling`) | カーネルが覚える綴りが共有の置き場を通る。他の利用者が綴りを作り直した後にその綴りで消すと、相手の選んだディレクトリのファイルを消しうる (元のパスで消せば当たらない) | 共有の置き場の symlink で bind した |
+| `CwdRelative` (`cwd-relative`) | カーネルが覚える綴りが cwd からの相対パス。cwd を変えた後にその綴りで消すと別の場所に当たる (標準が元から持つ危険) | 相対パスで standard を通った |
+| `Forked` (`forked`) | fork の副作用 | Go には fork の経路が無いので付かない (他の言語と名前をそろえるため) |
 
 ## なぜ要るか
 

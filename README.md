@@ -52,22 +52,23 @@ l, res, err := atanycost.Listen(path) // l is a *net.UnixListener
 if err != nil {
 	return err
 }
-if res.Level == atanycost.SharedSymlink {
+if res.Has(atanycost.RecreatableSpelling) {
 	log.Printf("%s: bound through a shared place (route %s, skipped %v)", path, res.Route, res.Skipped)
 }
 ```
 
 - It tries the routes of `sockat.Listen` and, only on `ENAMETOOLONG`, a symlink in a place (to the socket's directory, `<place>/sockat.XXXXXXXXXX/<file name>`, removed right after the bind). The places are `XDG_RUNTIME_DIR`, `TMPDIR` and `/tmp`: those only you can write to first, then shared ones (a sticky `/tmp` and the like)
-- `res.Level` is what the route taken gave up ([the specification's loss levels](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md)). The values are not ordered (`Forked` and `SharedSymlink` each include `Respelled` but not each other). More values may be added; read an unknown one only as "not the standard library (something was lost, what is not known)"
+- `res.Losses` names what the route taken gave up ([the specification's losses](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md)), empty when nothing was. The names are not ordered and none includes another. More names may be added; read an unknown one only as "something was lost"
 - On FreeBSD, `at` can always be used and the symlink's spelling is always longer than at's, so `atanycost.Listen` reaches nothing beyond `sockat.Listen`
 - `res.Route` is the name of the route taken, `res.Skipped` the routes tried before it and found unusable (in the order tried) with why. Both are for diagnostics (logs and the like); their contents are not a promise
+- On failure the error is an `*atanycost.Error` with `Route` (the route that bound and failed; empty for `ENAMETOOLONG` when every route was unusable) and `Skipped`. It wraps the net package's `*net.OpError`, so `errors.Is(err, syscall.ENOENT)` and the like work
 
-| `Level` | What is lost |
-|---|---|
-| `None` | nothing (the standard library) |
-| `Respelled` | the address the kernel keeps is not the path; Close does not remove the file |
-| `Forked` | does not occur: Go has no fork route (kept to match the other implementations) |
-| `SharedSymlink` | `Respelled`, and other users can make the spelling again (removing the file by that spelling may remove a file in a directory of their choosing) |
+| `Loss` | What is lost | When |
+|---|---|---|
+| `Respelled` (`respelled`) | the address the kernel keeps is not the path; Close does not remove the file (remove it by the path) | bound through a route other than standard |
+| `RecreatableSpelling` (`recreatable-spelling`) | the spelling the kernel keeps goes through a shared place; once another user has made it again, removing the file by that spelling may remove a file in a directory of their choosing (removing by the path is safe) | bound through a symlink in a shared place |
+| `CwdRelative` (`cwd-relative`) | the address the kernel keeps is relative to the cwd; removing the file by it after the cwd changed reaches somewhere else (a risk of the standard library itself) | a relative path went through standard |
+| `Forked` (`forked`) | a fork's side effects | never: Go has no fork route (kept to match the other implementations) |
 
 ## Why
 

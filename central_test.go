@@ -1324,3 +1324,39 @@ func TestTheConnectOrderWithoutProc(t *testing.T) {
 		assertUntouched(t, unsafeB)
 	}
 }
+
+// A dial's D is made once and shared (dialer.theD). Proc-held makes it
+// without R (SPEC "D と R" steps 1, 2 and 5); a route asking for D with R
+// after that gets the same D, now with R in it pointing to the socket's
+// directory, rather than a D whose R is missing (R/<name> would then read as
+// /<name>) or a second D. Every connect order has proc-held after the routes
+// that need R, so this is pinned here directly. Closing the dialer leaves the
+// place empty.
+func TestADMadeWithoutRGetsRWhenARouteNeedsIt(t *testing.T) {
+	t.Parallel()
+	place, dir := tmpDir(t), tmpDir(t)
+	real, err := realDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := newDialer(dir+"/s.sock", dir, real, "s.sock", nil, centralCfg(place))
+	draws := 0
+	d.nextD = func() (string, error) { draws++; return randomPart() }
+	h, err := d.theD(false)
+	if err != nil || h.r != "" {
+		t.Fatalf("D without R: %+v, %v", h, err)
+	}
+	h2, err := d.theD(true)
+	if err != nil || h2 != h || h.r == "" || draws != 1 {
+		t.Fatalf("D with R: %+v, %v after %d draws; want the same D, with R", h2, err, draws)
+	}
+	es, err := os.ReadDir(place)
+	if err != nil || len(es) != 1 {
+		t.Fatalf("the place holds %v, %v; want D alone", es, err)
+	}
+	if to, err := os.Readlink(place + "/" + es[0].Name() + "/" + h.r); err != nil || to != real {
+		t.Fatalf("R -> %q, %v; want %q", to, err, real)
+	}
+	d.close()
+	assertEmpty(t, place)
+}

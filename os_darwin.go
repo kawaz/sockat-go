@@ -10,19 +10,32 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// fallbackDial is a dial's fallback routes on macOS: the path relative to the
-// cwd, then symlinks to the file in safe places.
-//
-// Design rationale: SPEC also has the widened sockaddr here (sun_len and the
-// address length past sizeof(struct sockaddr_un), up to 253 bytes of path).
-// Go cannot hand such a socket over intact: net.FileConn on a socket connected
-// that way to a peer bound that way leaves RemoteAddr() a nil net.Addr, whose
-// String() panics, where net.DialUnix would report the spelling. What is lost
-// is a dial that the central route cannot make (no thread cwd) with no usable
-// place for the symlink, to a file name of 104 to 253 bytes.
-func fallbackDial(path, dir, _ string, _ *os.File, cfg *config) (endpoint, route, error) {
-	return posixFallbackDial(path, dir, true, cfg)
+// dialSteps is the connect order on macOS (SPEC "connect の順"): relative,
+// widened, thread-cwd, symlink.
+func dialSteps(bool) []dialStep {
+	return []dialStep{
+		{routeRelative, (*dialer).relative},
+		{routeWidened, (*dialer).widened},
+		{routeThreadCwd, (*dialer).threadCwd},
+		{routeSymlink, (*dialer).symlink},
+	}
 }
+
+// noWidenedRoute is the reason widened is skipped: sockat-go does not make it.
+const noWidenedRoute = "no widened route in sockat-go"
+
+// widened is SPEC's widened sockaddr, which sockat-go does not make: always
+// unusable, so the order goes on to thread-cwd.
+//
+// Design rationale: the kernel takes the widened form (sun_len and the
+// address length past sizeof(struct sockaddr_un), up to 253 bytes of path),
+// but Go cannot hand such a socket over intact: net.FileConn on a socket
+// connected that way to a peer bound that way leaves RemoteAddr() a nil
+// net.Addr, whose String() panics, where net.DialUnix would report the
+// spelling (DR-0005). What is lost is a dial that neither relative nor
+// thread-cwd can make (no thread cwd, or a file name over 92 bytes) with no
+// usable place for the symlink, to a path of at most 253 bytes.
+func (d *dialer) widened() (endpoint, error) { return nil, unusable(noWidenedRoute) }
 
 // procFDUsableFor: no /proc here.
 func procFDUsableFor(*os.File, string) bool { return false }
@@ -80,9 +93,6 @@ func threadChdir(dirfd int) error {
 	}
 	return syscallError("fchdir", e)
 }
-
-// heldLinkRoute needs /proc: not here.
-func heldLinkRoute(string, string, string) (endpoint, error) { return nil, errUnusable }
 
 // setPrivate sets D (fd, which passed the check) to mode 0700: fchmod(2).
 func setPrivate(_ int, _ string, fd int, _ *unix.Stat_t, _ bool, _ string) error {

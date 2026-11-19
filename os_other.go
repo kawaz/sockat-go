@@ -8,13 +8,16 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// fallbackDial is a dial's fallback routes on the Unix systems without a
+// dialSteps is the connect order on the Unix systems without a
 // dirfd-relative primitive or per-thread working directories (NetBSD,
-// OpenBSD, illumos, ...): the path relative to the cwd, then symlinks to the
-// file in safe places. The central route has no means here, so a listen of a
-// long path is ENAMETOOLONG (Go has no fork route).
-func fallbackDial(path, dir, _ string, _ *os.File, cfg *config) (endpoint, route, error) {
-	return posixFallbackDial(path, dir, true, cfg)
+// OpenBSD, illumos, ...; SPEC "connect の順"): relative, symlink. The routes
+// through D have no means here, so a listen of a long path is ENAMETOOLONG
+// (Go has no fork route).
+func dialSteps(bool) []dialStep {
+	return []dialStep{
+		{routeRelative, (*dialer).relative},
+		{routeSymlink, (*dialer).symlink},
+	}
 }
 
 // procFDUsableFor: no /proc route here.
@@ -31,9 +34,6 @@ func openDir(dir string) (*os.File, error) {
 	}
 	return os.NewFile(uintptr(fd), dir), nil
 }
-
-// heldLinkRoute needs /proc: not here.
-func heldLinkRoute(string, string, string) (endpoint, error) { return nil, errUnusable }
 
 // setPrivate sets D (fd, which passed the check) to mode 0700: fchmod(2).
 func setPrivate(_ int, _ string, fd int, _ *unix.Stat_t, _ bool, _ string) error {

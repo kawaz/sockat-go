@@ -9,7 +9,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// The central route (SPEC "中心の経路"): a directory D of our own, held by its
+// The routes through D (SPEC "D と R"): a directory D of our own, held by its
 // fd, with a symlink R of a random name in it pointing to the socket's
 // directory; the bind / connect goes by R/<name> relative to D's fd.
 //
@@ -22,13 +22,13 @@ import (
 //
 // The socket's directory is looked up (stat, then its real path) first, so a
 // missing one is ENOENT, one that is not a directory ENOTDIR, and a failure to
-// resolve it its own error, before anything else is decided or made. It is then opened for the
-// routes that need its fd (the socket's directory as a place for D, Dial's
-// /proc and connectat fallbacks); when it cannot be opened (no read
-// permission where directories are opened O_RDONLY), sdir is nil and those
-// routes cannot be used. Then the central route; when it cannot be used, a
-// listen ends with ENAMETOOLONG (Go has no fork route, the last resort of the
-// SPEC) and a dial goes on to the system's fallback routes.
+// resolve it its own error, before anything else is decided or made. It is
+// then opened for the routes that need its fd (the socket's directory as a
+// place for D, a dial's proc-direct and at-direct); when it cannot be opened
+// (no read permission where directories are opened O_RDONLY), sdir is nil and
+// those routes cannot be used. Then a listen takes the routes through D
+// (listenRoutes) and a dial the system's connect order (dialer); when no
+// route can be used, the error is ENAMETOOLONG.
 func runLong(o op, path string, cfg *config) (endpoint, route, error) {
 	dir, name, err := splitPath(path)
 	if err != nil {
@@ -43,7 +43,8 @@ func runLong(o op, path string, cfg *config) (endpoint, route, error) {
 	}
 	// Its real path is looked up now too: an error there is returned as it
 	// is, rather than coming out as ENAMETOOLONG once no route could be used.
-	if _, err := realDir(dir); err != nil {
+	real, err := realDir(dir)
+	if err != nil {
 		return nil, "", err
 	}
 	// The routes are tried from here: standard, first in their order, was
@@ -55,14 +56,15 @@ func runLong(o op, path string, cfg *config) (endpoint, route, error) {
 	} else {
 		defer sdir.Close()
 	}
-	ep, r, err := centralRoute(o, dir, sdir, name, cfg)
-	if !errors.Is(err, errUnusable) {
-		return ep, r, err
-	}
+	var ep endpoint
+	var r route
 	if o == opListen {
-		return nil, "", errNameTooLong(o)
+		ep, r, err = listenRoutes(sdir, real, name, cfg)
+	} else {
+		d := newDialer(path, dir, real, name, sdir, cfg)
+		ep, r, err = d.run(dialSteps(d.procUsable))
+		d.close()
 	}
-	ep, r, err = fallbackDial(path, dir, name, sdir, cfg)
 	if errors.Is(err, errUnusable) {
 		return nil, "", errNameTooLong(o)
 	}
@@ -72,40 +74,35 @@ func runLong(o op, path string, cfg *config) (endpoint, route, error) {
 // rNameLen is the length of R's name, so R/<name> is rNameLen+1+len(name).
 const rNameLen = 10
 
-// centralRoute binds / connects name inside dir (opened as sdir) through
-// R/<name> relative to a fresh D, by the first means the system has:
+// listenRoutes binds name inside the socket's directory (real, opened as
+// sdir) through R/<name> relative to a fresh D, by the first means the system
+// has:
 //
 //	| means                     | system              | route          |
 //	|---------------------------|---------------------|----------------|
-//	| bindat / connectat on D   | FreeBSD             | routeAt        |
+//	| bindat on D               | FreeBSD             | routeAt        |
 //	| a thread whose cwd is D   | Linux, macOS        | routeThreadCwd |
-//	| /proc/self/fd/<D>/R/<name>| Linux with /proc    | routeProc     |
+//	| /proc/self/fd/<D>/R/<name>| Linux with /proc    | routeProc      |
 //
 // What can be told without making anything (the length, a seccomp filter,
-// /proc) is checked first; nothing is made when no means can be used.
-// errUnusable when the route cannot be used (nothing left behind).
-func centralRoute(o op, dir string, sdir *os.File, name string, cfg *config) (endpoint, route, error) {
+// /proc) is checked first; nothing is made when no means can be used. When D
+// can be made nowhere, the same means without D (withoutD). errUnusable when
+// no route can be used (nothing left behind).
+func listenRoutes(sdir *os.File, real, name string, cfg *config) (endpoint, route, error) {
 	thread := cfg.threadCwd && threadCwdPossible()
 	proc := procFDUsableFor(sdir, cfg.procSelfFD)
-	real, err := realDir(dir)
-	if err != nil {
-		return nil, "", errUnusable
-	}
-	ep, r, err := throughD(o, sdir, real, name, thread, proc, cfg)
+	ep, r, err := throughD(sdir, real, name, thread, proc, cfg)
 	if errors.Is(err, errNoD) {
-		if o == opListen {
-			// The routes through D were tried and found unusable, fork
-			// (which Go cannot make) among them; then the form without D.
-			cfg.trace.add(routeFork, noForkRoute)
-			ep, r, err = withoutD(o, sdir, real, name, thread, proc, cfg)
-			if errors.Is(err, errUnusable) {
-				cfg.trace.add(routeForkSockdir, noForkRoute)
-			}
-			return ep, r, err
+		// The routes through D were tried and found unusable, fork (which Go
+		// cannot make) among them; then the form without D.
+		cfg.trace.add(routeFork, noForkRoute)
+		ep, r, err = withoutD(sdir, real, name, thread, proc, cfg)
+		if errors.Is(err, errUnusable) {
+			cfg.trace.add(routeForkSockdir, noForkRoute)
 		}
-		return nil, "", errUnusable
+		return ep, r, err
 	}
-	if errors.Is(err, errUnusable) && o == opListen {
+	if errors.Is(err, errUnusable) {
 		// SPEC's next route for a bind; Go cannot make it.
 		cfg.trace.add(routeFork, noForkRoute)
 	}
@@ -116,56 +113,56 @@ func centralRoute(o op, dir string, sdir *os.File, name string, cfg *config) (en
 // next for a bind).
 var errNoD = errors.New("sockat: no place for D")
 
-// throughD is the routes through D: what can be told without making anything
-// (the length, the means) first, then D, then the means in order. errNoD when
-// D could be made nowhere; errUnusable when the routes cannot be used.
-func throughD(o op, sdir *os.File, real, name string, thread, proc bool, cfg *config) (endpoint, route, error) {
+// throughD is a bind's routes through D: what can be told without making
+// anything (the length, the means) first, then D, then the means in order.
+// errNoD when D could be made nowhere; errUnusable when the routes cannot be
+// used.
+func throughD(sdir *os.File, real, name string, thread, proc bool, cfg *config) (endpoint, route, error) {
 	spellingLen := rNameLen + 1 + len(name)
 	if spellingLen > directMax {
-		cfg.trace.skipMeans(centralRoutes, "spelling too long")
+		cfg.trace.skipMeans(dRoutes, "spelling too long")
 		return nil, "", errUnusable
 	}
 	// With the /proc variant as the only means, its spelling must fit even
 	// with a one-digit fd (the shortest it can be); D's real fd is checked
 	// again once D is made.
 	if !atSupported && !thread && proc && len(cfg.procSelfFD)+len("/0/")+spellingLen > directMax {
-		proc = false
-		cfg.trace.skipThread(centralRoutes, cfg)
+		cfg.trace.skipThread(dRoutes, cfg)
 		cfg.trace.add(routeProc, "spelling too long")
 		return nil, "", errUnusable
 	}
 	if !atSupported && !thread && !proc {
-		cfg.trace.skipThread(centralRoutes, cfg)
-		cfg.trace.skipProc(centralRoutes)
+		cfg.trace.skipThread(dRoutes, cfg)
+		cfg.trace.skipProc(dRoutes)
 		return nil, "", errUnusable
 	}
 	d, err := makeD(cfg.dBases, sdir, real, proc, cfg.procSelfFD, randomPart, randomPart)
 	if err != nil {
-		cfg.trace.skipMeans(centralRoutes, "no place for D")
+		cfg.trace.skipMeans(dRoutes, "no place for D")
 		return nil, "", errNoD
 	}
 	defer d.cleanup()
-	return byMeans(o, d.fd, d.r+"/"+name, thread, proc, cfg, centralRoutes)
+	return byMeans(d.fd, d.r+"/"+name, thread, proc, cfg, dRoutes)
 }
 
 // routes names the routes of the means, for D or without it.
 type routes struct{ at, thread, proc route }
 
 var (
-	centralRoutes = routes{routeAt, routeThreadCwd, routeProc}
-	noDRoutes     = routes{routeAtSockdir, routeThreadCwdSockdir, routeProcSockdir}
+	dRoutes   = routes{routeAt, routeThreadCwd, routeProc}
+	noDRoutes = routes{routeAtSockdir, routeThreadCwdSockdir, routeProcSockdir}
 )
 
-// byMeans binds / connects through spelling relative to the directory fd, by
-// the first means that can be used: bindat / connectat (FreeBSD), a thread
-// whose cwd is fd, /proc/self/fd/<fd>/<spelling>. errUnusable when none can.
-func byMeans(o op, fd int, spelling string, thread, proc bool, cfg *config, rs routes) (endpoint, route, error) {
+// byMeans binds through spelling relative to the directory fd, by the first
+// means that can be used: bindat (FreeBSD), a thread whose cwd is fd,
+// /proc/self/fd/<fd>/<spelling>. errUnusable when none can.
+func byMeans(fd int, spelling string, thread, proc bool, cfg *config, rs routes) (endpoint, route, error) {
 	if atSupported {
-		ep, err := atOp(o, fd, spelling)
+		ep, err := atOp(opListen, fd, spelling)
 		return ep, rs.at, err
 	}
 	if thread {
-		ep, err := inThreadCwd(o, fd, spelling)
+		ep, err := inThreadCwd(opListen, fd, spelling)
 		if !errors.Is(err, errUnusable) {
 			return ep, rs.thread, err
 		}
@@ -182,7 +179,7 @@ func byMeans(o op, fd int, spelling string, thread, proc bool, cfg *config, rs r
 		cfg.trace.add(rs.proc, "spelling too long")
 		return nil, "", errUnusable
 	}
-	ep, err := viaStd(o, via, false)
+	ep, err := viaStd(opListen, via, false)
 	return ep, rs.proc, err
 }
 
@@ -197,7 +194,7 @@ const noDPrefix = "." + linkPrefix
 // removed afterwards, so the spelling the kernel keeps names nothing later
 // either. errUnusable when sdir could not be opened, the spelling does not
 // fit, or R cannot be made.
-func withoutD(o op, sdir *os.File, real, name string, thread, proc bool, cfg *config) (endpoint, route, error) {
+func withoutD(sdir *os.File, real, name string, thread, proc bool, cfg *config) (endpoint, route, error) {
 	if sdir == nil {
 		cfg.trace.skipMeans(noDRoutes, "socket directory not opened")
 		return nil, "", errUnusable
@@ -225,7 +222,7 @@ func withoutD(o op, sdir *os.File, real, name string, thread, proc bool, cfg *co
 	}
 	r := noDPrefix + part
 	defer unix.Unlinkat(fd, r, 0)
-	return byMeans(o, fd, r+"/"+name, thread, proc, cfg, noDRoutes)
+	return byMeans(fd, r+"/"+name, thread, proc, cfg, noDRoutes)
 }
 
 // realDir is dir as a real path (symlinks resolved, absolute), for R to point
@@ -256,7 +253,8 @@ type held struct {
 // trying bases in order and then the socket's directory (sdir, unless nil, where D is
 // named ".sockat.XXXXXXXXXX"). A place where a step fails is passed over;
 // what was made there is removed first, except a directory that failed the
-// check, which is not known to be ours.
+// check, which is not known to be ours. With nextR nil, D is made without R
+// (SPEC "D と R" steps 1 and 2 only, for proc-held).
 //
 // proc says whether /proc can be used, which decides how D is opened (and so
 // how its mode is set): O_PATH, then chmod through <procSelfFD>/<fd>, which
@@ -303,7 +301,8 @@ func makeD(bases []string, sdir *os.File, real string, proc bool, procSelfFD str
 }
 
 // makeDIn makes D (named prefix + a random part from nextD) in the place
-// baseFD, checks it, sets it to 0700, and makes R (named by nextR) in it.
+// baseFD, checks it, sets it to 0700, and makes R (named by nextR, unless nil)
+// in it.
 func makeDIn(baseFD int, prefix, real string, proc bool, procSelfFD string,
 	nextD, nextR func() (string, error)) (*held, error) {
 	part, err := createAt(nextD, func(n string) error { return unix.Mkdirat(baseFD, prefix+n, 0o700) })
@@ -338,13 +337,23 @@ func makeDIn(baseFD int, prefix, real string, proc bool, procSelfFD string,
 		h.cleanup()
 		return nil, err
 	}
-	r, err := createAt(nextR, func(n string) error { return symlinkat(real, fd, n) })
+	if nextR != nil {
+		if err := h.makeR(real, nextR); err != nil {
+			h.cleanup()
+			return nil, err
+		}
+	}
+	return h, nil
+}
+
+// makeR makes R in D, pointing to real, named by nextR (SPEC "D と R" step 3).
+func (h *held) makeR(real string, nextR func() (string, error)) error {
+	r, err := createAt(nextR, func(n string) error { return symlinkat(real, h.fd, n) })
 	if err != nil {
-		h.cleanup()
-		return nil, err
+		return err
 	}
 	h.r = r
-	return h, nil
+	return nil
 }
 
 // createAt calls create with names from next until one is not taken

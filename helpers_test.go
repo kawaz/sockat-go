@@ -470,6 +470,70 @@ func openTestDir(t *testing.T, dir string) *os.File {
 	return f
 }
 
+// dialFrom dials p by the system's connect order started at from (the routes
+// before it left out, so that a later route can be forced where an earlier
+// one would take p), as runLong does but with the socket's directory given as
+// sdir (nil: as if it could not be opened). errUnusable when no route from
+// there can be used.
+func dialFrom(t *testing.T, p string, sdir *os.File, cfg *config, from route) (endpoint, route, error) {
+	t.Helper()
+	dir, name, err := splitPath(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	real, err := realDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := newDialer(p, dir, real, name, sdir, cfg)
+	defer d.close()
+	steps := dialSteps(d.procUsable)
+	for i, s := range steps {
+		if s.route == from {
+			return d.run(steps[i:])
+		}
+	}
+	t.Fatalf("%s is not in the connect order here", from)
+	return nil, "", nil
+}
+
+// dialTraced dials p through runLong with cfg (a copy of it, given a trace)
+// and returns what runLong returned and the routes it recorded as tried and
+// found unusable, in order. A connection is closed at the end of the test.
+func dialTraced(t *testing.T, p string, cfg *config) (endpoint, route, []skipped, error) {
+	t.Helper()
+	c := *cfg
+	c.trace = &trace{}
+	ep, r, err := runLong(opDial, p, &c)
+	if ep != nil {
+		t.Cleanup(func() { ep.Close() })
+	}
+	return ep, r, c.trace.skipped, err
+}
+
+// namesOf are the names of the routes in sks, in order. Each must come with
+// a reason (a short text, for diagnostics only: its wording is not pinned).
+func namesOf(t *testing.T, sks []skipped) []route {
+	t.Helper()
+	var names []route
+	for _, s := range sks {
+		if s.reason == "" {
+			t.Errorf("%s skipped without a reason", s.name)
+		}
+		names = append(names, s.name)
+	}
+	return names
+}
+
+// stepNames are the routes of steps, in order.
+func stepNames(steps []dialStep) []route {
+	var rs []route
+	for _, s := range steps {
+		rs = append(rs, s.route)
+	}
+	return rs
+}
+
 // listenAt makes a listener whose socket file is at p, however long p is and
 // whatever routes a listen has here: bound at a short path in /tmp (the net
 // package itself) and renamed to p. p must be on the same file system as

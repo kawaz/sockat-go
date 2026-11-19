@@ -11,47 +11,36 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// The fallback routes of a dial (SPEC "予備の経路"), for when the central
-// route cannot be used: a connect leaves no spelling behind with the peer (the
-// connecting socket is not bound), so these spell the path without a random
-// part. A bind never takes them.
+// The routes of a dial that spell the path in the plain sockaddr without D
+// (every system but FreeBSD): relative, and symlink. A connect leaves no
+// spelling behind with the peer (the connecting socket is not bound), so these
+// spellings need no random part; a listen never takes them.
 
-// posixFallbackDial tries, in order, for a path longer than directMax whose
-// directory part is dir and file name name:
-//
-//  1. (withRelative) the path spelled relative to the cwd, when that fits;
-//  2. for each of cfg.tmpBases: a symlink to the socket file in it when it is
-//     a safe place (symlinkRoute), or, when it is not, a directory of our own
-//     in it held by its fd (heldLinkRoute: Linux with /proc only).
-//
-// A failure of a route ends the search with that error; errUnusable when no
-// route can be used.
-func posixFallbackDial(path, dir string, withRelative bool, cfg *config) (endpoint, route, error) {
-	if withRelative {
-		if rel := newRelative(path, dir); rel != nil {
-			ep, err := rel.run(func(s string) (endpoint, error) { return viaStd(opDial, s, false) })
-			return ep, routeRelative, err
+// relative connects through the path spelled relative to the cwd
+// (newRelative), then confirms the cwd did not change meanwhile (relative.run).
+// Unusable when the path is not absolute or no relative spelling fits.
+func (d *dialer) relative() (endpoint, error) {
+	if !isAbs(d.path) {
+		return nil, unusable("path not absolute")
+	}
+	rel := newRelative(d.path, d.dir)
+	if rel == nil {
+		return nil, unusable("no relative spelling")
+	}
+	return rel.run(func(s string) (endpoint, error) { return viaStd(opDial, s, false) })
+}
+
+// symlink connects through a symlink to the socket file in the first of
+// cfg.tmpBases where symlinkRoute can be used (TMPDIR, then /tmp). A failure
+// of the connect through it ends the search with that error.
+func (d *dialer) symlink() (endpoint, error) {
+	for _, base := range d.cfg.tmpBases {
+		ep, err := symlinkRoute(base, d.path)
+		if !errors.Is(err, errUnusable) {
+			return ep, err
 		}
 	}
-	for _, base := range cfg.tmpBases {
-		var ep endpoint
-		var r route
-		var err error
-		if !safeBase(base) {
-			ep, err = heldLinkRoute(base, path, cfg.procSelfFD)
-			r = routeProcHeld
-		} else {
-			ep, r, err = symlinkRoute(base, path)
-		}
-		switch {
-		case err == nil:
-			return ep, r, nil
-		case errors.Is(err, errUnusable):
-		default:
-			return nil, "", err
-		}
-	}
-	return nil, "", errUnusable
+	return nil, unusable("no safe place")
 }
 
 // relative is a relative spelling of an absolute socket path, checked to
@@ -187,22 +176,21 @@ func (r *relative) run(f func(spelling string) (endpoint, error)) (endpoint, err
 // replace the symlink (safeBase); both are checked before anything is
 // created. The symlink is removed before this returns, whatever the outcome.
 // errUnusable when the route cannot be used here.
-func symlinkRoute(base, path string) (endpoint, route, error) {
+func symlinkRoute(base, path string) (endpoint, error) {
 	link := underBase(base, linkPrefix+string(make([]byte, linkRandomLen)))
 	if len(link) > directMax || !safeBase(base) {
-		return nil, "", errUnusable
+		return nil, errUnusable
 	}
 	target, ok := absTarget(path)
 	if !ok {
-		return nil, "", errUnusable
+		return nil, errUnusable
 	}
 	link, err := createLink(base, target, randomName)
 	if err != nil {
-		return nil, "", errUnusable
+		return nil, errUnusable
 	}
 	defer os.Remove(link)
-	ep, err := viaStd(opDial, link, false)
-	return ep, routeSymlink, err
+	return viaStd(opDial, link, false)
 }
 
 // absTarget is the caller's spelling made absolute against the cwd, for a

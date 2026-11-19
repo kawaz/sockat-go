@@ -38,14 +38,38 @@ func atOp(o op, dirfd int, spelling string) (endpoint, error) {
 	})
 }
 
-// fallbackDial is a dial's fallback route on FreeBSD: connectat(2) on the
-// socket's directory with the file name.
-func fallbackDial(_, _, name string, sdir *os.File, _ *config) (endpoint, route, error) {
-	if sdir == nil {
-		return nil, "", errUnusable
+// dialSteps is the connect order on FreeBSD (SPEC "connect の順"): at-direct,
+// at.
+func dialSteps(bool) []dialStep {
+	return []dialStep{
+		{routeAtDirect, (*dialer).atDirect},
+		{routeAt, (*dialer).at},
 	}
-	ep, err := atOp(opDial, int(sdir.Fd()), name)
-	return ep, routeAtDirect, err
+}
+
+// atDirect connects with connectat(2) on the socket's directory and the file
+// name, with no D: a connect leaves no spelling behind. Unusable when the
+// socket's directory was not opened or the name does not fit the sockaddr.
+func (d *dialer) atDirect() (endpoint, error) {
+	if d.sdir == nil {
+		return nil, unusable("socket directory not opened")
+	}
+	if len(d.name) > directMax {
+		return nil, unusable("spelling too long")
+	}
+	return atOp(opDial, int(d.sdir.Fd()), d.name)
+}
+
+// at connects with connectat(2) on D and R/<name>.
+func (d *dialer) at() (endpoint, error) {
+	if !d.spellingFits() {
+		return nil, unusable("spelling too long")
+	}
+	h, err := d.theD(true)
+	if err != nil {
+		return nil, err
+	}
+	return atOp(opDial, h.fd, h.r+"/"+d.name)
 }
 
 // openDir opens dir O_RDONLY | O_DIRECTORY.

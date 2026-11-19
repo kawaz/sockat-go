@@ -9,19 +9,24 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// fallbackDial is a dial's fallback routes on Linux (SPEC "予備の経路"):
-// with /proc, /proc/self/fd/<dirfd>/<name>, then for each place a symlink to
-// the file (safe places) or the fd-held form (others); without /proc, the
-// path relative to the cwd, then symlinks in safe places.
-func fallbackDial(path, dir, name string, sdir *os.File, cfg *config) (endpoint, route, error) {
-	proc := sdir != nil && procFDUsableFor(sdir, cfg.procSelfFD)
+// dialSteps is the connect order on Linux (SPEC "connect の順"): with /proc,
+// proc-direct, thread-cwd, proc, proc-held, symlink; without it, relative,
+// thread-cwd, symlink.
+func dialSteps(proc bool) []dialStep {
 	if proc {
-		if via, ok := procSpelling(sdir, name, cfg.procSelfFD); ok {
-			ep, err := viaStd(opDial, via, false)
-			return ep, routeProcDirect, err
+		return []dialStep{
+			{routeProcDirect, (*dialer).procDirect},
+			{routeThreadCwd, (*dialer).threadCwd},
+			{routeProc, (*dialer).proc},
+			{routeProcHeld, (*dialer).procHeld},
+			{routeSymlink, (*dialer).symlink},
 		}
 	}
-	return posixFallbackDial(path, dir, !proc, cfg)
+	return []dialStep{
+		{routeRelative, (*dialer).relative},
+		{routeThreadCwd, (*dialer).threadCwd},
+		{routeSymlink, (*dialer).symlink},
+	}
 }
 
 // procFDUsableFor reports whether <procSelfFD>/<fd of dir> can be looked up,
@@ -73,21 +78,25 @@ func setPrivate(baseFD int, name string, fd int, held *unix.Stat_t, proc bool, p
 	return unix.Fchmod(rfd, 0o700)
 }
 
-// procSpelling returns <procSelfFD>/<dir>/<name>, or false when the /proc
-// route cannot be used:
-//
-//   - <procSelfFD>/<dir> cannot be looked up (no /proc). Without this check a
-//     bind / connect through the spelling would fail with ENOENT, which reads
-//     as "the directory does not exist" although it does;
-//   - the spelling does not fit sun_path (a file name of about 90 bytes or
-//     more).
-func procSpelling(dir *os.File, name, procSelfFD string) (string, bool) {
-	fdDir := procSelfFD + "/" + strconv.Itoa(int(dir.Fd()))
-	if _, err := os.Stat(fdDir); err != nil {
-		return "", false
+// procDirect connects through <procSelfFD>/<fd of the socket's
+// directory>/<name>, with no R: a connect leaves no spelling behind. Unusable
+// when the socket's directory was not opened, <procSelfFD>/<fd> cannot be
+// looked up (without this check the connect would fail with ENOENT, which
+// reads as "the directory does not exist" although it does), or the spelling
+// does not fit sun_path (a file name of about 90 bytes or more).
+func (d *dialer) procDirect() (endpoint, error) {
+	if d.sdir == nil {
+		return nil, unusable("socket directory not opened")
 	}
-	via := fdDir + "/" + name
-	return via, len(via) <= directMax
+	fdDir := d.cfg.procSelfFD + "/" + strconv.Itoa(int(d.sdir.Fd()))
+	if _, err := os.Stat(fdDir); err != nil {
+		return nil, unusable("/proc unusable")
+	}
+	via := fdDir + "/" + d.name
+	if len(via) > directMax {
+		return nil, unusable("spelling too long")
+	}
+	return viaStd(opDial, via, false)
 }
 
 // openDir opens dir O_PATH | O_DIRECTORY, which needs only search permission.
@@ -122,84 +131,33 @@ func threadChdir(dirfd int) error {
 	return syscallError("fchdir", unix.Fchdir(dirfd))
 }
 
-// heldLinkName is the name of the symlink inside the held directory.
+// heldLinkName is the name of proc-held's symlink inside D.
 const heldLinkName = "s"
 
-// heldLinkRoute connects to path through a place base that others can write
-// to (not safeBase), where a symlink reached by its name would not be safe:
-// someone could rename it away and put their own in its place.
-//
-//  1. Create a directory sockat.XXXXXXXXXX of mode 0700 under base (names as
-//     for the symlink: a fresh one on EEXIST, linkAttempts at most).
-//  2. Open it O_PATH | O_DIRECTORY | O_NOFOLLOW and check with fstat(2) that
-//     what was opened is a directory, owned by the effective uid, with no
-//     permission for group and others (isOurPrivateDir). A directory swapped
-//     in between the mkdir and the open fails the check. Then chmod it to 0700
-//     through <procSelfFD>/<fd> (an O_PATH fd takes no fchmod(2); the /proc
-//     spelling reaches the directory the fd holds), so a umask that takes the
-//     owner's bits (0277, 0477) does not fail every attempt: O_PATH opens the
-//     directory even without read permission.
-//  3. Create in it, through the fd, the symlink "s" to path (symlinkat(2)).
-//  4. Connect through <procSelfFD>/<fd>/s. The kernel follows the fd, not the
-//     name, so renaming the directory away does not matter; and the spelling
-//     is short whatever the directory and the file name.
-//  5. Remove "s" through the fd, and the directory only when its name still
-//     names the directory held (lstat's (st_dev, st_ino) against the fd's).
-//
-// A bind never takes this: its spelling would be <procSelfFD>/<fd>/s/<name>,
-// longer than the /proc route's, which has been tried already. errUnusable
-// when /proc cannot be used or a step above fails; what was made is removed
-// first. Only what this made is removed: the symlink "s" once symlinkat(2)
-// made it, the directory once it passed the check of step 2. A directory
-// swapped in is left alone with whatever is in it.
-func heldLinkRoute(base, path, procSelfFD string) (endpoint, error) {
-	return heldLinkVia(base, path, procSelfFD, func(base string) (string, error) {
-		return createHeldDir(base, randomName)
-	})
-}
-
-// heldLinkVia is heldLinkRoute with step 1 (create the directory, return its
-// path) given as mkdir, so the tests can hand over a directory standing in for
-// one swapped in between the mkdir and the open.
-func heldLinkVia(base, path, procSelfFD string, mkdir func(base string) (string, error)) (endpoint, error) {
-	target, ok := absTarget(path)
+// procHeld connects through <procSelfFD>/<D>/s, s a symlink in D to the socket
+// file (SPEC "proc-held"; D made with steps 1, 2 and 5 of "D と R", R not
+// needed). The kernel follows D's fd, not a name, so neither where D is nor
+// who else can write there matters, and the spelling is short whatever the
+// directory and the file name. s holds the caller's own spelling (made
+// absolute against the cwd), so the kernel resolves it as it resolves the
+// path. s is removed (through D's fd) only when it was made; D with the rest
+// of the dial. Unusable when D or s cannot be made.
+func (d *dialer) procHeld() (endpoint, error) {
+	target, ok := absTarget(d.path)
 	if !ok {
-		return nil, errUnusable
+		return nil, unusable("cwd unreadable")
 	}
-	// /proc is looked for before anything is made under base: without it
-	// there is no fd-held form, and an unsafe place is passed over untouched.
-	if !procFDUsable(base, procSelfFD) {
-		return nil, errUnusable
-	}
-	dirPath, err := mkdir(base)
+	h, err := d.theD(false)
 	if err != nil {
-		return nil, errUnusable
+		return nil, err
 	}
-	dfd, err := unix.Open(dirPath, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-	if err != nil {
-		// What is at the name now is not known to be ours: left alone.
-		return nil, errUnusable
+	if err := unix.Symlinkat(target, h.fd, heldLinkName); err != nil {
+		return nil, unusable("s not made")
 	}
-	defer unix.Close(dfd)
-	var held unix.Stat_t
-	if err := unix.Fstat(dfd, &held); err != nil || !isOurPrivateDir(&held, uint32(os.Geteuid())) {
-		return nil, errUnusable
-	}
-	defer removeHeldDir(dirPath, &held)
-	fdDir := procSelfFD + "/" + strconv.Itoa(dfd)
-	if err := unix.Chmod(fdDir, 0o700); err != nil {
-		return nil, errUnusable
-	}
-	if err := unix.Symlinkat(target, dfd, heldLinkName); err != nil {
-		return nil, errUnusable
-	}
-	defer unix.Unlinkat(dfd, heldLinkName, 0)
-	if _, err := os.Stat(fdDir); err != nil {
-		return nil, errUnusable
-	}
-	via := fdDir + "/" + heldLinkName
+	defer unix.Unlinkat(h.fd, heldLinkName, 0)
+	via := d.cfg.procSelfFD + "/" + strconv.Itoa(h.fd) + "/" + heldLinkName
 	if len(via) > directMax {
-		return nil, errUnusable
+		return nil, unusable("spelling too long")
 	}
 	return viaStd(opDial, via, false)
 }
@@ -214,36 +172,6 @@ func procFDUsable(dir, procSelfFD string) bool {
 	defer unix.Close(fd)
 	_, err = os.Stat(procSelfFD + "/" + strconv.Itoa(fd))
 	return err == nil
-}
-
-// createHeldDir creates a directory of mode 0700 under base, named by
-// nextName (randomName outside the tests; a fresh name on EEXIST, linkAttempts
-// at most, as createLink), and returns its path.
-func createHeldDir(base string, nextName func() (string, error)) (string, error) {
-	for range linkAttempts {
-		name, err := nextName()
-		if err != nil {
-			return "", err
-		}
-		dirPath := underBase(base, name)
-		err = unix.Mkdir(dirPath, 0o700)
-		if err == nil {
-			return dirPath, nil
-		}
-		if err != unix.EEXIST {
-			return "", err
-		}
-	}
-	return "", errNoFreeName
-}
-
-// removeHeldDir removes the directory at dirPath when that name still names
-// the directory held (held is its fstat). Best effort, as for the symlink.
-func removeHeldDir(dirPath string, held *unix.Stat_t) {
-	var st unix.Stat_t
-	if unix.Lstat(dirPath, &st) == nil && st.Dev == held.Dev && st.Ino == held.Ino {
-		unix.Rmdir(dirPath)
-	}
 }
 
 // dOpenFlagsRetry: no second way of opening D here.

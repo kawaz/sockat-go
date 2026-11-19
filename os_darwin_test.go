@@ -1,7 +1,8 @@
 package sockat
 
 // macOS: O_SEARCH for the thread-cwd route's directory, why the widened
-// sockaddr is not used, and the macOS list of ways.
+// sockaddr is not used (and how the connect order records it), and the macOS
+// list of ways.
 
 import (
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"syscall"
 	"testing"
 	"unsafe"
@@ -23,8 +25,8 @@ import (
 //	|------------|-------------------------------|--------------------------------|------------|------------|
 //	| standard   | directMax bytes               | (the public order)             | standard   | standard   |
 //	| thread-cwd | 600 bytes under /tmp          | D in a place of its own        | thread-cwd | thread-cwd |
-//	| relative   | directMax bytes below the cwd | no means (fallback), no place  | (listenAt) | relative   |
-//	| symlink    | 600 bytes under /tmp          | no means (fallback), a place   | (listenAt) | symlink    |
+//	| relative   | directMax bytes below the cwd | no means, no place             | (listenAt) | relative   |
+//	| symlink    | 600 bytes under /tmp          | no means, a place              | (listenAt) | symlink    |
 func ways(t *testing.T) []way {
 	t.Helper()
 	d, dbase, short := tmpDir(t), tmpDir(t), tmpDir(t)
@@ -130,6 +132,26 @@ func TestWhyTheWidenedSockaddrIsNotUsed(t *testing.T) {
 	defer sc.Close()
 	if sc.RemoteAddr() == nil {
 		t.Fatal("net.DialUnix left RemoteAddr nil")
+	}
+}
+
+// Widened, second in the connect order on macOS, is not made in sockat-go
+// (TestWhyTheWidenedSockaddrIsNotUsed): a dial that passes over relative
+// records widened as unusable with that reason, makes nothing for it, and
+// goes on to thread-cwd. The rest of the order is pinned by
+// TestTheConnectOrderWithoutProc.
+func TestWidenedIsRecordedAsNotMadeAndPassedOver(t *testing.T) {
+	t.Parallel()
+	p := nest(t, tmpDir(t), 200, "s.sock")
+	l := listenAt(t, p)
+	ep, r, sks, err := dialTraced(t, p, centralCfg(tmpDir(t)))
+	if err != nil || r != routeThreadCwd {
+		t.Fatalf("dial: %s, %v, want %s", r, err, routeThreadCwd)
+	}
+	ping(t, l, ep.(*net.UnixConn))
+	want := []route{routeStandard, routeRelative, routeWidened}
+	if got := namesOf(t, sks); !slices.Equal(got, want) || sks[2].reason != noWidenedRoute {
+		t.Fatalf("skipped %v, want %v with widened for %q", sks, want, noWidenedRoute)
 	}
 }
 

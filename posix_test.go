@@ -2,20 +2,20 @@
 
 package sockat
 
-// The fallback routes of a dial (posixFallbackDial), for when the routes through D
-// cannot be used: every system but FreeBSD; on Linux the /proc spelling
-// comes first when /proc is there (os_linux_test.go). In order: the path
-// relative to the cwd (when /proc is not used), then for each place for the
-// symlink (TMPDIR, then /tmp) a short symlink to the socket file when the place
-// is safe, or on Linux with /proc proc-held when it is not
-// (heldlink_linux_test.go). A connect leaves no spelling behind with the peer
-// (the connecting socket is not bound), so these spellings need no random
-// part; a listen never takes them.
+// The routes of a dial that spell the path without D (every system but
+// FreeBSD): relative (the path relative to the cwd), first in the connect
+// order where /proc is not used, and symlink (a short symlink to the socket
+// file under the first safe place of TMPDIR, then /tmp), last in it. A
+// connect leaves no spelling behind with the peer (the connecting socket is
+// not bound), so these spellings need no random part; a listen never takes
+// them. With /proc, Linux has proc-direct and proc-held instead
+// (os_linux_test.go, heldlink_linux_test.go).
 //
-// The tests force the fallback with fallbackCfg: no thread cwd and no /proc,
-// so the routes through D have no means and are not even attempted. The listener
-// at a long path is made by listenAt (bound at a short path and renamed), so
-// these tests need no route of a listen and run on every system.
+// The tests reach them with fallbackCfg: no thread cwd and no /proc, so the
+// routes through D have no means and are not even attempted (and Linux takes
+// its order without /proc). The listener at a long path is made by listenAt
+// (bound at a short path and renamed), so these tests need no route of a
+// listen and run on every system.
 
 import (
 	"errors"
@@ -36,14 +36,14 @@ const noProc = "/nonexistent/proc/self/fd"
 
 // fallbackCfg is the route order's inputs with the routes through D out of
 // reach (no thread cwd, /proc made to look absent, so no means at all) and
-// bases as the places for a dial's symlink.
+// bases as the places for symlink: a dial takes relative or symlink.
 func fallbackCfg(bases ...string) *config {
 	return &config{tmpBases: bases, procSelfFD: noProc, threadCwd: false}
 }
 
 // centralCfg is the route order's inputs for the routes through D: D placed in
 // dBases (then the socket's directory), thread-cwd on, /proc looked
-// for where it is (Linux), and no place for a fallback symlink.
+// for where it is (Linux), and no place for symlink.
 func centralCfg(dBases ...string) *config {
 	return &config{dBases: dBases, procSelfFD: "/proc/self/fd", threadCwd: true}
 }
@@ -293,7 +293,7 @@ func TestSymlinkRouteIsUnusableWhereItCannotBeUsedAndCreatesNothing(t *testing.T
 		markUntouched(t, pl)
 	}
 	for _, pl := range append([]string{"/nonexistent", file}, places...) {
-		if _, _, err := symlinkRoute(pl, p); !errors.Is(err, errUnusable) {
+		if _, err := symlinkRoute(pl, p); !errors.Is(err, errUnusable) {
 			t.Errorf("under %s: %v, want errUnusable", pl, err)
 		}
 	}
@@ -440,11 +440,6 @@ func TestAFailureThroughTheSymlinkIsReturnedAndNotRetried(t *testing.T) {
 // own (0700, 0755) are used. With only unsafe places there is no route:
 // ENAMETOOLONG. Run as root (docker), a place owned by another user is made
 // too (chown) and must be passed over, sticky or not.
-//
-// This is the case where there is no proc-held for an unsafe place: macOS
-// and the other systems, and Linux without /proc (fallbackCfg makes /proc
-// look absent). With /proc, Linux dials through an unsafe place in that form
-// instead (heldlink_linux_test.go).
 func TestAnUnsafePlaceForTheSymlinkIsPassedOver(t *testing.T) {
 	t.Parallel()
 	d := tmpDir(t)
@@ -637,8 +632,8 @@ func TestChildDialFromEnv(t *testing.T) {
 // connect to a path too long for sun_path, and nothing happens: no connection
 // reaches the listener, nothing is created in the place or next to the
 // socket. A real failure stays what it is: a missing directory is ENOENT. A
-// listen with the routes through D out of reach is ENAMETOOLONG too: a listen has
-// no fallback routes.
+// listen with the routes through D out of reach is ENAMETOOLONG too: a listen
+// never takes relative or symlink.
 func TestWithNoRouteLeftAPathIsENAMETOOLONGAndNothingIsMade(t *testing.T) {
 	t.Parallel()
 	p := nest(t, tmpDir(t), 600, "s.sock")
@@ -711,7 +706,7 @@ func TestAFailureThroughTheRelativeSpellingIsReturnedAndNotRetried(t *testing.T)
 
 // The tests below run in a child process so the cwd and $PWD can be chosen.
 // The parent listens at the path; the child spells the path relative to its
-// cwd (newRelative), dials through the fallback routes with no place for a
+// cwd (newRelative), dials through the connect order with no place for a
 // symlink, and reports the route and the spelling; the parent checks that the
 // connection reached its listener (and not a decoy).
 

@@ -67,14 +67,7 @@ func listenAnyAt(t *testing.T, p string, cfg *config) (*net.UnixListener, anyOut
 // diagnostics only: its wording is not pinned).
 func skippedNames(t *testing.T, out anyOutcome) []route {
 	t.Helper()
-	var names []route
-	for _, s := range out.skipped {
-		if s.reason == "" {
-			t.Errorf("%s skipped without a reason", s.name)
-		}
-		names = append(names, s.name)
-	}
-	return names
+	return namesOf(t, out.skipped)
 }
 
 // respelled and recreatable are the losses of symlink in a place of the

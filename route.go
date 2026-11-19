@@ -60,10 +60,11 @@ const (
 	routeProcSockdir      route = "proc-sockdir"
 	routeAtSockdir        route = "at-sockdir"
 	routeForkSockdir      route = "fork-sockdir" // SPEC's; Go has no fork route
-	// The fallback routes of a dial.
+	// The routes of a dial only (the connect order), and ListenAny's symlink.
 	routeProcDirect route = "proc-direct" // /proc/self/fd/<dirfd>/<name> (Linux)
 	routeProcHeld   route = "proc-held"   // /proc/self/fd/<D>/s, s a symlink to the file (Linux)
 	routeRelative   route = "relative"    // the path relative to the cwd
+	routeWidened    route = "widened"     // SPEC's; sockat-go does not make it (named in skipped, macOS)
 	routeSymlink    route = "symlink"     // a symlink in a place: to the file (dial), to the directory (ListenAny)
 	routeAtDirect   route = "at-direct"   // connectat(2) on the socket's directory (FreeBSD)
 )
@@ -209,8 +210,9 @@ type config struct {
 	// dBases is where D may go, in the order tried: ${TMPDIR:-/tmp} (a
 	// relative one too), then /tmp. The socket's directory comes after them.
 	dBases []string
-	// tmpBases is where the temporary symlink of a dial's fallback may go, in
-	// the order tried: TMPDIR when it is set to an absolute path, then /tmp.
+	// tmpBases is where the temporary symlink of a dial's symlink route may
+	// go, in the order tried: TMPDIR when it is set to an absolute path, then
+	// /tmp.
 	tmpBases []string
 	// procSelfFD is where the kernel lists the fds of the process (Linux).
 	// The tests point it elsewhere to stand in for a system without /proc.

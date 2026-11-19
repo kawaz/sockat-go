@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -223,6 +224,87 @@ func TestChildDiscardAfterAChdir(t *testing.T) {
 	}
 	if err := discard(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A relative path is resolved against the cwd twice, once for the real path
+// ListenEx records and once by the bind, and another goroutine may change the
+// cwd in between. Then the bind lands below the new cwd while the record would
+// name the same name below the old one: an unrelated file there, which discard
+// would remove. So when the cwd differs after the bind, ListenEx treats the
+// file as not recorded (SPEC bind_ex): it returns a *RouteError reaching
+// errNotRecorded and no listener or discard, leaves the file of the same name
+// in the old cwd as it was, and does not remove the socket file it bound in
+// the new cwd either (a file not recorded is left). Without a change of the
+// cwd, the same relative path listens and discard removes its socket as
+// before. Both a short path (the net package) and a long one (the routes
+// through D, where a listen of a long path has one) are checked, in a child
+// process each, since the cwd belongs to the whole process.
+func TestListenExWhoseCwdChangesBeforeTheBindRecordsNothing(t *testing.T) {
+	t.Parallel()
+	rels := []string{"s.sock"}
+	if longListen() {
+		long := strings.Repeat(strings.Repeat("d", 60)+"/", 3) + "s.sock"
+		if len(long) <= directMax {
+			t.Fatalf("%d bytes is not long", len(long))
+		}
+		rels = append(rels, long)
+	}
+	for _, rel := range rels {
+		d := tmpDir(t)
+		for _, cwd := range []string{"a", "b"} {
+			if err := os.MkdirAll(filepath.Dir(filepath.Join(d, cwd, rel)), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		old, moved := filepath.Join(d, "a", rel), filepath.Join(d, "b", rel)
+
+		// Unchanged cwd: listens, and discard (in the child) removes it.
+		runChild(t, "TestChildListenExWithACwdChange", d+"/a", "SOCKAT_REL="+rel, "SOCKAT_CHDIR=")
+		if exists(old) {
+			t.Fatalf("%d bytes: the socket file is still there after discard", len(rel))
+		}
+
+		// Changed cwd: not recorded; neither file is touched.
+		if err := os.WriteFile(old, []byte("old"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runChild(t, "TestChildListenExWithACwdChange", d+"/a", "SOCKAT_REL="+rel, "SOCKAT_CHDIR="+d+"/b")
+		if b, err := os.ReadFile(old); err != nil || string(b) != "old" {
+			t.Fatalf("%d bytes: the file in the old cwd: %q, %v", len(rel), b, err)
+		}
+		if !isSocket(moved) {
+			t.Fatalf("%d bytes: the socket file bound in the new cwd is not there", len(rel))
+		}
+	}
+}
+
+func TestChildListenExWithACwdChange(t *testing.T) {
+	asChild(t)
+	rel, to := os.Getenv("SOCKAT_REL"), os.Getenv("SOCKAT_CHDIR")
+	bindEx = func(path string, lr LastResort, cfg *config) (endpoint, Result, error) {
+		if to != "" {
+			if err := os.Chdir(to); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return listenReported(path, lr, cfg)
+	}
+	t.Cleanup(func() { bindEx = listenReported })
+	l, discard, _, err := ListenEx(rel, NoLastResort)
+	if to == "" {
+		if err != nil {
+			t.Fatal(err)
+		}
+		l.Close()
+		if err := discard(); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	re := routeErr(t, err)
+	if !errors.Is(err, errNotRecorded) || l != nil || discard != nil || re.Route == "" {
+		t.Fatalf("%v, %v, route %q: %v", l, discard != nil, re.Route, err)
 	}
 }
 

@@ -235,7 +235,7 @@ D は 1 回の呼び出しで 1 度だけ作り、D を使う経路で共有す�
 - **長いパスの listener の `Addr()` (と accept したソケットの `LocalAddr()`) は渡したパスを返さない**。bind でカーネルに渡した綴り `R/<ファイル名>` (proc は `/proc/self/fd/<fd>/R/<ファイル名>`、symlink-file は `<置き場>/sockat.XXXXXXXXXX`) を返す。そういう listener に connect した側の `RemoteAddr()` も、Dial がどの経路を通ったかによらず同じ綴りを返す (カーネルは相手が bind した綴りを返す)。R も symlink ももう無いので普段は何にも当たらないが、綴りは他の利用者に見えうる (Linux の `/proc/net/unix`)。他の利用者が書ける場所 (共有の置き場の symlink-file、他人も書ける cwd の R) では、同じ名前を作り直された後にその綴りを stat すると相手の物に当たる。R の綴り (`R/<ファイル名>`) は unlink すると相手の選んだディレクトリの同じ名前のファイルを消しうる。その綴りで unlink / stat せず、他のプロセスに渡して繋がせる用途にも使わない。元のパスは自分で持っておく (消す時は `ListenEx` の `discard`)
 - **名前で終わらないパス** (`dir/`、`dir/.`、`dir/..`) は何も作らずに `EINVAL`
 - **ディレクトリを先に引く**: D を通す経路は R を作る時にソケットのディレクトリを realpath で引く。proc-direct・relative・at-direct はディレクトリを引いてからファイル名で渡す。その間の rename や symlink の張り替えは反映されない。symlink-file は標準と同じ
-- **他の goroutine の `os.Chdir`**: relative (Dial) の途中で cwd が変わったら、結果を捨ててエラーを返す
+- **他の goroutine の `os.Chdir`**: relative (Dial) の途中で cwd が変わったら、結果を捨ててエラーを返す。相対パスの `ListenEx` (短いパスも) は、realpath を引いてから bind するまでに cwd が変わったら、listener を閉じ、ファイルは消さずにエラーを返す (覚えたファイルと bind したファイルが違いうるので、`discard` を返さない)
 - **D 無しの形の差し替え**: sticky でなく他人も書けるソケットのディレクトリでは、D 無しの形 (Listen) の R を作ってから bind するまでに R を差し替えられ、別のディレクトリに bind しうる (同じ名前が既にあれば `EADDRINUSE` で、上書きはしない)
 - **残骸**: 消す前にプロセスが死ぬと、`sockat.XXXXXXXXXX` (D、symlink) が置き場に、`.sockat.XXXXXXXXXX` (D) がソケットのディレクトリに残る
 

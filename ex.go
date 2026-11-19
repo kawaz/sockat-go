@@ -128,7 +128,8 @@ func (e *RouteError) Unwrap() error { return e.Err }
 // since is left alone. Between discard's check and the removal, a replacement
 // cannot be told apart (POSIX has no removal by inode). When the file cannot
 // be recorded, the listener is closed, the file is left, and an error is
-// returned.
+// returned; so too for a relative path when the cwd changes (another
+// goroutine's os.Chdir) between the resolving of its real path and the bind.
 //
 // discard does not close the listener: close it yourself (before or after).
 // It returns nil when the file is removed, is gone, or is no longer the one
@@ -162,12 +163,21 @@ func DialEx(path string, lr LastResort) (*net.UnixConn, Result, error) {
 func listenEx(path string, lr LastResort, cfg *config) (*net.UnixListener, func() error, Result, error) {
 	// An abstract name has no file to record or remove.
 	file, ferr := "", error(nil)
+	// A relative path is resolved against the cwd twice, by realFile and by
+	// the bind, and the cwd is the process's: another goroutine may change it
+	// in between. It is read before the first and compared after the bind.
+	rel := !abstractName(path) && !isAbs(path)
+	var cwd fileID
+	cwdOK := true
 	if !abstractName(path) {
+		if rel {
+			cwd, cwdOK = statID(".")
+		}
 		// The real path is resolved before the bind, as the bind resolves
 		// it; the file's identity is read the moment the bind returns.
 		file, ferr = realFile(path)
 	}
-	ep, res, err := listenReported(path, lr, cfg)
+	ep, res, err := bindEx(path, lr, cfg)
 	if err != nil {
 		return nil, nil, Result{}, err
 	}
@@ -177,9 +187,16 @@ func listenEx(path string, lr LastResort, cfg *config) (*net.UnixListener, func(
 		return l, func() error { return nil }, res, nil
 	}
 	var id fileID
-	ok := ferr == nil
+	ok := ferr == nil && cwdOK
 	if ok {
 		id, ok = lstatID(file)
+	}
+	if ok && rel {
+		// Another cwd means the bind may have resolved path elsewhere than
+		// file, which would then name an unrelated file of the same name.
+		// (A cwd changed and changed back is not seen.)
+		now, same := statID(".")
+		ok = same && now == cwd
 	}
 	if !ok {
 		l.Close()
@@ -187,6 +204,14 @@ func listenEx(path string, lr LastResort, cfg *config) (*net.UnixListener, func(
 	}
 	return l, discarder(file, id), res, nil
 }
+
+// bindEx is the bind of listenEx.
+//
+// Design rationale: a variable rather than a direct call to listenReported
+// only so that a test (TestListenExWhoseCwdChangesBeforeTheBindRecordsNothing,
+// in a child process) can change the cwd between realFile and the bind, which
+// no input of listenEx can bring about. Nothing else assigns it.
+var bindEx = listenReported
 
 // listenReported binds as Listen does, recording the routes tried and, with
 // lr, taking the last resort (symlink-dir) where every route is unusable.
@@ -282,7 +307,8 @@ func (t *trace) skips() []Skip {
 }
 
 // errNotRecorded is ListenEx's error when the socket file it bound cannot be
-// looked up to be recorded.
+// looked up to be recorded, or, for a relative path, may not be the one at the
+// path recorded (the cwd changed before the bind).
 var errNotRecorded = errors.New("the socket file bound could not be recorded for its removal; the listener was closed and the file left")
 
 // discarder returns ListenEx's discard for the socket file recorded as file

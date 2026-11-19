@@ -70,6 +70,84 @@ if res.Has(atanycost.RecreatableSpelling) {
 | `CwdRelative` (`cwd-relative`) | カーネルが覚える綴りが cwd からの相対パス。cwd を変えた後にその綴りで消すと別の場所に当たる (標準が元から持つ危険) | 相対パスで standard を通った |
 | `Forked` (`forked`) | fork の副作用 | Go には fork の経路が無いので付かない (他の言語と名前をそろえるため) |
 
+失うものごとの避け方を下に置く。コードは試験 ([example_test.go](./example_test.go)、[atanycost/example_test.go](./atanycost/example_test.go) の Example 関数) として動かしている。
+
+### respelled
+
+[SPEC の respelled](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#respelled)。長いパスでは `l.Addr()` が渡したパスでない綴りを返し、listener を閉じてもソケットのファイルは消えない。元のパスを持っておいてそれで消すか、`sockat.ListenEx` の `discard` を使う。
+
+`atanycost.Listen` では元のパスで消す ([`ExampleListen_respelled`](./atanycost/example_test.go)):
+
+```go
+l, res, err := atanycost.Listen(path)
+if err != nil {
+	log.Fatal(err)
+}
+defer os.Remove(path) // the path passed, not l.Addr().String()
+defer l.Close()
+fmt.Println("respelled:", res.Has(atanycost.Respelled))
+```
+
+`sockat` では `ListenEx` の `discard` で消す ([`ExampleListenEx`](./example_test.go)):
+
+```go
+l, discard, err := sockat.ListenEx(path)
+if err != nil {
+	log.Fatal(err)
+}
+defer discard() // removes the socket file at path (does not close l)
+defer l.Close()
+```
+
+### cwd-relative
+
+[SPEC の cwd-relative](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#cwd-relative)。相対パスはそのまま標準に渡り、カーネルは cwd からの相対の綴りを覚える。cwd を変えた後にその綴りや相対パスで消すと別の場所に当たる。Listen の前に `filepath.Abs` で絶対パスにし、消す時もその絶対パスを使う ([`ExampleListen_cwdRelative`](./atanycost/example_test.go)):
+
+```go
+abs, err := filepath.Abs(path)
+if err != nil {
+	log.Fatal(err)
+}
+l, res, err := atanycost.Listen(abs)
+if err != nil {
+	log.Fatal(err)
+}
+defer os.Remove(abs)
+defer l.Close()
+fmt.Println("cwd-relative:", res.Has(atanycost.CwdRelative))
+```
+
+### forked
+
+[SPEC の forked](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#forked)。Go には fork の経路が無いので付かない。
+
+### recreatable-spelling
+
+[SPEC の recreatable-spelling](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#recreatable-spelling)。共有の置き場 (`/tmp` 等) の symlink を通ると、カーネルが返す綴りを他の利用者が作り直せ、その綴りで消すと相手の選んだディレクトリのファイルを消しうる。`l.Addr()` の綴りで消さず元のパスで消し、持ち主だけが書ける置き場を `XDG_RUNTIME_DIR` で用意しておく (プログラムを起動する側で渡す。共有の置き場より先に使われ、この名前は付かない。[`ExampleListen_recreatableSpelling`](./atanycost/example_test.go)):
+
+```go
+l, res, err := atanycost.Listen(path)
+if err != nil {
+	log.Fatal(err)
+}
+defer os.Remove(path) // the path passed, not l.Addr().String()
+defer l.Close()
+fmt.Println("recreatable-spelling:", res.Has(atanycost.RecreatableSpelling))
+```
+
+## 使ってはいけない書き方
+
+無関係なファイルを消したり、ファイルを消し損ねたりする書き方 ([SPEC の「使ってはいけない書き方」](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#使ってはいけない書き方))。
+
+| 書き方 | なぜいけないか | 代わりに |
+|---|---|---|
+| `os.Remove(l.Addr().String())` / `os.Stat(l.Addr().String())` | 長いパスでは渡したパスでない ([respelled](#respelled))。cwd や共有の置き場しだいで、作り直された別のファイルに当たりうる ([cwd-relative](#cwd-relative)、[recreatable-spelling](#recreatable-spelling)) | 元のパスで `os.Remove(path)`、または `ListenEx` の `discard()` ([respelled](#respelled)) |
+| 相対パスで Listen し、`os.Chdir` の後にその相対パスで `os.Remove` する | 別の場所のファイルに当たる ([cwd-relative](#cwd-relative)) | Listen の前に `filepath.Abs` で絶対パスにする ([cwd-relative](#cwd-relative))。`discard()` |
+| `l.Close()` だけで済ませる、`l.SetUnlinkOnClose(true)` で消えると当てにする | 長いパスでは、Go の標準と違い Close で消えない ([respelled](#respelled)) | `discard()` か、元のパスで `os.Remove(path)` ([respelled](#respelled)) |
+| `discard()` の後に listener が閉じていると思って `l.Close()` を呼ばない | `discard()` はファイルを消すだけ | `defer l.Close()` を自分で書く ([respelled](#respelled) の `ListenEx`) |
+| `res.Route == "symlink"` や `res.Skipped` の `Name` / `Reason` で分岐する | 診断用で、中身を約束しない (経路は増えたり変わったりする) | `res.Has(atanycost.RecreatableSpelling)` 等、`res.Losses` で分岐する |
+| 他の goroutine が `waitpid(-1)` で子を刈る | Go では起きない (fork の経路が無い) | なし |
+
 ## なぜ要るか
 
 標準の `net` は `sun_path` に収まらないパスを `EINVAL` で断る。ファイルシステムには上限が無いのに、深い一時ディレクトリ (macOS の `$TMPDIR` はそれだけで 50 バイト前後、`t.TempDir()` がさらに掘る。[golang/go#62614](https://github.com/golang/go/issues/62614)) にソケットを置くとすぐに当たる。上限が効くのは `bind(2)` / `connect(2)` に渡す引数の長さなので、sockat は同じ場所を指す短い綴りでカーネルに渡す。

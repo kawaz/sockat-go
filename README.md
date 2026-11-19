@@ -70,6 +70,84 @@ if res.Has(atanycost.RecreatableSpelling) {
 | `CwdRelative` (`cwd-relative`) | the address the kernel keeps is relative to the cwd; removing the file by it after the cwd changed reaches somewhere else (a risk of the standard library itself) | a relative path went through standard |
 | `Forked` (`forked`) | a fork's side effects | never: Go has no fork route (kept to match the other implementations) |
 
+How to avoid each loss follows. The code runs as tests (the Example functions in [example_test.go](./example_test.go) and [atanycost/example_test.go](./atanycost/example_test.go)).
+
+### respelled
+
+[The specification's respelled](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#respelled). For a long path `l.Addr()` reports a spelling that is not the path passed, and closing the listener does not remove the socket file. Keep the path passed and remove the file by it, or use `sockat.ListenEx`'s `discard`.
+
+With `atanycost.Listen`, remove by the path passed ([`ExampleListen_respelled`](./atanycost/example_test.go)):
+
+```go
+l, res, err := atanycost.Listen(path)
+if err != nil {
+	log.Fatal(err)
+}
+defer os.Remove(path) // the path passed, not l.Addr().String()
+defer l.Close()
+fmt.Println("respelled:", res.Has(atanycost.Respelled))
+```
+
+With `sockat`, remove with `ListenEx`'s `discard` ([`ExampleListenEx`](./example_test.go)):
+
+```go
+l, discard, err := sockat.ListenEx(path)
+if err != nil {
+	log.Fatal(err)
+}
+defer discard() // removes the socket file at path (does not close l)
+defer l.Close()
+```
+
+### cwd-relative
+
+[The specification's cwd-relative](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#cwd-relative). A relative path goes to the standard library as it is, and the kernel keeps a spelling relative to the cwd; removing the file by that spelling or by the relative path after the cwd changed reaches somewhere else. Make the path absolute with `filepath.Abs` before the Listen, and remove the file by that absolute path ([`ExampleListen_cwdRelative`](./atanycost/example_test.go)):
+
+```go
+abs, err := filepath.Abs(path)
+if err != nil {
+	log.Fatal(err)
+}
+l, res, err := atanycost.Listen(abs)
+if err != nil {
+	log.Fatal(err)
+}
+defer os.Remove(abs)
+defer l.Close()
+fmt.Println("cwd-relative:", res.Has(atanycost.CwdRelative))
+```
+
+### forked
+
+[The specification's forked](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#forked). Never attached: Go has no fork route.
+
+### recreatable-spelling
+
+[The specification's recreatable-spelling](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#recreatable-spelling). Through a symlink in a shared place (`/tmp` and the like), other users can make the spelling the kernel reports again, and removing the file by that spelling may then remove a file in a directory of their choosing. Remove the file by the path passed, not by `l.Addr()`'s spelling, and provide a place only the owner can write to as `XDG_RUNTIME_DIR`, passed by whatever starts the program (it is used before the shared places, and this name is not attached; [`ExampleListen_recreatableSpelling`](./atanycost/example_test.go)):
+
+```go
+l, res, err := atanycost.Listen(path)
+if err != nil {
+	log.Fatal(err)
+}
+defer os.Remove(path) // the path passed, not l.Addr().String()
+defer l.Close()
+fmt.Println("recreatable-spelling:", res.Has(atanycost.RecreatableSpelling))
+```
+
+## Patterns not to use
+
+Ways of using sockat-go that remove an unrelated file or fail to remove the file ([the specification's Patterns not to use](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#patterns-not-to-use)).
+
+| Pattern | Why not | Instead |
+|---|---|---|
+| `os.Remove(l.Addr().String())` / `os.Stat(l.Addr().String())` | for a long path it is not the path passed ([respelled](#respelled)). Depending on the cwd or a shared place, it may hit another file someone made again ([cwd-relative](#cwd-relative), [recreatable-spelling](#recreatable-spelling)) | `os.Remove(path)` with the path passed, or `ListenEx`'s `discard()` ([respelled](#respelled)) |
+| listening on a relative path and calling `os.Remove` with it after an `os.Chdir` | hits a file in another place ([cwd-relative](#cwd-relative)) | make the path absolute with `filepath.Abs` before the Listen ([cwd-relative](#cwd-relative)). `discard()` |
+| leaving it to `l.Close()`, or relying on `l.SetUnlinkOnClose(true)` to remove the file | for a long path Close does not remove it, unlike Go's standard library ([respelled](#respelled)) | `discard()`, or `os.Remove(path)` with the path passed ([respelled](#respelled)) |
+| not calling `l.Close()` because `discard()` was called | `discard()` only removes the file | write `defer l.Close()` yourself (`ListenEx` in [respelled](#respelled)) |
+| branching on `res.Route == "symlink"` or on the `Name` / `Reason` in `res.Skipped` | they are for diagnostics and promise nothing (routes are added and changed) | branch on `res.Losses`, such as `res.Has(atanycost.RecreatableSpelling)` |
+| another goroutine reaping children with `waitpid(-1)` | does not occur in Go (no fork route) | none |
+
 ## Why
 
 The net package refuses a path that does not fit `sun_path` with `EINVAL`. The file system has no such limit, but a socket in a deep temporary directory (macOS's `$TMPDIR` alone is about 50 bytes, and `t.TempDir()` nests further; [golang/go#62614](https://github.com/golang/go/issues/62614)) runs into it quickly. The limit is on the argument passed to `bind(2)` / `connect(2)`, so sockat hands the kernel a short spelling that names the same place.

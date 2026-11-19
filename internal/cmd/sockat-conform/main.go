@@ -1,9 +1,9 @@
 // Command sockat-conform is the conformance CLI of sockat-go (the hub's
-// docs/design/conformance.md): it reads {"op", "path"} from stdin, binds or
-// connects once through the default route order without the last resort
-// (sockat.ListenEx / sockat.DialEx with NoLastResort), and writes {"ok",
-// "error", "route", "losses", "skipped"} to stdout. Not part of the module's
-// API.
+// docs/design/conformance.md): it reads {"op", "path", "last_resort"} from
+// stdin, binds or connects once through the default route order
+// (sockat.ListenEx / sockat.DialEx), with the last resort when "last_resort"
+// is true (false when left out), and writes {"ok", "error", "route",
+// "losses", "skipped"} to stdout. Not part of the module's API.
 //
 // A bind's listener is left open for the process's exit to close; a connect
 // sends one byte "x" before closing.
@@ -28,8 +28,9 @@ import (
 )
 
 type input struct {
-	Op   string `json:"op"`
-	Path string `json:"path"`
+	Op         string `json:"op"`
+	Path       string `json:"path"`
+	LastResort bool   `json:"last_resort"`
 }
 
 type output struct {
@@ -47,16 +48,17 @@ var keep *net.UnixListener
 func main() {
 	var in input
 	if err := json.NewDecoder(os.Stdin).Decode(&in); err != nil || (in.Op != "bind" && in.Op != "connect") {
-		fmt.Fprintln(os.Stderr, "sockat-conform: want {\"op\": \"bind\"|\"connect\", \"path\": ...} on stdin")
+		fmt.Fprintln(os.Stderr, "sockat-conform: want {\"op\": \"bind\"|\"connect\", \"path\": ..., \"last_resort\": true|false} on stdin")
 		os.Exit(2)
 	}
+	lr := sockat.LastResort(in.LastResort)
 	var res sockat.Result
 	var err error
 	if in.Op == "bind" {
-		keep, _, res, err = sockat.ListenEx(in.Path, sockat.NoLastResort)
+		keep, _, res, err = sockat.ListenEx(in.Path, lr)
 	} else {
 		var c *net.UnixConn
-		c, res, err = sockat.DialEx(in.Path, sockat.NoLastResort)
+		c, res, err = sockat.DialEx(in.Path, lr)
 		if err == nil {
 			c.Write([]byte("x"))
 			c.Close()

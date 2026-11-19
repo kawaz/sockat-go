@@ -2,6 +2,7 @@
 title: v0.3.0 (中心の経路、ListenEx、atanycost、適合試験の CLI) の release 待ちと残り
 status: open
 category: task
+created: 2026-11-19
 ---
 
 # v0.3.0 (中心の経路、ListenEx、atanycost、適合試験の CLI) の release 待ちと残り
@@ -15,6 +16,6 @@ main@origin は v0.2.0 の後の README の 1 commit まで。それより後の
 
 ## 残り
 
-- Dial の予備の経路の作りが SPEC の列と違う: Linux の `/proc` がある時、SPEC は proc-direct → proc-held → symlink だが、実装 (`posixFallbackDial`) は置き場ごとに「安全なら symlink、安全でなければ proc-held」と交互に試す。予備の経路の skipped も記録していない (trace は Listen と D を通す経路だけ)。適合試験で予備の経路まで比べるなら作り直す (ハブの統括に問い合わせ中)
+- Dial の予備の経路を SPEC の列の形に作り直し、skipped にも予備の経路を記録する。ただし connect の試す順番そのもの (書き込みもスレッドも要らない経路を先に、の案) の kawaz 裁定の後に行う (ハブの統括の指示 2026-11-19)。今の食い違い: Linux の `/proc` がある時、SPEC は proc-direct → proc-held → symlink だが、実装 (`posixFallbackDial`) は置き場ごとに「安全なら symlink、安全でなければ proc-held」と交互に試す。予備の経路の skipped も記録していない (trace は Listen と D を通す経路だけ)。
 - skipped に fork-sockdir が入る場面 (D をどこにも作れず、-sockdir の綴りも収まらない) の試験が無い
 - ListenEx で bind は通ったのにファイルを覚えられない分岐は試験で作れず未試験 (DR-0001)

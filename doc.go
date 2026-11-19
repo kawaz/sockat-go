@@ -101,9 +101,11 @@
 //     you passed: R/<name>, /proc/self/fd/<fd>/R/<name>, or a symlink
 //     <place>/sockat.XXXXXXXXXX that is gone. So does RemoteAddr on a
 //     connection to such a listener, whichever way the dial went (the kernel
-//     reports what the peer bound, not what the dial was given). Nothing is
-//     hit through it, but it cannot be handed to another process either. Keep
-//     the path you passed.
+//     reports what the peer bound, not what the dial was given). It usually
+//     names nothing, but other users can see it (Linux's /proc/net/unix) and,
+//     where they can write (a shared place, a cwd others can write to), make
+//     the name again: do not stat or unlink that spelling, nor hand it to
+//     another process. Keep the path you passed.
 //   - A long path that does not end with a file name ("dir/", "dir/.",
 //     "dir/..") is EINVAL, and nothing is created.
 //   - The directory is looked up first (resolved to a real path for R); a

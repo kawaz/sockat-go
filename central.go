@@ -319,7 +319,7 @@ func makeD(bases []string, sdir *os.File, real string, proc bool, procSelfFD str
 // in it.
 func makeDIn(baseFD int, prefix, real string, proc bool, procSelfFD string,
 	nextD, nextR func() (string, error)) (*held, error) {
-	part, err := createAt(nextD, func(n string) error { return unix.Mkdirat(baseFD, prefix+n, 0o700) })
+	part, err := createAt(nextD, func(n string) error { return mkdirD(baseFD, prefix+n, 0o700) })
 	if err != nil {
 		return nil, err
 	}
@@ -359,6 +359,14 @@ func makeDIn(baseFD int, prefix, real string, proc bool, procSelfFD string,
 	}
 	return h, nil
 }
+
+// mkdirD is mkdirat(2) for D (SPEC "D と R" step 1).
+//
+// Design rationale: a variable rather than a direct call only so that a test
+// (TestADSwappedInBeforeItIsOpenedIsNotUsed, in a child process) can put
+// another directory at D's name between the mkdirat and the open, which no
+// input of makeDIn can bring about. Nothing else assigns it.
+var mkdirD = unix.Mkdirat
 
 // makeR makes R in D, pointing to real, named by nextR (SPEC "D と R" step 3).
 func (h *held) makeR(real string, nextR func() (string, error)) error {

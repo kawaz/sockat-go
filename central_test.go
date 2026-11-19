@@ -724,6 +724,302 @@ func TestDIsNeverAnExistingDirectory(t *testing.T) {
 
 func slicesClone(s []string) []string { return append([]string(nil), s...) }
 
+// A directory swapped in at D's name after the mkdirat and before the open
+// (by someone who can write to the place) is not D: the check made on what
+// was opened (a directory of the effective uid with no group / other bits)
+// fails, and SPEC "D と R" takes such a directory for someone else's, "中身も
+// 含めて触らない". So, whatever is swapped in (a directory of mode 0750, 0705
+// or 0755, and as root one of mode 0700 owned by another user, each holding a
+// symlink "s" to the socket's directory and a file "f"):
+//
+//   - makeDIn gives up on the place (errUnusable) and makes nothing in it;
+//   - a listen and a dial through D take the next place (SPEC "D の置き場":
+//     a failed check is one way a place cannot be used) and reach the path
+//     there, leaving that place empty;
+//   - with the swap in every place (the socket's directory included), D is
+//     made nowhere: a listen takes the form without D (thread-cwd-sockdir or
+//     proc-sockdir), a dial the next route of the connect order that needs no
+//     D (symlink-file), and D is tried only once (one mkdirat per place);
+//   - every time, the swapped-in directory is still at its name (the same
+//     inode), with its mode and owner as they were, "s" pointing where it
+//     did, "f" with its content and mode, nothing else in it and its mtime
+//     unmoved (nothing was made in it or removed from it, R included).
+//
+// The swap is made by a stand-in for mkdirD, which removes the directory just
+// made and puts the other at its name. mkdirD belongs to the whole process,
+// hence a child.
+func TestADSwappedInBeforeItIsOpenedIsNotUsed(t *testing.T) {
+	t.Parallel()
+	if len(allMeans()) == 0 {
+		t.Skip("no route through D here")
+	}
+	runChild(t, "TestChildSwappedInD", tmpDir(t))
+}
+
+func TestChildSwappedInD(t *testing.T) {
+	asChild(t)
+	kinds := []swapKind{{0o750, -1}, {0o705, -1}, {0o755, -1}}
+	if os.Geteuid() == 0 {
+		kinds = append(kinds, swapKind{0o700, 65534})
+	}
+	sw := &swapper{}
+	mkdirD = sw.mkdir
+	t.Cleanup(func() { mkdirD = unix.Mkdirat })
+	proc := runtime.GOOS == "linux"
+	for _, k := range kinds {
+		t.Run(fmt.Sprintf("makeDIn/%s", k), func(t *testing.T) {
+			place := tmpDir(t)
+			sw.reset(t, k, tmpDir(t), place)
+			fd, err := openDirFD(place)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer unix.Close(fd)
+			if _, err := makeDIn(fd, linkPrefix, sw.target, proc, "/proc/self/fd", randomPart, randomPart); !errors.Is(err, errUnusable) {
+				t.Fatalf("%v, want errUnusable", err)
+			}
+			sw.assertLeftAlone(t, 1)
+			assertEntries(t, place, sw.names()...)
+		})
+		for _, m := range allMeans() {
+			t.Run(fmt.Sprintf("listen/%s/%s", m.name, k), func(t *testing.T) {
+				hostile, good := tmpDir(t), tmpDir(t)
+				p := nest(t, tmpDir(t), 600, "s.sock")
+				sw.reset(t, k, filepath.Dir(p), hostile)
+				markUntouched(t, good)
+				l, r := listenLong(t, p, m.cfg(hostile, good))
+				if r != m.want || !isSocket(p) {
+					t.Fatalf("listen: %s (socket at the path: %v), want %s", r, isSocket(p), m.want)
+				}
+				l.Close()
+				assertTouched(t, good)
+				assertEmpty(t, good)
+				sw.assertLeftAlone(t, 2)
+				assertEntries(t, hostile, sw.names()...)
+			})
+			t.Run(fmt.Sprintf("dial/%s/%s", m.name, k), func(t *testing.T) {
+				hostile, good := tmpDir(t), tmpDir(t)
+				p := nest(t, tmpDir(t), 600, "s.sock")
+				l := listenAt(t, p)
+				sw.reset(t, k, filepath.Dir(p), hostile)
+				markUntouched(t, good)
+				c, r := m.dialThrough(t, p, m.cfg(hostile, good))
+				if r != m.want {
+					t.Fatalf("dial: %s, want %s", r, m.want)
+				}
+				ping(t, l, c)
+				assertTouched(t, good)
+				assertEmpty(t, good)
+				sw.assertLeftAlone(t, 2)
+				assertEntries(t, hostile, sw.names()...)
+			})
+			t.Run(fmt.Sprintf("everywhere/%s/%s", m.name, k), func(t *testing.T) {
+				hostile := tmpDir(t)
+				p := nest(t, tmpDir(t), 600, "s.sock")
+				dir := filepath.Dir(p)
+				sw.reset(t, k, dir, hostile, dir)
+				ep, r, err := runLong(opListen, p, m.cfg(hostile))
+				want := map[route]route{routeThreadCwd: routeThreadCwdSockdir, routeProc: routeProcSockdir}[m.want]
+				l := must{t}.listener(ep, err)
+				if r != want || !isSocket(p) {
+					t.Fatalf("listen: %s (socket at the path: %v), want %s", r, isSocket(p), want)
+				}
+				sw.assertLeftAlone(t, 2)
+				assertEntries(t, hostile, sw.names()[:1]...)
+				assertEntries(t, dir, sw.names()[1], "s.sock")
+
+				hostile = tmpDir(t)
+				p = nest(t, tmpDir(t), 600, "s.sock")
+				dir = filepath.Dir(p)
+				l = listenAt(t, p)
+				sw.reset(t, k, dir, hostile, dir)
+				cfg := m.cfg(hostile)
+				cfg.tmpBases = []string{tmpDir(t)}
+				ep, r, err = dialFrom(t, p, openTestDir(t, dir), cfg, m.want)
+				c := must{t}.conn(ep, err)
+				if r != routeSymlinkFile {
+					t.Fatalf("dial: %s, want %s", r, routeSymlinkFile)
+				}
+				ping(t, l, c)
+				sw.assertLeftAlone(t, 2)
+				assertEntries(t, hostile, sw.names()[:1]...)
+				assertEntries(t, dir, sw.names()[1], "s.sock")
+			})
+		}
+	}
+}
+
+// swapKind is the directory swapped in for D: its mode, and its owner (uid;
+// -1 for the effective uid).
+type swapKind struct {
+	mode os.FileMode
+	uid  int
+}
+
+func (k swapKind) String() string {
+	if k.uid < 0 {
+		return fmt.Sprintf("%04o", k.mode)
+	}
+	return fmt.Sprintf("%04o-uid%d", k.mode, k.uid)
+}
+
+// swapper stands in for mkdirD: after the mkdirat it removes the directory
+// made, when it was made in one of the places, and puts a directory of kind
+// at its name, holding "s" (a symlink to target) and "f" (a file).
+type swapper struct {
+	kind    swapKind
+	target  string
+	places  map[[2]uint64]string // (dev, ino) of a place -> its path
+	swapped []swappedDir
+	calls   int   // mkdirat calls, in any place
+	err     error // a failure of the stand-in itself
+}
+
+// swappedDir is a directory put at D's name, as it was made.
+type swappedDir struct {
+	path     string
+	dev, ino uint64
+	uid      uint32
+}
+
+func devIno(st *unix.Stat_t) [2]uint64 { return [2]uint64{uint64(st.Dev), st.Ino} }
+
+// reset makes the swapper put a directory of kind, its "s" pointing to
+// target, at D's name in each of places, forgetting what it did before.
+func (s *swapper) reset(t *testing.T, kind swapKind, target string, places ...string) {
+	t.Helper()
+	s.kind, s.target, s.swapped, s.calls, s.err = kind, target, nil, 0, nil
+	s.places = map[[2]uint64]string{}
+	for _, p := range places {
+		var st unix.Stat_t
+		if err := unix.Stat(p, &st); err != nil {
+			t.Fatal(err)
+		}
+		s.places[devIno(&st)] = p
+	}
+}
+
+func (s *swapper) mkdir(fd int, name string, mode uint32) error {
+	s.calls++
+	if err := unix.Mkdirat(fd, name, mode); err != nil {
+		return err
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		s.err = err
+		return err
+	}
+	place, ok := s.places[devIno(&st)]
+	if !ok {
+		return nil
+	}
+	if err := s.swapIn(fd, place+"/"+name, name); err != nil {
+		s.err = err
+		return err
+	}
+	return nil
+}
+
+func (s *swapper) swapIn(fd int, p, name string) error {
+	if err := unix.Unlinkat(fd, name, unix.AT_REMOVEDIR); err != nil {
+		return err
+	}
+	if err := os.Mkdir(p, 0o700); err != nil {
+		return err
+	}
+	if err := os.Symlink(s.target, p+"/s"); err != nil {
+		return err
+	}
+	if err := os.WriteFile(p+"/f", []byte("keep"), 0o600); err != nil {
+		return err
+	}
+	if s.kind.uid >= 0 {
+		for _, q := range []string{p + "/s", p + "/f", p} {
+			if err := os.Lchown(q, s.kind.uid, -1); err != nil {
+				return err
+			}
+		}
+	}
+	if err := os.Chmod(p, s.kind.mode); err != nil {
+		return err
+	}
+	if err := os.Chtimes(p, untouched, untouched); err != nil {
+		return err
+	}
+	var st unix.Stat_t
+	if err := unix.Lstat(p, &st); err != nil {
+		return err
+	}
+	s.swapped = append(s.swapped, swappedDir{p, uint64(st.Dev), st.Ino, st.Uid})
+	return nil
+}
+
+// names are the names of the directories swapped in, in the order made.
+func (s *swapper) names() []string {
+	var ns []string
+	for _, d := range s.swapped {
+		ns = append(ns, filepath.Base(d.path))
+	}
+	return ns
+}
+
+// assertLeftAlone checks that the stand-in ran without a failure of its own,
+// mkdirat was called calls times, a directory was swapped in for each place,
+// and each is as it was made.
+func (s *swapper) assertLeftAlone(t *testing.T, calls int) {
+	t.Helper()
+	if s.err != nil {
+		t.Fatalf("the swap itself failed: %v", s.err)
+	}
+	if s.calls != calls || len(s.swapped) != len(s.places) {
+		t.Fatalf("%d mkdirat calls and %d directories swapped in, want %d and %d", s.calls, len(s.swapped), calls, len(s.places))
+	}
+	wantUID := uint32(os.Geteuid())
+	if s.kind.uid >= 0 {
+		wantUID = uint32(s.kind.uid)
+	}
+	for _, d := range s.swapped {
+		var st unix.Stat_t
+		if err := unix.Lstat(d.path, &st); err != nil {
+			t.Fatalf("the directory swapped in is gone: %v", err)
+		}
+		if uint32(st.Mode)&unix.S_IFMT != unix.S_IFDIR || uint64(st.Dev) != d.dev || st.Ino != d.ino {
+			t.Fatalf("%s is no longer the directory swapped in", d.path)
+		}
+		if got := os.FileMode(st.Mode) & os.ModePerm; got != s.kind.mode || st.Uid != wantUID {
+			t.Fatalf("%s: mode %04o, uid %d, want %04o, %d", d.path, got, st.Uid, s.kind.mode, wantUID)
+		}
+		assertEntries(t, d.path, "f", "s")
+		if to, err := os.Readlink(d.path + "/s"); err != nil || to != s.target {
+			t.Fatalf("%s/s: %q, %v, want %q", d.path, to, err, s.target)
+		}
+		if fi, err := os.Lstat(d.path + "/f"); err != nil || fi.Mode() != 0o600 {
+			t.Fatalf("%s/f: %v, %v, want a file of mode 0600", d.path, fi.Mode(), err)
+		}
+		if b, err := os.ReadFile(d.path + "/f"); err != nil || string(b) != "keep" {
+			t.Fatalf("%s/f: %q, %v", d.path, b, err)
+		}
+		assertUntouched(t, d.path)
+	}
+}
+
+// assertEntries checks that dir holds exactly the entries names.
+func assertEntries(t *testing.T, dir string, names ...string) {
+	t.Helper()
+	es, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, e := range es {
+		got = append(got, e.Name())
+	}
+	want := slices.Sorted(slices.Values(names))
+	if !slices.Equal(got, want) {
+		t.Fatalf("in %s: %v, want %v", dir, got, want)
+	}
+}
+
 // R is named like D's random part, drawn again on EEXIST up to 16 times; R
 // points to the socket's directory as a real path, and is removed with D.
 func TestRIsARandomSymlinkToTheRealSocketDirectory(t *testing.T) {

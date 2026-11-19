@@ -309,6 +309,72 @@ func TestChildListenExWithACwdChange(t *testing.T) {
 	}
 }
 
+// ListenEx records the socket file (its real path and (st_dev, st_ino)) the
+// moment the bind returns, so that discard removes only that file. When the
+// bind went through but the file cannot be recorded (here: it is gone by the
+// time of the lstat), ListenEx must not hand out a listener whose discard it
+// cannot make safe: it closes the listener and returns a *RouteError reaching
+// errNotRecorded, whose Route is the route that bound, with no listener or
+// discard. The listener really is closed (a second Close says so), and the
+// path can be listened on again. Both a short path (the net package) and a
+// long one (the routes through D, where a listen of a long path has one) are
+// checked, in a child process each, since the seam bindEx is the whole
+// process's.
+func TestListenExThatCannotRecordTheBoundFileClosesTheListener(t *testing.T) {
+	t.Parallel()
+	rels := []string{"s.sock"}
+	if longListen() {
+		long := strings.Repeat(strings.Repeat("d", 60)+"/", 3) + "s.sock"
+		if len(long) <= directMax {
+			t.Fatalf("%d bytes is not long", len(long))
+		}
+		rels = append(rels, long)
+	}
+	for _, rel := range rels {
+		d := tmpDir(t)
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(d, rel)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		runChild(t, "TestChildListenExThatCannotRecordTheBoundFile", d, "SOCKAT_PATH="+filepath.Join(d, rel))
+	}
+}
+
+func TestChildListenExThatCannotRecordTheBoundFile(t *testing.T) {
+	asChild(t)
+	path := os.Getenv("SOCKAT_PATH")
+	var bound endpoint
+	bindEx = func(p string, lr LastResort, cfg *config) (endpoint, Result, error) {
+		ep, res, err := listenReported(p, lr, cfg)
+		if err != nil {
+			return ep, res, err
+		}
+		bound = ep
+		// The file the bind made is gone before ListenEx looks at it.
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		return ep, res, nil
+	}
+	t.Cleanup(func() { bindEx = listenReported })
+	l, discard, _, err := ListenEx(path, NoLastResort)
+	if bound == nil {
+		t.Fatalf("the bind did not go through: %v", err)
+	}
+	re := routeErr(t, err)
+	if !errors.Is(err, errNotRecorded) || l != nil || discard != nil || re.Route == "" {
+		t.Fatalf("%v, %v, route %q: %v", l, discard != nil, re.Route, err)
+	}
+	if err := bound.Close(); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("the listener was not closed by ListenEx: Close again: %v", err)
+	}
+	bindEx = listenReported
+	l2, err := Listen(path)
+	if err != nil {
+		t.Fatalf("listen again on the same path: %v", err)
+	}
+	l2.Close()
+}
+
 // A path ListenEx refuses comes back with its error and no listener or
 // discard; an abstract name (where the kernel has abstract names: Linux,
 // Android) has no file, so its discard does nothing.

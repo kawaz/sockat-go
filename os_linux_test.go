@@ -60,7 +60,7 @@ func ways(t *testing.T) []way {
 		{"proc", nest(t, d+"/procd", 600, "s.sock"), procD, routeProc, routeProcDirect},
 		{"proc-direct", nest(t, d+"/proc", 600, n85), direct, "", routeProcDirect},
 		{"proc-held", nest(t, d+"/held", 600, n97), held, "", routeProcHeld},
-		{"symlink", nest(t, d+"/symlink", 600, n97), fallbackCfg(safe), "", routeSymlink},
+		{"symlink", nest(t, d+"/symlink", 600, n97), fallbackCfg(safe), "", routeSymlinkFile},
 		{"relative", belowCwdPath(t, directMax, "s.sock"), fallbackCfg(), "", routeRelative},
 	}
 }
@@ -164,7 +164,7 @@ func TestWithoutProcTheThreadCwdOrTheFallbacksWithoutProcAreUsed(t *testing.T) {
 			for _, c := range []struct {
 				path string
 				want route
-			}{{near, routeRelative}, {farther, routeSymlink}} {
+			}{{near, routeRelative}, {farther, routeSymlinkFile}} {
 				_, _, err := runLong(opListen, c.path, cfg)
 				wantErrno(t, "listen", err, syscall.ENAMETOOLONG)
 				l := listenAt(t, c.path)
@@ -484,7 +484,7 @@ func TestChildWithoutProcUnderUmask0477(t *testing.T) {
 // TestWhenDCanBeMadeNowhereADialPassesTheRoutesThroughDWithoutRemakingD.
 func TestTheConnectOrderWithProc(t *testing.T) {
 	t.Parallel()
-	order := []route{routeProcDirect, routeThreadCwd, routeProc, routeProcHeld, routeSymlink}
+	order := []route{routeProcDirect, routeThreadCwd, routeProc, routeProcHeld, routeSymlinkFile}
 	if got := stepNames(dialSteps(true)); !slices.Equal(got, order) {
 		t.Fatalf("the connect order: %v, want %v", got, order)
 	}
@@ -594,8 +594,8 @@ func TestWhenDCanBeMadeNowhereADialPassesTheRoutesThroughDWithoutRemakingD(t *te
 	ep, r, err := d.run(dialSteps(d.procUsable))
 	d.close()
 	c := must{t}.conn(ep, err)
-	if r != routeSymlink {
-		t.Fatalf("dial: %s, want %s", r, routeSymlink)
+	if r != routeSymlinkFile {
+		t.Fatalf("dial: %s, want %s", r, routeSymlinkFile)
 	}
 	want := []route{routeProcDirect, routeThreadCwd, routeProc, routeProcHeld}
 	if got := namesOf(t, cfg.trace.skipped); !slices.Equal(got, want) {
@@ -612,7 +612,7 @@ func TestWhenDCanBeMadeNowhereADialPassesTheRoutesThroughDWithoutRemakingD(t *te
 	none := centralCfg(ro)
 	_, _, skipped, err := dialTraced(t, p, none)
 	wantErrno(t, "dial with no place for symlink", err, syscall.ENAMETOOLONG)
-	if got, want := namesOf(t, skipped), append(append([]route{routeStandard}, want...), routeSymlink); !slices.Equal(got, want) {
+	if got, want := namesOf(t, skipped), append(append([]route{routeStandard}, want...), routeSymlinkFile); !slices.Equal(got, want) {
 		t.Fatalf("no place for symlink: skipped %v, want %v", skipped, want)
 	}
 	assertEmpty(t, ro)

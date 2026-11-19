@@ -29,6 +29,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -593,4 +594,52 @@ func assertTouched(t *testing.T, dir string) {
 	if fi.ModTime().Equal(untouched) {
 		t.Fatalf("nothing was made in %s", dir)
 	}
+}
+
+// bindFollowsSymlink reports whether this kernel's bind(2) follows a symlink
+// in the last component to a path where nothing is yet, making the socket
+// there: SPEC's premise for symlink-file in a bind (macOS does, Linux does
+// not; the other systems are not known). Found out once, with a raw socket
+// bound at a symlink in a fresh directory under /tmp, independently of the
+// code under test.
+var bindFollowsSymlink = sync.OnceValue(func() bool {
+	d, err := os.MkdirTemp("/tmp", "sockat-")
+	if err != nil {
+		panic(err)
+	}
+	defer os.RemoveAll(d)
+	if err := os.Symlink(d+"/target", d+"/link"); err != nil {
+		panic(err)
+	}
+	fd, err := unix.Socket(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+	if err != nil {
+		panic(err)
+	}
+	defer unix.Close(fd)
+	return unix.Bind(fd, &unix.SockaddrUnix{Name: d + "/link"}) == nil && isSocket(d+"/target")
+})
+
+// routeErr is err as the *RouteError ListenEx / DialEx return.
+func routeErr(t *testing.T, err error) *RouteError {
+	t.Helper()
+	var re *RouteError
+	if !errors.As(err, &re) {
+		t.Fatalf("%T is not a *RouteError: %v", err, err)
+	}
+	return re
+}
+
+// skippedNames are the names of the routes Skipped reports as tried and found
+// unusable, in order. Each must come with a reason (a short text, for
+// diagnostics only: its wording is not pinned).
+func skippedNames(t *testing.T, sks []Skip) []route {
+	t.Helper()
+	var names []route
+	for _, s := range sks {
+		if s.Reason == "" {
+			t.Errorf("%s skipped without a reason", s.Name)
+		}
+		names = append(names, route(s.Name))
+	}
+	return names
 }

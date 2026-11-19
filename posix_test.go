@@ -266,15 +266,16 @@ func TestCreateLinkStopsAtAnyOtherFailure(t *testing.T) {
 	}
 }
 
-// symlinkRoute checks, before creating anything, that the spelling through
-// the link fits and that the place is safe; and a place where the link cannot
-// be created makes the route unusable there (errUnusable: the order moves on)
-// rather than failing the call. Checked on places that are missing, a file,
+// symlinkFile (a connect, and a bind where the system tries it) checks,
+// before creating anything, that the spelling through the link fits and that
+// the place is safe; and a place where the link cannot be created makes the
+// route unusable there (errUnusable: the order moves on) rather than failing
+// the call. Checked on places that are missing, a file,
 // too long (250 bytes, more than the sockaddr carries even for the link
 // alone), writable by others, and, unless running as root (who may write
 // anywhere), read-only. No socket appears, and the directories involved keep
 // their mtime.
-func TestSymlinkRouteIsUnusableWhereItCannotBeUsedAndCreatesNothing(t *testing.T) {
+func TestSymlinkFileIsUnusableWhereItCannotBeUsedAndCreatesNothing(t *testing.T) {
 	t.Parallel()
 	d := tmpDir(t)
 	p := nest(t, d, 600, "s.sock")
@@ -293,8 +294,10 @@ func TestSymlinkRouteIsUnusableWhereItCannotBeUsedAndCreatesNothing(t *testing.T
 		markUntouched(t, pl)
 	}
 	for _, pl := range append([]string{"/nonexistent", file}, places...) {
-		if _, err := symlinkRoute(pl, p); !errors.Is(err, errUnusable) {
-			t.Errorf("under %s: %v, want errUnusable", pl, err)
+		for _, o := range []op{opDial, opListen} {
+			if _, err := symlinkFile(o, p, []string{pl}); !errors.Is(err, errUnusable) {
+				t.Errorf("%s under %s: %v, want errUnusable", o.sysName(), pl, err)
+			}
 		}
 	}
 	for _, pl := range places {
@@ -331,7 +334,7 @@ func TestADialFarFromTheCwdGoesThroughATemporarySymlink(t *testing.T) {
 	l := listenAt(t, p)
 	base := tmpDir(t)
 	c, r := dialLong(t, p, fallbackCfg(base))
-	if r != routeSymlink {
+	if r != routeSymlinkFile {
 		t.Fatalf("dial: %s", r)
 	}
 	assertEmpty(t, base)
@@ -347,7 +350,7 @@ func TestADialThroughTheSymlinkReachesAnyFileName(t *testing.T) {
 	p := nest(t, tmpDir(t), 600, strings.Repeat("n", 200))
 	l := listenAt(t, p)
 	c, r := dialLong(t, p, fallbackCfg(base))
-	if r != routeSymlink {
+	if r != routeSymlinkFile {
 		t.Fatalf("dial: %s", r)
 	}
 	ping(t, l, c)
@@ -381,7 +384,7 @@ func TestTheLinkResolvesThePathAsTheKernelDoes(t *testing.T) {
 	l := listenAt(t, atReal)
 	decoyL := listenAt(t, decoy)
 	c, r := dialLong(t, spelled, fallbackCfg(base))
-	if r != routeSymlink {
+	if r != routeSymlinkFile {
 		t.Fatalf("dial: %s", r)
 	}
 	ping(t, l, c)
@@ -454,7 +457,7 @@ func TestAnUnsafePlaceForTheSymlinkIsPassedOver(t *testing.T) {
 		q := fmt.Sprintf("%s/bad%o.sock", dir, mode)
 		l := listenAt(t, q)
 		c, r := dialLong(t, q, fallbackCfg(pl, good))
-		if r != routeSymlink {
+		if r != routeSymlinkFile {
 			t.Fatalf("%o: dial %s", mode, r)
 		}
 		ping(t, l, c)
@@ -466,7 +469,7 @@ func TestAnUnsafePlaceForTheSymlinkIsPassedOver(t *testing.T) {
 		q := fmt.Sprintf("%s/ok%o.sock", dir, mode.Perm())
 		l := listenAt(t, q)
 		c, r := dialLong(t, q, fallbackCfg(pl))
-		if r != routeSymlink {
+		if r != routeSymlinkFile {
 			t.Fatalf("%v: dial %s", mode, r)
 		}
 		ping(t, l, c)
@@ -494,7 +497,7 @@ func TestAnUnsafePlaceForTheSymlinkIsPassedOver(t *testing.T) {
 			q := fmt.Sprintf("%s/theirs%o.sock", dir, mode.Perm())
 			listenAt(t, q)
 			_, r := dialLong(t, q, fallbackCfg(pl, good))
-			if r != routeSymlink {
+			if r != routeSymlinkFile {
 				t.Fatalf("%v: dial %s", mode, r)
 			}
 			assertUntouched(t, pl)
@@ -517,7 +520,7 @@ func TestAPlaceWhereTheSymlinkCannotBeCreatedMovesOnToTheNext(t *testing.T) {
 	good := tmpDir(t)
 	for _, bad := range []string{"/nonexistent", file} {
 		c, r := dialLong(t, p, fallbackCfg(bad, good))
-		if r != routeSymlink {
+		if r != routeSymlinkFile {
 			t.Fatalf("%s: dial %s", bad, r)
 		}
 		ping(t, l, c)
@@ -539,7 +542,7 @@ func TestTheSymlinkGoesUnderTheFirstPlaceWhereItFits(t *testing.T) {
 	first, second := tmpDir(t), tmpDir(t)
 	markUntouched(t, long)
 	c, r := dialLong(t, p, fallbackCfg(long, first))
-	if r != routeSymlink {
+	if r != routeSymlinkFile {
 		t.Fatalf("dial: %s", r)
 	}
 	ping(t, l, c)
@@ -568,7 +571,7 @@ func TestADeepTmpdirFallsBackToTmp(t *testing.T) {
 	cfg := configFromTmpdir(long)
 	cfg.procSelfFD, cfg.threadCwd = noProc, false
 	c, r := dialLong(t, p, cfg)
-	if r != routeSymlink {
+	if r != routeSymlinkFile {
 		t.Fatalf("dial: %s", r)
 	}
 	ping(t, l, c)
@@ -608,7 +611,7 @@ func TestADeepTmpdirInTheEnvironmentFallsBackToTmp(t *testing.T) {
 	mkdirMode(t, long, 0o700)
 	markUntouched(t, long)
 	out := runChild(t, "TestChildDialFromEnv", "/", "TMPDIR="+long, "SOCKAT_PATH="+p)
-	if got := readChildReport(t, out); got != string(routeSymlink) {
+	if got := readChildReport(t, out); got != string(routeSymlinkFile) {
 		t.Fatalf("route %s\n%s", got, out)
 	}
 	l.SetDeadline(nowPlusGuard())

@@ -48,25 +48,32 @@ type endpoint interface{ Close() error }
 type route string
 
 const (
-	// The names are SPEC's ("経路の名前").
+	// The names are SPEC's ("経路の名前"): the means, then what it is about.
 	routeStandard route = "standard" // the path itself, through the standard library
+	// A symlink <place>/sockat.XXXXXXXXXX to the socket file: a dial, and a
+	// listen where bind(2) follows it (not Linux).
+	routeSymlinkFile route = "symlink-file"
 	// Through D: R/<name> relative to D.
 	routeThreadCwd route = "thread-cwd" // a thread whose own cwd is D (Linux, macOS)
 	routeProc      route = "proc"       // /proc/self/fd/<D>/R/<name> (Linux)
 	routeAt        route = "at"         // bindat(2) / connectat(2) on D (FreeBSD)
-	routeFork      route = "fork"       // SPEC's; Go has no fork route (named in atanycost's skipped)
+	routeForkCwd   route = "fork-cwd"   // SPEC's; Go has no fork route (named in skipped)
 	// A bind's form without D: .sockat.R/<name> relative to the socket's directory.
 	routeThreadCwdSockdir route = "thread-cwd-sockdir"
 	routeProcSockdir      route = "proc-sockdir"
 	routeAtSockdir        route = "at-sockdir"
-	routeForkSockdir      route = "fork-sockdir" // SPEC's; Go has no fork route
-	// The routes of a dial only (the connect order), and ListenAny's symlink.
+	routeForkCwdSockdir   route = "fork-cwd-sockdir" // SPEC's; Go has no fork route
+	// ListenEx's last resort: a symlink <place>/sockat.XXXXXXXXXX to the
+	// socket's directory, the bind by <place>/sockat.XXXXXXXXXX/<name>.
+	routeSymlinkDir route = "symlink-dir"
+	// The routes of a dial only (the connect order).
 	routeProcDirect route = "proc-direct" // /proc/self/fd/<dirfd>/<name> (Linux)
 	routeProcHeld   route = "proc-held"   // /proc/self/fd/<D>/s, s a symlink to the file (Linux)
 	routeRelative   route = "relative"    // the path relative to the cwd
 	routeWidened    route = "widened"     // SPEC's; sockat-go does not make it (named in skipped, macOS)
-	routeSymlink    route = "symlink"     // a symlink in a place: to the file (dial), to the directory (ListenAny)
 	routeAtDirect   route = "at-direct"   // connectat(2) on the socket's directory (FreeBSD)
+	// DialEx's last resort, SPEC's; Go has no fork route (named in skipped).
+	routeForkCwdDirect route = "fork-cwd-direct"
 )
 
 // directMax is the longest path the standard library accepts: sun_path less
@@ -83,6 +90,22 @@ const directMax = len(unix.RawSockaddrUnix{}.Path) - 1
 // package: it only makes the order move on to the next route.
 var errUnusable = errors.New("sockat: route unusable")
 
+// unusable is errUnusable with the reason the route could not be used, which
+// the trace records (diagnostics only).
+type unusable string
+
+func (u unusable) Error() string        { return "sockat: route unusable: " + string(u) }
+func (u unusable) Is(target error) bool { return target == errUnusable }
+
+// reasonOf is the reason an unusable error gives, for the trace.
+func reasonOf(err error) string {
+	var u unusable
+	if errors.As(err, &u) {
+		return string(u)
+	}
+	return "unusable"
+}
+
 // errCwdChanged is returned when the cwd changed while binding / connecting
 // through a path relative to it.
 var errCwdChanged = errors.New("the current directory changed while binding / connecting through a path relative to it; the result was discarded")
@@ -94,12 +117,18 @@ var errCwdChanged = errors.New("the current directory changed while binding / co
 // A NUL anywhere else is EINVAL, whatever the length: the standard library
 // would cut the path short there and bind / connect some other path.
 func run(o op, path string) (endpoint, route, error) {
-	return runWith(o, path, nil)
+	return runTraced(o, path, nil, nil)
 }
 
 // runWith is run with the environment's inputs given as cfg (the tests pass
 // their own); nil reads them from the environment, and only for a long path.
 func runWith(o op, path string, cfg *config) (endpoint, route, error) {
+	return runTraced(o, path, cfg, nil)
+}
+
+// runTraced is runWith recording the routes found unusable in tr (ListenEx,
+// DialEx), in place of cfg's own trace, unless tr is nil.
+func runTraced(o op, path string, cfg *config, tr *trace) (endpoint, route, error) {
 	if abstractName(path) {
 		ep, err := viaStd(o, path, true)
 		return ep, routeStandard, err
@@ -113,6 +142,11 @@ func runWith(o op, path string, cfg *config) (endpoint, route, error) {
 	}
 	if cfg == nil {
 		cfg = configFromEnv()
+	}
+	if tr != nil {
+		c := *cfg
+		c.trace = tr
+		cfg = &c
 	}
 	ep, r, err := runLong(o, path, cfg)
 	if err != nil {
@@ -210,18 +244,18 @@ type config struct {
 	// dBases is where D may go, in the order tried: ${TMPDIR:-/tmp} (a
 	// relative one too), then /tmp. The socket's directory comes after them.
 	dBases []string
-	// tmpBases is where the temporary symlink of a dial's symlink route may
-	// go, in the order tried: TMPDIR when it is set to an absolute path, then
-	// /tmp.
+	// tmpBases is where the temporary symlink of symlink-file (a dial's, and
+	// a listen's where bind(2) follows it) may go, in the order tried: TMPDIR
+	// when it is set to an absolute path, then /tmp.
 	tmpBases []string
 	// procSelfFD is where the kernel lists the fds of the process (Linux).
 	// The tests point it elsewhere to stand in for a system without /proc.
 	procSelfFD string
-	// anyBases is where ListenAny's symlink may go, in the order tried
-	// within each kind of place: XDG_RUNTIME_DIR, TMPDIR (when set to absolute
-	// paths), then /tmp.
-	anyBases []string
-	// trace, when set (atanycost), records the routes found unusable.
+	// dirBases is where the symlink of symlink-dir (ListenEx's last resort)
+	// may go, in the order tried within each kind of place: XDG_RUNTIME_DIR,
+	// TMPDIR (when set to absolute paths), then /tmp.
+	dirBases []string
+	// trace, when set (ListenEx, DialEx), records the routes found unusable.
 	trace *trace
 	// threadCwd is whether to try the thread-cwd route. Always true outside
 	// the tests, which turn it off to stand in for a system that refuses it
@@ -249,13 +283,13 @@ func configFromTmpdir(tmpdir string) *config {
 		dBases = []string{tmpdir, "/tmp"}
 	}
 	runtimeDir, _ := os.LookupEnv("XDG_RUNTIME_DIR")
-	return &config{dBases: dBases, tmpBases: bases, anyBases: anyBasesFrom(runtimeDir, tmpdir),
+	return &config{dBases: dBases, tmpBases: bases, dirBases: dirBasesFrom(runtimeDir, tmpdir),
 		procSelfFD: "/proc/self/fd", threadCwd: true}
 }
 
-// anyBasesFrom is ListenAny's places for the symlink: XDG_RUNTIME_DIR and
+// dirBasesFrom is symlink-dir's places for the symlink: XDG_RUNTIME_DIR and
 // TMPDIR when absolute, then /tmp, each spelling once.
-func anyBasesFrom(runtimeDir, tmpdir string) []string {
+func dirBasesFrom(runtimeDir, tmpdir string) []string {
 	var bases []string
 	for _, b := range []string{runtimeDir, tmpdir, "/tmp"} {
 		if !isAbs(b) {

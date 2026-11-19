@@ -1,4 +1,4 @@
-package atanycost_test
+package sockat_test
 
 import "golang.org/x/sys/unix"
 

@@ -21,12 +21,15 @@ import (
 // ways are the macOS routes, each with its own socket path and the route
 // order's inputs that force it. Every spelling goes in the plain sockaddr.
 //
-//	| way        | path                          | inputs                         | listen     | dial       |
-//	|------------|-------------------------------|--------------------------------|------------|------------|
-//	| standard   | directMax bytes               | (the public order)             | standard   | standard   |
-//	| thread-cwd | 600 bytes under /tmp          | D in a place of its own        | thread-cwd | thread-cwd |
-//	| relative   | directMax bytes below the cwd | no means, no place             | (listenAt) | relative   |
-//	| symlink    | 600 bytes under /tmp          | no means, a place              | (listenAt) | symlink    |
+//	| way          | path                          | inputs                  | listen       | dial         |
+//	|--------------|-------------------------------|-------------------------|--------------|--------------|
+//	| standard     | directMax bytes               | (the public order)      | standard     | standard     |
+//	| thread-cwd   | 600 bytes under /tmp          | D in a place of its own | thread-cwd   | thread-cwd   |
+//	| relative     | directMax bytes below the cwd | no means, no place      | (listenAt)   | relative     |
+//	| symlink-file | 600 bytes under /tmp          | no means, a place       | symlink-file | symlink-file |
+//
+// A listen tries symlink-file first (a bind follows a symlink here), so the
+// ways that force another route give it no place.
 func ways(t *testing.T) []way {
 	t.Helper()
 	d, dbase, short := tmpDir(t), tmpDir(t), tmpDir(t)
@@ -34,7 +37,7 @@ func ways(t *testing.T) []way {
 		{"standard", nest(t, d+"/direct", directMax, "s.sock"), nil, routeStandard, routeStandard},
 		{"thread-cwd", nest(t, d+"/thread", 600, "s.sock"), centralCfg(dbase), routeThreadCwd, routeThreadCwd},
 		{"relative", belowCwdPath(t, directMax, "s.sock"), fallbackCfg(), "", routeRelative},
-		{"symlink", nest(t, d+"/symlink", 600, "s.sock"), fallbackCfg(short), "", routeSymlink},
+		{"symlink-file", nest(t, d+"/symlink", 600, "s.sock"), fallbackCfg(short), routeSymlinkFile, routeSymlinkFile},
 	}
 }
 

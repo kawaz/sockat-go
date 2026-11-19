@@ -10,13 +10,14 @@ import (
 
 // dialSteps is the connect order on the Unix systems without a
 // dirfd-relative primitive or per-thread working directories (NetBSD,
-// OpenBSD, illumos, ...; SPEC "connect の順"): relative, symlink. The routes
-// through D have no means here, so a listen of a long path is ENAMETOOLONG
-// (Go has no fork route).
+// OpenBSD, illumos, ...; SPEC "connect の順"): relative, symlink-file. The
+// routes through D have no means here, so a listen of a long path has only
+// symlink-file, where bind(2) follows the symlink, and is ENAMETOOLONG
+// otherwise (Go has no fork route).
 func dialSteps(bool) []dialStep {
 	return []dialStep{
 		{routeRelative, (*dialer).relative},
-		{routeSymlink, (*dialer).symlink},
+		{routeSymlinkFile, (*dialer).symlinkFile},
 	}
 }
 
@@ -45,3 +46,7 @@ const dOpenFlagsRetry = 0
 
 // hasProc: no /proc routes here.
 const hasProc = false
+
+// listenTriesSymlinkFile: a listen tries symlink-file after standard; whether
+// a bind follows the symlink is told at run time (symlinkFile).
+const listenTriesSymlinkFile = true

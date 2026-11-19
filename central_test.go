@@ -166,8 +166,12 @@ func TestAFailureThroughDIsReturnedAndLeavesNothing(t *testing.T) {
 	for _, m := range allMeans() {
 		t.Run(m.name, func(t *testing.T) {
 			base, later := tmpDir(t), tmpDir(t)
+			// later is a place for the dial's symlink-file only; the listen's
+			// inputs give symlink-file, which a listen tries before D where
+			// it tries it, no place, so the listen fails through D.
 			cfg := m.cfg(base)
 			cfg.tmpBases = []string{later}
+			listenCfg := m.cfg(base)
 			p := nest(t, tmpDir(t), 600, "s.sock")
 			dir := filepath.Dir(p)
 			if err := os.WriteFile(dir+"/e.sock", nil, 0o600); err != nil {
@@ -187,7 +191,7 @@ func TestAFailureThroughDIsReturnedAndLeavesNothing(t *testing.T) {
 			} {
 				var err error
 				if c.o == opListen {
-					_, _, err = runLong(c.o, c.path, cfg)
+					_, _, err = runLong(c.o, c.path, listenCfg)
 				} else {
 					_, _, err = dialFrom(t, c.path, openTestDir(t, dir), cfg, m.want)
 				}
@@ -249,8 +253,11 @@ func TestTheRoutesThroughDCarryAFileNameOfDirectMaxLess11Bytes(t *testing.T) {
 	over := dir + "/" + strings.Repeat("o", directMax-10)
 	cfg := m.cfg(base)
 	cfg.tmpBases = []string{fb}
+	// The listen's inputs give symlink-file (tried first where a listen
+	// tries it, and spelt without the file name) no place: the routes
+	// through D are what is checked.
 	markUntouched(t, base)
-	_, _, err := runLong(opListen, over, cfg)
+	_, _, err := runLong(opListen, over, m.cfg(base))
 	wantErrno(t, fmt.Sprintf("listen on a %d-byte name", directMax-10), err, syscall.ENAMETOOLONG)
 	if exists(over) {
 		t.Fatal("something was created at the path")
@@ -267,8 +274,8 @@ func TestTheRoutesThroughDCarryAFileNameOfDirectMaxLess11Bytes(t *testing.T) {
 		assertEmpty(t, base)
 		assertUntouched(t, fb)
 	} else {
-		if r != routeSymlink {
-			t.Fatalf("dial a %d-byte name: %s, want %s", directMax-10, r, routeSymlink)
+		if r != routeSymlinkFile {
+			t.Fatalf("dial a %d-byte name: %s, want %s", directMax-10, r, routeSymlinkFile)
 		}
 		assertUntouched(t, base)
 		assertEmpty(t, fb)
@@ -279,7 +286,9 @@ func TestTheRoutesThroughDCarryAFileNameOfDirectMaxLess11Bytes(t *testing.T) {
 // Without any means (the thread cwd turned off, and on Linux /proc made to
 // look absent: procSelfFD an empty directory) the routes through D are not
 // attempted and nothing is made in the place: a listen of a long path is
-// ENAMETOOLONG, a dial goes on to symlink, the last of the connect order.
+// ENAMETOOLONG (its inputs giving symlink-file, which a listen tries first
+// where it tries it, no place), a dial goes on to symlink-file, the last of
+// the connect order.
 // Where only the thread cwd is off, Linux takes proc
 // (TestTheRoutesThroughDListenAndDialAtThePath, "proc").
 func TestWithoutAnyMeansAListenIsENAMETOOLONGAndADialFallsBack(t *testing.T) {
@@ -291,23 +300,26 @@ func TestWithoutAnyMeansAListenIsENAMETOOLONGAndADialFallsBack(t *testing.T) {
 	base, fb := tmpDir(t), tmpDir(t)
 	cfg := centralCfg(base)
 	cfg.threadCwd, cfg.procSelfFD, cfg.tmpBases = false, empty, []string{fb}
+	listenCfg := *cfg
+	listenCfg.tmpBases = nil
 	p := nest(t, tmpDir(t), 600, "s.sock")
 	markUntouched(t, base)
-	_, _, err := runLong(opListen, p, cfg)
+	_, _, err := runLong(opListen, p, &listenCfg)
 	wantErrno(t, "listen", err, syscall.ENAMETOOLONG)
 	l := listenAt(t, p)
 	c, r := dialLong(t, p, cfg)
-	if r != routeSymlink {
+	if r != routeSymlinkFile {
 		t.Fatalf("dial: %s", r)
 	}
 	ping(t, l, c)
 	assertUntouched(t, base)
 }
 
-// Through the real environment's inputs (configFromTmpdir), the means taken is
-// the system's: the thread cwd where a thread may have a cwd of its own, else
-// on Linux proc (Docker's default seccomp profile, a filter, rules
-// the thread cwd out).
+// Through the real environment's inputs (configFromTmpdir), the route taken
+// is the system's: symlink-file where a listen tries it and the bind follows
+// the symlink (macOS; /tmp is a safe place); else the thread cwd where a
+// thread may have a cwd of its own, else on Linux proc (Docker's default
+// seccomp profile, a filter, rules the thread cwd out).
 func TestTheRealInputsTakeTheSystemsMeans(t *testing.T) {
 	t.Parallel()
 	ms := allMeans()
@@ -318,8 +330,12 @@ func TestTheRealInputsTakeTheSystemsMeans(t *testing.T) {
 	cfg := configFromTmpdir("")
 	cfg.dBases = []string{tmpDir(t)}
 	l, r := listenLong(t, p, cfg)
-	if r != ms[0].want {
-		t.Fatalf("listen: %s, want %s", r, ms[0].want)
+	want := ms[0].want
+	if listenTriesSymlinkFile && bindFollowsSymlink() {
+		want = routeSymlinkFile
+	}
+	if r != want {
+		t.Fatalf("listen: %s, want %s", r, want)
 	}
 	c, _ := dialLong(t, p, cfg)
 	ping(t, l, c)
@@ -574,7 +590,7 @@ func TestWhenDCanBeMadeNowhereAListenIsENAMETOOLONGAndADialFallsBack(t *testing.
 	// relative (the path is far from the cwd), widened (not made) and
 	// thread-cwd (no place for D) are passed over for the symlink under the
 	// safe place.
-	want, wantSkipped := routeSymlink, []route{routeStandard, routeRelative, routeWidened, routeThreadCwd}
+	want, wantSkipped := routeSymlinkFile, []route{routeStandard, routeRelative, routeWidened, routeThreadCwd}
 	if runtime.GOOS == "linux" {
 		want, wantSkipped = routeProcDirect, []route{routeStandard}
 	}
@@ -924,7 +940,7 @@ func TestTheRoutesThroughDNeedNoFdOfTheSocketsDirectory(t *testing.T) {
 	for _, m := range ms {
 		cfg := m.cfg(base)
 		os.Remove(p)
-		ep, r, err := listenRoutes(nil, real, name, cfg)
+		ep, r, err := listenRoutes(p, nil, real, name, cfg)
 		if err != nil || r != m.want {
 			t.Fatalf("%s: listen %s, %v", m.name, r, err)
 		}
@@ -940,7 +956,7 @@ func TestTheRoutesThroughDNeedNoFdOfTheSocketsDirectory(t *testing.T) {
 		cfg.dBases = nil
 		mark := dir
 		markUntouched(t, mark)
-		if _, _, err := listenRoutes(nil, real, "t.sock", cfg); !errors.Is(err, errUnusable) {
+		if _, _, err := listenRoutes(dir+"/t.sock", nil, real, "t.sock", cfg); !errors.Is(err, errUnusable) {
 			t.Fatalf("%s: with no place and no fd of the socket's directory: %v, want errUnusable", m.name, err)
 		}
 		assertUntouched(t, mark)
@@ -1049,18 +1065,20 @@ func TestTheSockdirRoutesNeedTheDirectorysFdAndASpellingThatFits(t *testing.T) {
 }
 
 // When D can be made nowhere and the form without D does not fit either, a
-// bind has no route left, and ListenAny reports every route of the order as
-// tried and found unusable, in SPEC's order: standard (the path is too long),
-// the routes through D (thread-cwd, proc on Linux, then fork, which Go cannot
-// make), then, since D was made nowhere, the same means without D
-// (thread-cwd-sockdir, proc-sockdir on Linux, fork-sockdir), and last
-// ListenAny's own symlink. SPEC: when D was made nowhere and the bind went on
-// to the -sockdir routes, both the routes through D and the -sockdir routes are
-// in skipped; fork-sockdir whose spelling does not fit is ENAMETOOLONG; and
-// symlink's spelling (<place>/sockat.XXXXXXXXXX/<name>) is always longer than
-// the one without D, so it cannot fit either. No route bound, so none is
-// named, and the error is Listen's own ENAMETOOLONG (the premise, checked
-// through runWith with the same inputs).
+// bind has no route left, and ListenEx with its last resort reports every
+// route of the order as tried and found unusable, in SPEC's order: standard
+// (the path is too long), symlink-file where a listen tries it (not Linux; no
+// place given here), the routes through D (thread-cwd, proc on Linux, then
+// fork-cwd, which Go cannot make), then, since D was made nowhere, the same
+// means without D (thread-cwd-sockdir, proc-sockdir on Linux,
+// fork-cwd-sockdir), and last the last resort, symlink-dir. SPEC: when D was
+// made nowhere and the bind went on to the -sockdir routes, both the routes
+// through D and the -sockdir routes are in skipped; fork-cwd-sockdir whose
+// spelling does not fit is ENAMETOOLONG; and symlink-dir's spelling
+// (<place>/sockat.XXXXXXXXXX/<name>) is always longer than the one without D,
+// so it cannot fit either. No route bound, so none is named, and the error is
+// Listen's own ENAMETOOLONG (the premise, checked through runWith with the
+// same inputs).
 //
 // D is made nowhere: the only place given does not exist and the socket's
 // directory is not writable (0500). The file name is, for each means, the
@@ -1088,15 +1106,15 @@ func TestWhenDCanBeMadeNowhereAndTheFormWithoutDDoesNotFitEveryRouteIsSkipped(t 
 	// SPEC's order of the routes tried for a bind and found unusable here;
 	// proc and proc-sockdir are in it only where /proc is (Linux).
 	linux := runtime.GOOS == "linux"
-	want := []route{routeStandard, routeThreadCwd}
+	want := append(beforeD(), routeThreadCwd)
 	if linux {
 		want = append(want, routeProc)
 	}
-	want = append(want, routeFork, routeThreadCwdSockdir)
+	want = append(want, routeForkCwd, routeThreadCwdSockdir)
 	if linux {
 		want = append(want, routeProcSockdir)
 	}
-	want = append(want, routeForkSockdir, routeSymlink)
+	want = append(want, routeForkCwdSockdir, routeSymlinkDir)
 	for _, m := range ms {
 		n := directMax - rNameLen - 1
 		if m.want == routeProc {
@@ -1110,20 +1128,20 @@ func TestWhenDCanBeMadeNowhereAndTheFormWithoutDDoesNotFitEveryRouteIsSkipped(t 
 		t.Cleanup(func() { os.Chmod(dir, 0o700) })
 		own := ownPlace(t)
 		cfg := m.cfg("/nonexistent")
-		cfg.anyBases = []string{own}
+		cfg.dirBases = []string{own}
 		markUntouched(t, dir)
 		markUntouched(t, own)
 
 		_, _, err := runWith(opListen, p, cfg)
 		wantOpError(t, m.name+": the premise: Listen", opListen, p, err, syscall.ENAMETOOLONG)
 
-		ep, out, err := listenAny(p, cfg)
-		wantOpError(t, m.name+": listen any", opListen, p, err, syscall.ENAMETOOLONG)
+		ep, _, err := listenReported(p, UseLastResort, cfg)
+		wantOpError(t, m.name+": the last resort", opListen, p, err, syscall.ENAMETOOLONG)
 		if ep != nil {
 			t.Fatalf("%s: a listener with the error", m.name)
 		}
-		if got := skippedNames(t, out); out.route != "" || len(out.losses) != 0 || !slices.Equal(got, want) {
-			t.Fatalf("%s (%d-byte name): outcome %+v, want no route after %v", m.name, n, out, want)
+		if re := routeErr(t, err); re.Route != "" || !slices.Equal(skippedNames(t, re.Skipped), want) {
+			t.Fatalf("%s (%d-byte name): error %+v, want no route after %v", m.name, n, re, want)
 		}
 		assertUntouched(t, dir)
 		assertNoSockatEntry(t, dir)
@@ -1142,8 +1160,10 @@ func TestWhenDCanBeMadeNowhereAndTheFormWithoutDDoesNotFitEveryRouteIsSkipped(t 
 // (AT_REMOVEDIR takes only an empty directory), and the next place is tried:
 // every place in turn here, the socket's directory last. With D made nowhere,
 // a listen takes thread-cwd-sockdir (R in the socket's directory; a symlink's
-// mode is not used); a dial goes on in the connect order to symlink (relative
-// does not fit, widened is not made, thread-cwd has no place for D). On Linux
+// mode is not used; symlink-file, which a listen tries first on macOS, is
+// given no place); a dial goes on in the connect order to symlink-file
+// (relative does not fit, widened is not made, thread-cwd has no place for
+// D). On Linux
 // the listen takes thread-cwd, and the dial proc-direct, the first of its
 // connect order. Nothing is left in any place or in the socket's directory,
 // call after call, and the places were tried (their mtime moved). A umask
@@ -1161,11 +1181,14 @@ func TestChildUnopenableD(t *testing.T) {
 	b1, b2, safe := tmpDir(t), tmpDir(t), tmpDir(t)
 	p := nest(t, tmpDir(t), 600, "s.sock")
 	dir := filepath.Dir(p)
+	// The listen's inputs give symlink-file no place, so the listen goes on
+	// to the routes through D on macOS too; the dial's give it the safe place.
 	cfg := centralCfg(b1, b2)
-	cfg.tmpBases = []string{safe}
+	dialCfg := centralCfg(b1, b2)
+	dialCfg.tmpBases = []string{safe}
 	listenWant, dialWant := routeThreadCwd, routeProcDirect
 	if runtime.GOOS == "darwin" {
-		listenWant, dialWant = routeThreadCwdSockdir, routeSymlink
+		listenWant, dialWant = routeThreadCwdSockdir, routeSymlinkFile
 	}
 	syscall.Umask(0o177)
 	for i := range 3 {
@@ -1182,7 +1205,7 @@ func TestChildUnopenableD(t *testing.T) {
 		}
 		// The umask applies to the socket file too (0600): a connect needs
 		// write permission, which 0600 has.
-		c, r := dialLong(t, p, cfg)
+		c, r := dialLong(t, p, dialCfg)
 		if r != dialWant {
 			t.Fatalf("dial %d: %s, want %s", i, r, dialWant)
 		}
@@ -1195,20 +1218,17 @@ func TestChildUnopenableD(t *testing.T) {
 		assertNoSockatEntry(t, dir)
 	}
 
-	// What ListenAny reports for it: thread-cwd-sockdir, after thread-cwd
-	// found no place for D (macOS; on Linux D is made and thread-cwd taken).
-	ep, out, err := listenAny(p, cfg)
+	// What ListenEx reports for it: thread-cwd-sockdir, after symlink-file
+	// (no place) and thread-cwd (no place for D) (macOS; on Linux D is made
+	// and thread-cwd taken).
+	ep, res, err := listenReported(p, UseLastResort, cfg)
 	l := must{t}.listener(ep, err)
-	var names []route
-	for _, sk := range out.skipped {
-		names = append(names, sk.name)
-	}
 	wantSkipped := []route{routeStandard}
 	if runtime.GOOS == "darwin" {
-		wantSkipped = []route{routeStandard, routeThreadCwd, routeFork}
+		wantSkipped = []route{routeStandard, routeSymlinkFile, routeThreadCwd, routeForkCwd}
 	}
-	if out.route != listenWant || !slices.Equal(out.losses, []string{lossRespelled}) || !slices.Equal(names, wantSkipped) {
-		t.Fatalf("listen any: %+v, want %s after %v", out, listenWant, wantSkipped)
+	if res.Route != string(listenWant) || !slices.Equal(res.Losses, []Loss{Respelled}) || !slices.Equal(skippedNames(t, res.Skipped), wantSkipped) {
+		t.Fatalf("ListenEx: %+v, want %s after %v", res, listenWant, wantSkipped)
 	}
 	l.Close()
 	os.Remove(p)
@@ -1254,9 +1274,9 @@ func TestTheConnectOrderWithoutProc(t *testing.T) {
 	if !inTmpCwd(t) {
 		return
 	}
-	order := []route{routeRelative, routeThreadCwd, routeSymlink}
+	order := []route{routeRelative, routeThreadCwd, routeSymlinkFile}
 	if runtime.GOOS == "darwin" {
-		order = []route{routeRelative, routeWidened, routeThreadCwd, routeSymlink}
+		order = []route{routeRelative, routeWidened, routeThreadCwd, routeSymlinkFile}
 	}
 	if got := stepNames(dialSteps(false)); !slices.Equal(got, order) {
 		t.Fatalf("the connect order: %v, want %v", got, order)
@@ -1278,7 +1298,7 @@ func TestTheConnectOrderWithoutProc(t *testing.T) {
 	}
 	far := routeThreadCwd
 	if !threadCwdAvailable() {
-		far = routeSymlink
+		far = routeSymlinkFile
 	}
 	cases := []struct {
 		name string
@@ -1288,7 +1308,7 @@ func TestTheConnectOrderWithoutProc(t *testing.T) {
 	}{
 		{"near the cwd", belowCwdPath(t, directMax, "s.sock"), cfgOf(true, safe), routeRelative},
 		{"far from the cwd", nest(t, tmpDir(t), 600, "s.sock"), cfgOf(true, safe), far},
-		{"far, the thread cwd off", nest(t, tmpDir(t), 600, "s.sock"), cfgOf(false, safe), routeSymlink},
+		{"far, the thread cwd off", nest(t, tmpDir(t), 600, "s.sock"), cfgOf(false, safe), routeSymlinkFile},
 		{"far, only unsafe places", nest(t, tmpDir(t), 600, "s.sock"), cfgOf(false, unsafeA, unsafeB), ""},
 	}
 	for _, c := range cases {
@@ -1312,7 +1332,7 @@ func TestTheConnectOrderWithoutProc(t *testing.T) {
 		} else {
 			assertUntouched(t, dBase)
 		}
-		if c.want == routeSymlink {
+		if c.want == routeSymlinkFile {
 			assertTouched(t, safe)
 		} else {
 			assertUntouched(t, safe)

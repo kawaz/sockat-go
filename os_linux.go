@@ -10,8 +10,8 @@ import (
 )
 
 // dialSteps is the connect order on Linux (SPEC "connect の順"): with /proc,
-// proc-direct, thread-cwd, proc, proc-held, symlink; without it, relative,
-// thread-cwd, symlink.
+// proc-direct, thread-cwd, proc, proc-held, symlink-file; without it,
+// relative, thread-cwd, symlink-file.
 func dialSteps(proc bool) []dialStep {
 	if proc {
 		return []dialStep{
@@ -19,13 +19,13 @@ func dialSteps(proc bool) []dialStep {
 			{routeThreadCwd, (*dialer).threadCwd},
 			{routeProc, (*dialer).proc},
 			{routeProcHeld, (*dialer).procHeld},
-			{routeSymlink, (*dialer).symlink},
+			{routeSymlinkFile, (*dialer).symlinkFile},
 		}
 	}
 	return []dialStep{
 		{routeRelative, (*dialer).relative},
 		{routeThreadCwd, (*dialer).threadCwd},
-		{routeSymlink, (*dialer).symlink},
+		{routeSymlinkFile, (*dialer).symlinkFile},
 	}
 }
 
@@ -179,3 +179,8 @@ const dOpenFlagsRetry = 0
 
 // hasProc: /proc may be there.
 const hasProc = true
+
+// listenTriesSymlinkFile: a bind here does not follow a symlink in the last
+// component (it answers EADDRINUSE and makes nothing), so a listen never
+// tries symlink-file.
+const listenTriesSymlinkFile = false

@@ -31,9 +31,9 @@ func exPaths(t *testing.T) []string {
 	return ps
 }
 
-func listenEx(t *testing.T, p string) (*net.UnixListener, func() error) {
+func listenExAt(t *testing.T, p string) (*net.UnixListener, func() error) {
 	t.Helper()
-	l, discard, err := ListenEx(p)
+	l, discard, _, err := ListenEx(p, NoLastResort)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func listenEx(t *testing.T, p string) (*net.UnixListener, func() error) {
 func TestDiscardRemovesTheSocketFileAndLeavesTheListenerOpen(t *testing.T) {
 	t.Parallel()
 	for _, p := range exPaths(t) {
-		l, discard := listenEx(t, p)
+		l, discard := listenExAt(t, p)
 		if err := discard(); err != nil {
 			t.Fatalf("%d bytes: %v", len(p), err)
 		}
@@ -73,7 +73,7 @@ func TestDiscardRemovesTheSocketFileAndLeavesTheListenerOpen(t *testing.T) {
 func TestCloseLeavesTheFileAndDiscardRemovesItAfterwards(t *testing.T) {
 	t.Parallel()
 	for _, p := range exPaths(t) {
-		l, discard := listenEx(t, p)
+		l, discard := listenExAt(t, p)
 		l.Close()
 		if !isSocket(p) {
 			t.Fatalf("%d bytes: Close removed the socket file", len(p))
@@ -91,7 +91,7 @@ func TestCloseLeavesTheFileAndDiscardRemovesItAfterwards(t *testing.T) {
 func TestDiscardLeavesWhatReplacedTheSocket(t *testing.T) {
 	t.Parallel()
 	for _, p := range exPaths(t) {
-		_, discard := listenEx(t, p)
+		_, discard := listenExAt(t, p)
 		if err := os.Remove(p); err != nil {
 			t.Fatal(err)
 		}
@@ -106,7 +106,7 @@ func TestDiscardLeavesWhatReplacedTheSocket(t *testing.T) {
 		}
 
 		os.Remove(p)
-		_, discard = listenEx(t, p)
+		_, discard = listenExAt(t, p)
 		os.Remove(p)
 		other := listenAt(t, p)
 		if err := discard(); err != nil || !isSocket(p) {
@@ -115,7 +115,7 @@ func TestDiscardLeavesWhatReplacedTheSocket(t *testing.T) {
 		other.Close()
 		os.Remove(p)
 
-		_, discard = listenEx(t, p)
+		_, discard = listenExAt(t, p)
 		os.Remove(p)
 		if err := discard(); err != nil {
 			t.Fatalf("%d bytes: discard of a gone file: %v", len(p), err)
@@ -130,7 +130,7 @@ func TestDiscardLeavesWhatReplacedTheSocket(t *testing.T) {
 func TestASecondDiscardDoesNothing(t *testing.T) {
 	t.Parallel()
 	for _, p := range exPaths(t) {
-		_, discard := listenEx(t, p)
+		_, discard := listenExAt(t, p)
 		keep := filepath.Dir(p) + "/k"
 		if err := os.Link(p, keep); err != nil {
 			t.Fatal(err)
@@ -172,7 +172,7 @@ func TestDiscardRemembersTheRealPath(t *testing.T) {
 	if err := os.Symlink(d+"/a", d+"/via"); err != nil {
 		t.Fatal(err)
 	}
-	_, discard := listenEx(t, d+"/via/s.sock")
+	_, discard := listenExAt(t, d+"/via/s.sock")
 	if err := os.WriteFile(d+"/b/s.sock", []byte("b"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +217,7 @@ func TestDiscardOfARelativePathIsNotRetargetedByAChdir(t *testing.T) {
 
 func TestChildDiscardAfterAChdir(t *testing.T) {
 	asChild(t)
-	_, discard := listenEx(t, "s.sock")
+	_, discard := listenExAt(t, "s.sock")
 	if err := os.Chdir("other"); err != nil {
 		t.Fatal(err)
 	}
@@ -231,14 +231,14 @@ func TestChildDiscardAfterAChdir(t *testing.T) {
 func TestListenExErrorsAndAbstractNames(t *testing.T) {
 	t.Parallel()
 	d := tmpDir(t)
-	l, discard, err := ListenEx(d + "/nope/s.sock")
+	l, discard, _, err := ListenEx(d+"/nope/s.sock", NoLastResort)
 	if !errors.Is(err, syscall.ENOENT) || l != nil || discard != nil {
 		t.Fatalf("%v, %v, %v", l, discard != nil, err)
 	}
 	if !abstractNames {
 		return
 	}
-	l, discard, err = ListenEx("@sockat-ex-" + t.Name())
+	l, discard, _, err = ListenEx("@sockat-ex-"+t.Name(), NoLastResort)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +262,7 @@ func TestDiscardThatCannotCheckTheFileIsAnError(t *testing.T) {
 		return
 	}
 	for _, p := range exPaths(t) {
-		l, discard := listenEx(t, p)
+		l, discard := listenExAt(t, p)
 		l.Close()
 		dir := filepath.Dir(p)
 		if err := os.Chmod(dir, 0o600); err != nil {

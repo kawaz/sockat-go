@@ -219,20 +219,30 @@ func TestAMissingDirectoryIsENOENTEvenWhenTheNameFitsNoSockaddr(t *testing.T) {
 //   - Listen: the routes through D put the file name in the sockaddr behind R/
 //     (and /proc/self/fd/<D>/ in proc), and 254 bytes fits none:
 //     ENAMETOOLONG, the error of a bind to a path too long for sun_path, and
-//     nothing is created.
+//     nothing is created. Where a bind follows a symlink (macOS),
+//     symlink-file is spelled without the file name and binds it at the path
+//     (DR-0016); Linux does not try it.
 //   - Dial (except FreeBSD, whose connectat takes the name as bindat does): the
 //     symlink to the socket file is spelled without the file name, so the
 //     name's length does not matter. With nothing there the error is the
 //     kernel's ENOENT, not ENAMETOOLONG; a socket bound under a short name and
 //     renamed to the long one is reached and talks.
-func TestAFileNameOf254BytesCannotBeListenedOnButCanBeDialed(t *testing.T) {
+func TestAFileNameOf254BytesIsListenedOnOnlyThroughSymlinkFileAndDialed(t *testing.T) {
 	t.Parallel()
 	d := tmpDir(t)
 	p := d + "/" + strings.Repeat("n", 254)
-	_, err := Listen(p)
-	wantOpError(t, "listen", opListen, p, err, syscall.ENAMETOOLONG)
-	if exists(p) {
-		t.Fatal("something was created at the path")
+	l, err := Listen(p)
+	if listenTriesSymlinkFile && bindFollowsSymlink() {
+		if err != nil || !isSocket(p) {
+			t.Fatalf("listen through symlink-file: %v, socket there %v", err, isSocket(p))
+		}
+		l.Close()
+		os.Remove(p)
+	} else {
+		wantOpError(t, "listen", opListen, p, err, syscall.ENAMETOOLONG)
+		if exists(p) {
+			t.Fatal("something was created at the path")
+		}
 	}
 	if runtime.GOOS == "freebsd" {
 		_, err = Dial(p)
@@ -242,7 +252,7 @@ func TestAFileNameOf254BytesCannotBeListenedOnButCanBeDialed(t *testing.T) {
 	_, err = Dial(p)
 	wantOpError(t, "dial with nothing there", opDial, p, err, syscall.ENOENT)
 
-	l, err := Listen(d + "/s.sock")
+	l, err = Listen(d + "/s.sock")
 	if err != nil {
 		t.Fatal(err)
 	}

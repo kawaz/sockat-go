@@ -1,18 +1,29 @@
 // Command sockat-conform is the conformance CLI of sockat-go (the hub's
 // docs/design/conformance.md): it reads {"op", "path"} from stdin, binds or
-// connects once through the route order, and writes {"ok", "error", "route",
-// "losses", "skipped"} to stdout. Not part of the module's API.
+// connects once through the default route order without the last resort
+// (sockat.ListenEx / sockat.DialEx with NoLastResort), and writes {"ok",
+// "error", "route", "losses", "skipped"} to stdout. Not part of the module's
+// API.
+//
+// A bind's listener is left open for the process's exit to close; a connect
+// sends one byte "x" before closing.
+//
+// Design rationale: the hub's conformance rule is to end the process without
+// closing a bound listener. Closing would remove the socket file for a short
+// path where the standard library unlinks on Close (Go's does, unless told
+// not to), a difference between languages' standards that the conformance
+// test does not mean to compare.
 package main
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"syscall"
 
-	_ "github.com/kawaz/sockat-go" // sets conformhook.Run
-	"github.com/kawaz/sockat-go/internal/conformhook"
+	"github.com/kawaz/sockat-go"
 	"golang.org/x/sys/unix"
 )
 
@@ -29,24 +40,59 @@ type output struct {
 	Skipped []string `json:"skipped"`
 }
 
+// keep holds a bound listener until the process exits, so that no finalizer
+// closes it first.
+var keep *net.UnixListener
+
 func main() {
 	var in input
 	if err := json.NewDecoder(os.Stdin).Decode(&in); err != nil || (in.Op != "bind" && in.Op != "connect") {
 		fmt.Fprintln(os.Stderr, "sockat-conform: want {\"op\": \"bind\"|\"connect\", \"path\": ...} on stdin")
 		os.Exit(2)
 	}
-	r := conformhook.Run(in.Op, in.Path)
-	out := output{OK: r.Err == nil, Losses: r.Losses, Skipped: r.Skipped}
-	if r.Route != "" {
-		out.Route = &r.Route
+	var res sockat.Result
+	var err error
+	if in.Op == "bind" {
+		keep, _, res, err = sockat.ListenEx(in.Path, sockat.NoLastResort)
+	} else {
+		var c *net.UnixConn
+		c, res, err = sockat.DialEx(in.Path, sockat.NoLastResort)
+		if err == nil {
+			c.Write([]byte("x"))
+			c.Close()
+		}
 	}
-	if r.Err != nil {
-		name := errorName(r.Err)
-		out.Error = &name
-	}
-	if err := json.NewEncoder(os.Stdout).Encode(out); err != nil {
+	if err := json.NewEncoder(os.Stdout).Encode(report(res, err)); err != nil {
 		os.Exit(2)
 	}
+}
+
+// report is the output for one bind / connect: the route taken and its losses
+// on success; on failure the error's name and, from the *sockat.RouteError,
+// the route that bound / connected and failed (null when none did). The routes
+// skipped either way, without their reasons (not compared).
+func report(res sockat.Result, err error) output {
+	out := output{OK: err == nil, Losses: []string{}, Skipped: []string{}}
+	route, skipped := res.Route, res.Skipped
+	if err != nil {
+		name := errorName(err)
+		out.Error = &name
+		var re *sockat.RouteError
+		if errors.As(err, &re) {
+			route, skipped = re.Route, re.Skipped
+		}
+	} else {
+		for _, l := range res.Losses {
+			out.Losses = append(out.Losses, string(l))
+		}
+	}
+	if route != "" {
+		out.Route = &route
+	}
+	for _, s := range skipped {
+		out.Skipped = append(out.Skipped, s.Name)
+	}
+	return out
 }
 
 // errorName is the errno's name, "invalid-argument" for sockat's argument

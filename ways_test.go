@@ -213,11 +213,14 @@ func TestADialFailsAtOnceOnAFullBacklogOnEveryRoute(t *testing.T) {
 // On every route, a listen / dial that fails is the result: the kernel's
 // error for the path (EADDRINUSE for an existing file, ENOENT for a missing
 // socket, ECONNREFUSED for a socket nobody listens on) comes back as it is,
-// and the order does not move on: a place for a dial's symlink added after
-// the way's own stays untouched (no link was even created there, no later
-// route was tried), and the way's places are empty (D, R and links are
-// removed after a failure too). The siblings have names of the same length as
-// the way's path, so they take the same route.
+// and the order does not move on: a place for symlink-file added after the
+// way's own stays untouched (no link was even created there, no later route
+// was tried), and the way's places are empty (D, R and links are removed
+// after a failure too). A listen tries symlink-file first where it tries it,
+// so that place is added to a listen's inputs only on the way whose listen
+// takes symlink-file (for the others it would be the route taken, not a later
+// one). The siblings have names of the same length as the way's path, so they
+// take the same route.
 func TestAFailureOnEveryRouteIsReturnedAndNotRetried(t *testing.T) {
 	t.Parallel()
 	if !inTmpCwd(t) {
@@ -229,10 +232,14 @@ func TestAFailureOnEveryRouteIsReturnedAndNotRetried(t *testing.T) {
 				t.Skip("this system refuses a thread a cwd of its own")
 			}
 			later := tmpDir(t)
+			listenWay := w
 			if w.cfg != nil {
 				cfg := *w.cfg
 				cfg.tmpBases = append(slices.Clone(cfg.tmpBases), later)
 				w.cfg = &cfg
+				if w.listen == routeSymlinkFile || !listenTriesSymlinkFile {
+					listenWay.cfg = &cfg
+				}
 			}
 			existing := w.sibling('e')
 			if err := os.WriteFile(existing, nil, 0o600); err != nil {
@@ -256,6 +263,9 @@ func TestAFailureOnEveryRouteIsReturnedAndNotRetried(t *testing.T) {
 			for _, c := range cases {
 				markUntouched(t, later)
 				ww := w
+				if c.o == opListen {
+					ww = listenWay
+				}
 				ww.path = c.path
 				_, _, err := ww.run(c.o)
 				wantErrno(t, c.what, err, c.errno)

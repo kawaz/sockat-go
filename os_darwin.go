@@ -11,13 +11,13 @@ import (
 )
 
 // dialSteps is the connect order on macOS (SPEC "connect の順"): relative,
-// widened, thread-cwd, symlink.
+// widened, thread-cwd, symlink-file.
 func dialSteps(bool) []dialStep {
 	return []dialStep{
 		{routeRelative, (*dialer).relative},
 		{routeWidened, (*dialer).widened},
 		{routeThreadCwd, (*dialer).threadCwd},
-		{routeSymlink, (*dialer).symlink},
+		{routeSymlinkFile, (*dialer).symlinkFile},
 	}
 }
 
@@ -34,7 +34,7 @@ const noWidenedRoute = "no widened route in sockat-go"
 // net.Addr, whose String() panics, where net.DialUnix would report the
 // spelling (DR-0005). What is lost is a dial that neither relative nor
 // thread-cwd can make (no thread cwd, or a file name over 92 bytes) with no
-// usable place for the symlink, to a path of at most 253 bytes.
+// usable place for symlink-file's symlink, to a path of at most 253 bytes.
 func (d *dialer) widened() (endpoint, error) { return nil, unusable(noWidenedRoute) }
 
 // procFDUsableFor: no /proc here.
@@ -105,3 +105,7 @@ const dOpenFlagsRetry = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | uni
 
 // hasProc: no /proc routes here.
 const hasProc = false
+
+// listenTriesSymlinkFile: a bind here follows a symlink in the last
+// component, so a listen tries symlink-file after standard.
+const listenTriesSymlinkFile = true

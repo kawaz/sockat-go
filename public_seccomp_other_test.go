@@ -1,6 +1,6 @@
 //go:build !linux
 
-package atanycost_test
+package sockat_test
 
 // seccompFiltered: no seccomp here.
 func seccompFiltered() bool { return false }

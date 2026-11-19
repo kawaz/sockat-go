@@ -3,18 +3,15 @@
 package sockat
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
-
-	"golang.org/x/sys/unix"
 )
 
 // The routes of a dial that spell the path in the plain sockaddr without D
-// (every system but FreeBSD): relative, and symlink. A connect leaves no
+// (every system but FreeBSD): relative, and symlink-file. A connect leaves no
 // spelling behind with the peer (the connecting socket is not bound), so these
-// spellings need no random part; a listen never takes them.
+// spellings need no random part; a listen never takes relative.
 
 // relative connects through the path spelled relative to the cwd
 // (newRelative), then confirms the cwd did not change meanwhile (relative.run).
@@ -30,17 +27,10 @@ func (d *dialer) relative() (endpoint, error) {
 	return rel.run(func(s string) (endpoint, error) { return viaStd(opDial, s, false) })
 }
 
-// symlink connects through a symlink to the socket file in the first of
-// cfg.tmpBases where symlinkRoute can be used (TMPDIR, then /tmp). A failure
-// of the connect through it ends the search with that error.
-func (d *dialer) symlink() (endpoint, error) {
-	for _, base := range d.cfg.tmpBases {
-		ep, err := symlinkRoute(base, d.path)
-		if !errors.Is(err, errUnusable) {
-			return ep, err
-		}
-	}
-	return nil, unusable("no safe place")
+// symlinkFile connects through a symlink to the socket file in the first of
+// cfg.tmpBases where it can be used (symlinkFile).
+func (d *dialer) symlinkFile() (endpoint, error) {
+	return symlinkFile(opDial, d.path, d.cfg.tmpBases)
 }
 
 // relative is a relative spelling of an absolute socket path, checked to
@@ -164,78 +154,4 @@ func (r *relative) run(f func(spelling string) (endpoint, error)) (endpoint, err
 		return nil, errCwdChanged
 	}
 	return ep, err
-}
-
-// symlinkRoute connects to path through a symlink <base>/sockat.XXXXXXXXXX
-// to the socket file. A connect follows a symlink in the last component, so
-// the spelling's length depends on neither the directory nor the file name.
-// The link holds the caller's own spelling (made absolute against the cwd), so
-// the kernel resolves it as it resolves path.
-//
-// Used when the spelling fits and base is a place where nobody else can
-// replace the symlink (safeBase); both are checked before anything is
-// created. The symlink is removed before this returns, whatever the outcome.
-// errUnusable when the route cannot be used here.
-func symlinkRoute(base, path string) (endpoint, error) {
-	link := underBase(base, linkPrefix+string(make([]byte, linkRandomLen)))
-	if len(link) > directMax || !safeBase(base) {
-		return nil, errUnusable
-	}
-	target, ok := absTarget(path)
-	if !ok {
-		return nil, errUnusable
-	}
-	link, err := createLink(base, target, randomName)
-	if err != nil {
-		return nil, errUnusable
-	}
-	defer os.Remove(link)
-	return viaStd(opDial, link, false)
-}
-
-// absTarget is the caller's spelling made absolute against the cwd, for a
-// symlink to hold: the kernel then resolves the link as it resolves the
-// caller's path. false when the cwd cannot be read.
-func absTarget(target string) (string, bool) {
-	if isAbs(target) {
-		return target, true
-	}
-	cwd, err := syscall.Getwd()
-	if err != nil {
-		return "", false
-	}
-	return cwd + "/" + target, true
-}
-
-// safeBase reports whether base, followed through symlinks (macOS's /tmp is
-// one to /private/tmp), is a directory where no other user (root aside) can
-// remove or rename an entry, so the symlink cannot be replaced between its
-// creation and the bind / connect through it. false when it cannot be looked
-// up.
-func safeBase(base string) bool {
-	var st unix.Stat_t
-	if err := unix.Stat(base, &st); err != nil {
-		return false
-	}
-	return st.Mode&unix.S_IFMT == unix.S_IFDIR && onlyWeCanReplace(uint32(st.Mode), st.Uid, uint32(os.Geteuid()))
-}
-
-// onlyWeCanReplace reports whether, in a directory of mode owned by owner,
-// only the user us and root can remove or rename the entries us creates:
-//
-//   - sticky (as /tmp is) and owned by root or us: an entry can then be removed
-//     or renamed only by its owner, the directory's owner and root. The owner
-//     matters: in a sticky directory of another user, that user can replace
-//     anything;
-//   - owned by us with no write permission for group and others
-//     (mode&0o022 == 0, as a private TMPDIR is): nobody else can create,
-//     remove or rename entries there at all.
-//
-// What remains is a replacement by us itself or by root, which is outside what
-// sockat guards against.
-func onlyWeCanReplace(mode, owner, us uint32) bool {
-	const sticky = 0o1000
-	const groupOrOtherWrite = 0o022
-	ours := owner == us || owner == 0
-	return (mode&sticky != 0 && ours) || (owner == us && mode&groupOrOtherWrite == 0)
 }

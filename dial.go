@@ -11,18 +11,20 @@ import (
 // start a thread after them. The order is the system's (dialSteps, in the
 // os_*.go files):
 //
-//	| system                 | order                                                |
-//	|------------------------|------------------------------------------------------|
-//	| Linux with /proc       | proc-direct, thread-cwd, proc, proc-held, symlink    |
-//	| Linux without /proc    | relative, thread-cwd, symlink                        |
-//	| macOS                  | relative, widened (not made, DR-0005), thread-cwd, symlink |
-//	| FreeBSD                | at-direct, at                                        |
-//	| NetBSD, OpenBSD, other | relative, symlink                                    |
+//	| system                 | order                                                           |
+//	|------------------------|-----------------------------------------------------------------|
+//	| Linux with /proc       | proc-direct, thread-cwd, proc, proc-held, symlink-file          |
+//	| Linux without /proc    | relative, thread-cwd, symlink-file                              |
+//	| macOS                  | relative, widened (not made, DR-0005), thread-cwd, symlink-file |
+//	| FreeBSD                | at-direct, at                                                   |
+//	| NetBSD, OpenBSD, other | relative, symlink-file                                          |
 //
-// A connect leaves no spelling behind with the peer (the connecting socket is
-// not bound), so the routes that do without R (proc-direct, relative,
-// at-direct, proc-held, symlink) are safe for a dial; a listen never takes
-// them.
+// DialEx with its last resort adds fork-cwd-direct, which Go cannot make
+// (named in skipped). A connect leaves no spelling behind with the peer (the
+// connecting socket is not bound), so the routes that do without R
+// (proc-direct, relative, at-direct, proc-held, symlink-file) are safe for a
+// dial; a listen never takes them but symlink-file, whose spelling names
+// nothing but an entry of the place once the bind follows it.
 
 // dialStep is one route of the connect order: its name and how it is tried.
 // try returns an unusable error when the route cannot be used here, and
@@ -31,13 +33,6 @@ type dialStep struct {
 	route route
 	try   func(*dialer) (endpoint, error)
 }
-
-// unusable is errUnusable with the reason the route could not be used, which
-// the trace records (diagnostics only).
-type unusable string
-
-func (u unusable) Error() string        { return "sockat: route unusable: " + string(u) }
-func (u unusable) Is(target error) bool { return target == errUnusable }
 
 // dialer is one dial of a long path through the connect order.
 type dialer struct {
@@ -69,12 +64,7 @@ func (d *dialer) run(steps []dialStep) (endpoint, route, error) {
 	for _, s := range steps {
 		ep, err := s.try(d)
 		if errors.Is(err, errUnusable) {
-			reason := "unusable"
-			var u unusable
-			if errors.As(err, &u) {
-				reason = string(u)
-			}
-			d.cfg.trace.add(s.route, reason)
+			d.cfg.trace.add(s.route, reasonOf(err))
 			continue
 		}
 		return ep, s.route, err

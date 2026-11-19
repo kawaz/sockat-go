@@ -26,9 +26,9 @@ import (
 // then opened for the routes that need its fd (the socket's directory as a
 // place for D, a dial's proc-direct and at-direct); when it cannot be opened
 // (no read permission where directories are opened O_RDONLY), sdir is nil and
-// those routes cannot be used. Then a listen takes the routes through D
-// (listenRoutes) and a dial the system's connect order (dialer); when no
-// route can be used, the error is ENAMETOOLONG.
+// those routes cannot be used. Then a listen takes its order (listenRoutes)
+// and a dial the system's connect order (dialer); when no route can be used,
+// the error is ENAMETOOLONG.
 func runLong(o op, path string, cfg *config) (endpoint, route, error) {
 	dir, name, err := splitPath(path)
 	if err != nil {
@@ -59,7 +59,7 @@ func runLong(o op, path string, cfg *config) (endpoint, route, error) {
 	var ep endpoint
 	var r route
 	if o == opListen {
-		ep, r, err = listenRoutes(sdir, real, name, cfg)
+		ep, r, err = listenRoutes(path, sdir, real, name, cfg)
 	} else {
 		d := newDialer(path, dir, real, name, sdir, cfg)
 		ep, r, err = d.run(dialSteps(d.procUsable))
@@ -75,36 +75,50 @@ func runLong(o op, path string, cfg *config) (endpoint, route, error) {
 const rNameLen = 10
 
 // listenRoutes binds name inside the socket's directory (real, opened as
-// sdir) through R/<name> relative to a fresh D, by the first means the system
-// has:
+// sdir; path as the caller spelt it), by the first route that can be used:
 //
-//	| means                     | system              | route          |
-//	|---------------------------|---------------------|----------------|
-//	| bindat on D               | FreeBSD             | routeAt        |
-//	| a thread whose cwd is D   | Linux, macOS        | routeThreadCwd |
-//	| /proc/self/fd/<D>/R/<name>| Linux with /proc    | routeProc      |
+//	| route        | system                    | spelling                          |
+//	|--------------|---------------------------|-----------------------------------|
+//	| symlink-file | not Linux                 | <place>/sockat.XXXXXXXXXX         |
+//	| at           | FreeBSD                   | bindat(D, R/<name>)               |
+//	| thread-cwd   | Linux, macOS              | R/<name> from a thread in D       |
+//	| proc         | Linux with /proc          | /proc/self/fd/<D>/R/<name>        |
+//	| fork-cwd     | (none: Go has no fork)    |                                   |
 //
-// What can be told without making anything (the length, a seccomp filter,
-// /proc) is checked first; nothing is made when no means can be used. When D
-// can be made nowhere, the same means without D (withoutD). errUnusable when
-// no route can be used (nothing left behind).
-func listenRoutes(sdir *os.File, real, name string, cfg *config) (endpoint, route, error) {
+// symlink-file needs the kernel to follow a symlink in the last component of
+// a bind, which is told at run time (symlinkFile); Linux does not, and is
+// not tried. For the routes through D, what can be told without making
+// anything (the length, a seccomp filter, /proc) is checked first; nothing is
+// made when no means can be used. When D can be made nowhere, the same means
+// without D (withoutD). errUnusable when no route can be used (nothing left
+// behind).
+//
+// D is made once and removed when the routes through D are done: no later
+// route of a listen uses it (fork-cwd, which would, Go does not have).
+func listenRoutes(path string, sdir *os.File, real, name string, cfg *config) (endpoint, route, error) {
+	if listenTriesSymlinkFile {
+		ep, err := symlinkFile(opListen, path, cfg.tmpBases)
+		if !errors.Is(err, errUnusable) {
+			return ep, routeSymlinkFile, err
+		}
+		cfg.trace.add(routeSymlinkFile, reasonOf(err))
+	}
 	thread := cfg.threadCwd && threadCwdPossible()
 	proc := procFDUsableFor(sdir, cfg.procSelfFD)
 	ep, r, err := throughD(sdir, real, name, thread, proc, cfg)
 	if errors.Is(err, errNoD) {
-		// The routes through D were tried and found unusable, fork (which Go
-		// cannot make) among them; then the form without D.
-		cfg.trace.add(routeFork, noForkRoute)
+		// The routes through D were tried and found unusable, fork-cwd (which
+		// Go cannot make) among them; then the form without D.
+		cfg.trace.add(routeForkCwd, noForkRoute)
 		ep, r, err = withoutD(sdir, real, name, thread, proc, cfg)
 		if errors.Is(err, errUnusable) {
-			cfg.trace.add(routeForkSockdir, noForkRoute)
+			cfg.trace.add(routeForkCwdSockdir, noForkRoute)
 		}
 		return ep, r, err
 	}
 	if errors.Is(err, errUnusable) {
 		// SPEC's next route for a bind; Go cannot make it.
-		cfg.trace.add(routeFork, noForkRoute)
+		cfg.trace.add(routeForkCwd, noForkRoute)
 	}
 	return ep, r, err
 }
@@ -419,8 +433,9 @@ func openDirFD(dir string) (int, error) {
 	return unix.FcntlInt(f.Fd(), unix.F_DUPFD_CLOEXEC, 0)
 }
 
-// trace records the routes tried and found unusable, in order, for
-// atanycost's Result (diagnostics only). A nil trace records nothing.
+// trace records the routes tried and found unusable, in order, for the
+// Skipped of ListenEx and DialEx (diagnostics only). A nil trace records
+// nothing.
 type trace struct{ skipped []skipped }
 
 // skipped is a route found unusable and why.

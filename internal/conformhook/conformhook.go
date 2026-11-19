@@ -11,7 +11,8 @@ type Outcome struct {
 	Skipped []string // the routes found unusable, in the order tried
 }
 
-// Run binds (op "bind", closing the listener after) or connects (op
+// Run binds (op "bind", leaving the listener open for the process's exit to
+// close) or connects (op
 // "connect", sending one byte "x" before closing) at path. Set by package
 // sockat when it is initialised.
 var Run func(op, path string) Outcome

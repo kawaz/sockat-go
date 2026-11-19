@@ -8,11 +8,14 @@ package sockat
 // <place>/sockat.XXXXXXXXXX/<name>, the symlink removed right after. The places
 // (anyBases: XDG_RUNTIME_DIR, TMPDIR, /tmp) that only the user can write to are
 // tried first, in order; then the shared ones (sticky, owned by root or the
-// user). What the route gave up comes back as the loss: none for the path
-// itself, respelled for any other route (the kernel keeps a spelling, not the
-// path) including symlink in a place of the user's own, shared-symlink for
-// symlink in a shared place (others can make the spelling name a directory
-// of theirs).
+// user). What the route gave up comes back as the losses, by SPEC's names:
+// none for the path itself; [respelled] for any other route (the kernel keeps
+// a spelling, not the path), symlink in a place of the user's own included;
+// [respelled, recreatable-spelling] for symlink in a shared place (others can
+// make the spelling name a directory of theirs). With them come the route
+// taken and the routes skipped before it, in the order tried; on a failure,
+// the route that bound and failed (none when every route was unusable) and
+// the routes skipped.
 //
 // The tests force "Listen ends in ENAMETOOLONG" with noMeansCfg: no thread cwd
 // and no /proc, so no route through D has a means. (Not on FreeBSD, where at
@@ -74,6 +77,13 @@ func skippedNames(t *testing.T, out anyOutcome) []route {
 	return names
 }
 
+// respelled and recreatable are the losses of symlink in a place of the
+// user's own and in a shared place, in SPEC's order.
+var (
+	respelled   = []string{lossRespelled}
+	recreatable = []string{lossRespelled, lossRecreatableSpelling}
+)
+
 // noMeansSkipped is what noMeansCfg makes the routes through D report as
 // unusable before symlink, in the order tried: thread-cwd (turned off) where
 // the system has it, then proc (no /proc) where it has that.
@@ -102,7 +112,7 @@ func assertReachable(t *testing.T, l *net.UnixListener, p string) {
 
 // Where Listen ends in ENAMETOOLONG (the premise, checked through runWith with
 // the same inputs), ListenAny binds through symlink in a place of the user's
-// own: the socket is at the path and reachable, the loss is respelled, the
+// own: the socket is at the path and reachable, the losses are [respelled], the
 // kernel keeps <place>/sockat.XXXXXXXXXX/<name> (gone by then), and the place
 // is empty afterwards.
 func TestListenAnyGoesThroughSymlinkWhereListenCannot(t *testing.T) {
@@ -115,8 +125,8 @@ func TestListenAnyGoesThroughSymlinkWhereListenCannot(t *testing.T) {
 
 	markUntouched(t, own)
 	l, got := listenAnyAt(t, p, cfg)
-	if got.loss != lossRespelled {
-		t.Fatalf("loss %d, want respelled (%d)", got.loss, lossRespelled)
+	if !slices.Equal(got.losses, respelled) {
+		t.Fatalf("losses %q, want %q", got.losses, respelled)
 	}
 	if got.route != routeSymlink || !slices.Equal(skippedNames(t, got), noMeansSkipped()) {
 		t.Fatalf("route %s after %v, want %s after %v", got.route, got.skipped, routeSymlink, noMeansSkipped())
@@ -134,15 +144,18 @@ func TestListenAnyGoesThroughSymlinkWhereListenCannot(t *testing.T) {
 }
 
 // With only a shared place (sticky, owned by the user or root), ListenAny
-// binds through symlink there, and the loss is shared-symlink. The place is
-// empty afterwards.
-func TestListenAnyInASharedPlaceIsSharedSymlink(t *testing.T) {
+// binds through symlink there, and the losses are [respelled,
+// recreatable-spelling]. The place is empty afterwards.
+func TestListenAnyInASharedPlaceIsRecreatableSpelling(t *testing.T) {
 	t.Parallel()
 	shared := sharedPlace(t)
 	p := nest(t, tmpDir(t), 600, "s.sock")
 	l, got := listenAnyAt(t, p, noMeansCfg(shared))
-	if got.loss != lossSharedSymlink {
-		t.Fatalf("loss %d, want shared-symlink (%d)", got.loss, lossSharedSymlink)
+	if !slices.Equal(got.losses, recreatable) {
+		t.Fatalf("losses %q, want %q", got.losses, recreatable)
+	}
+	if got.route != routeSymlink {
+		t.Fatalf("route %s", got.route)
 	}
 	assertEmpty(t, shared)
 	assertReachable(t, l, p)
@@ -160,19 +173,19 @@ func TestListenAnyTriesThePlacesOfTheUsersOwnFirstThenInOrder(t *testing.T) {
 		bases     []string
 		used      string
 		untouched []string
-		want      loss
+		want      []string
 	}{
-		{[]string{shared, own1}, own1, []string{shared}, lossRespelled},
-		{[]string{own1, own2, shared}, own1, []string{own2, shared}, lossRespelled},
-		{[]string{own2, own1}, own2, []string{own1}, lossRespelled},
+		{[]string{shared, own1}, own1, []string{shared}, respelled},
+		{[]string{own1, own2, shared}, own1, []string{own2, shared}, respelled},
+		{[]string{own2, own1}, own2, []string{own1}, respelled},
 	} {
 		p := fmt.Sprintf("%s/%d.sock", dir, i)
 		for _, b := range append([]string{c.used}, c.untouched...) {
 			markUntouched(t, b)
 		}
 		_, got := listenAnyAt(t, p, noMeansCfg(c.bases...))
-		if got.loss != c.want {
-			t.Fatalf("%d: loss %d, want %d", i, got.loss, c.want)
+		if !slices.Equal(got.losses, c.want) {
+			t.Fatalf("%d: losses %q, want %q", i, got.losses, c.want)
 		}
 		assertTouched(t, c.used)
 		assertEmpty(t, c.used)
@@ -193,8 +206,8 @@ func TestListenAnyPassesOverAPlaceTooLongForTheSpelling(t *testing.T) {
 	p := nest(t, tmpDir(t), 600, "s.sock")
 	markUntouched(t, long)
 	l, got := listenAnyAt(t, p, noMeansCfg(long, shared))
-	if got.loss != lossSharedSymlink {
-		t.Fatalf("loss %d, want shared-symlink", got.loss)
+	if !slices.Equal(got.losses, recreatable) {
+		t.Fatalf("losses %q, want %q", got.losses, recreatable)
 	}
 	assertUntouched(t, long)
 	assertEmpty(t, shared)
@@ -228,8 +241,13 @@ func TestListenAnyWithNoUsablePlaceIsListensENAMETOOLONG(t *testing.T) {
 		markUntouched(t, pl)
 	}
 	p := nest(t, tmpDir(t), 600, "s.sock")
-	_, _, err := listenAny(p, noMeansCfg(append([]string{"/nonexistent", file}, places...)...))
+	_, out, err := listenAny(p, noMeansCfg(append([]string{"/nonexistent", file}, places...)...))
 	wantOpError(t, "listen any", opListen, p, err, syscall.ENAMETOOLONG)
+	// No route bound, so none is named; every route tried, symlink last, is
+	// reported as skipped.
+	if want := append(noMeansSkipped(), routeSymlink); out.route != "" || !slices.Equal(skippedNames(t, out), want) {
+		t.Fatalf("outcome %+v, want no route after %v", out, want)
+	}
 	for _, pl := range places {
 		assertUntouched(t, pl)
 	}
@@ -259,8 +277,11 @@ func TestAListenAnyFailureThroughSymlinkIsReturnedAndNotRetried(t *testing.T) {
 		t.Fatal(err)
 	}
 	markUntouched(t, second)
-	_, _, err := listenAny(p, noMeansCfg(first, second))
+	_, out, err := listenAny(p, noMeansCfg(first, second))
 	wantOpError(t, "listen any on an existing file", opListen, p, err, syscall.EADDRINUSE)
+	if out.route != routeSymlink || !slices.Equal(skippedNames(t, out), noMeansSkipped()) {
+		t.Fatalf("outcome %+v, want symlink (the route that bound and failed) after %v", out, noMeansSkipped())
+	}
 	assertEmpty(t, first)
 	assertUntouched(t, second)
 
@@ -270,15 +291,25 @@ func TestAListenAnyFailureThroughSymlinkIsReturnedAndNotRetried(t *testing.T) {
 		cfg := centralCfg(tmpDir(t))
 		cfg.anyBases = []string{first}
 		markUntouched(t, first)
-		_, _, err := listenAny(p, cfg)
+		_, out, err := listenAny(p, cfg)
 		wantOpError(t, "listen any through D on an existing file", opListen, p, err, syscall.EADDRINUSE)
+		want := routeThreadCwd
+		if !threadCwdAvailable() {
+			want = routeProc
+		}
+		if out.route != want {
+			t.Fatalf("outcome %+v, want %s (the route that bound and failed)", out, want)
+		}
 		assertUntouched(t, first)
 	}
 
 	markUntouched(t, first)
 	missing := filepath.Dir(p) + "/nope/s.sock"
-	_, _, err = listenAny(missing, noMeansCfg(first, second))
+	_, out, err = listenAny(missing, noMeansCfg(first, second))
 	wantOpError(t, "listen any in a missing directory", opListen, missing, err, syscall.ENOENT)
+	if out.route != "" || len(out.skipped) != 0 {
+		t.Fatalf("outcome %+v, want nothing: the lookup fails before any route", out)
+	}
 	assertUntouched(t, first)
 	assertUntouched(t, second)
 }
@@ -287,13 +318,13 @@ func TestAListenAnyFailureThroughSymlinkIsReturnedAndNotRetried(t *testing.T) {
 // route's loss: none for a short path (the net package itself) and for an
 // abstract name, respelled for a long path through D. ListenAny's places are
 // not touched then.
-func TestListenAnyWhereListenReachesReportsThatRoutesLoss(t *testing.T) {
+func TestListenAnyWhereListenReachesReportsThatRoutesLosses(t *testing.T) {
 	t.Parallel()
 	own := ownPlace(t)
 	markUntouched(t, own)
 	short := tmpDir(t) + "/s.sock"
 	l, got := listenAnyAt(t, short, noMeansCfg(own))
-	if got.loss != lossNone || got.route != routeStandard || len(got.skipped) != 0 {
+	if len(got.losses) != 0 || got.route != routeStandard || len(got.skipped) != 0 {
 		t.Fatalf("a short path: %+v, want none through standard, nothing skipped", got)
 	}
 	assertReachable(t, l, short)
@@ -308,7 +339,7 @@ func TestListenAnyWhereListenReachesReportsThatRoutesLoss(t *testing.T) {
 		if !threadCwdAvailable() {
 			wantRoute, wantSkipped = routeProc, []route{routeThreadCwd}
 		}
-		if got.loss != lossRespelled || got.route != wantRoute || !slices.Equal(skippedNames(t, got), wantSkipped) {
+		if !slices.Equal(got.losses, respelled) || got.route != wantRoute || !slices.Equal(skippedNames(t, got), wantSkipped) {
 			t.Fatalf("a long path through D: %+v, want respelled through %s after %v", got, wantRoute, wantSkipped)
 		}
 		assertReachable(t, l, p)
@@ -327,7 +358,7 @@ func TestListenAnyWhereListenReachesReportsThatRoutesLoss(t *testing.T) {
 	if abstractNames {
 		name := "@sockat-any-" + t.Name()
 		l, got := listenAnyAt(t, name, noMeansCfg(own))
-		if got.loss != lossNone || got.route != routeStandard {
+		if len(got.losses) != 0 || got.route != routeStandard {
 			t.Fatalf("an abstract name: %+v, want none through standard", got)
 		}
 		assertReachable(t, l, name)
@@ -335,17 +366,40 @@ func TestListenAnyWhereListenReachesReportsThatRoutesLoss(t *testing.T) {
 	assertUntouched(t, own)
 }
 
-// The losses of the routes: the path itself gives up nothing; every other
-// route of Listen gives up the path as the address the kernel keeps.
-func TestTheLossOfEachRoute(t *testing.T) {
+// What each route of Listen gives up (SPEC "失うもの", by its names):
+//
+//   - standard: nothing for an absolute path; cwd-relative for a relative
+//     one (the kernel keeps it as given, to be resolved against whatever the
+//     cwd is later); nothing for an abstract name, which is no path (on
+//     Linux; elsewhere "@x" is a relative path like any other);
+//   - every other route: respelled (the kernel keeps a spelling, not the
+//     path), whether the path was absolute or relative.
+func TestTheLossesOfEachRoute(t *testing.T) {
 	t.Parallel()
-	if lossOf(routeStandard) != lossNone {
-		t.Error("standard: want none")
+	if got := lossesOf(routeStandard, "/tmp/s.sock"); len(got) != 0 {
+		t.Errorf("standard, an absolute path: %q, want none", got)
+	}
+	for _, rel := range []string{"s.sock", "d/s.sock", "./s.sock", "../s.sock"} {
+		if got := lossesOf(routeStandard, rel); !slices.Equal(got, []string{lossCwdRelative}) {
+			t.Errorf("standard, %q: %q, want [cwd-relative]", rel, got)
+		}
+	}
+	at := lossesOf(routeStandard, "@sockat")
+	if abstractNames && len(at) != 0 {
+		t.Errorf("standard, an abstract name: %q, want none", at)
+	}
+	if !abstractNames && !slices.Equal(at, []string{lossCwdRelative}) {
+		t.Errorf("standard, \"@sockat\" (a relative path here): %q, want [cwd-relative]", at)
 	}
 	for _, r := range []route{routeThreadCwd, routeProc, routeAt, routeThreadCwdSockdir, routeProcSockdir, routeAtSockdir} {
-		if lossOf(r) != lossRespelled {
-			t.Errorf("%s: want respelled", r)
+		for _, p := range []string{"/tmp/s.sock", "d/s.sock"} {
+			if got := lossesOf(r, p); !slices.Equal(got, respelled) {
+				t.Errorf("%s, %q: %q, want %q", r, p, got, respelled)
+			}
 		}
+	}
+	if lossRespelled != "respelled" || lossRecreatableSpelling != "recreatable-spelling" || lossCwdRelative != "cwd-relative" {
+		t.Errorf("names %q, %q, %q: want SPEC's", lossRespelled, lossRecreatableSpelling, lossCwdRelative)
 	}
 }
 

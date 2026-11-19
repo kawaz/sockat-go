@@ -1,8 +1,9 @@
 package atanycost_test
 
 // The public face of ListenAny: atanycost.Listen returns the net package's
-// listener and a Result: the Level of what the route gave up, the Route taken
-// and the routes Skipped before it (both for diagnostics). The routes
+// listener and a Result: the Losses of the route (SPEC's names), the Route
+// taken and the routes Skipped before it (both for diagnostics); a failure is
+// an *atanycost.Error. The routes
 // themselves are forced and checked in package sockat (anyroute_test.go);
 // here, what the public API reports in the real environment.
 
@@ -10,6 +11,8 @@ import (
 	"errors"
 	"net"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -63,58 +66,132 @@ func talk(t *testing.T, l *net.UnixListener, p string) {
 	}
 }
 
-// The names of the levels, for messages and logs; a value not known (one
-// added later) reads as "unknown" rather than a wrong name.
-func TestLevelString(t *testing.T) {
+// The losses are named as SPEC names them ("失うもの"); their strings are those
+// names, so they can be compared with the other implementations and logged.
+func TestLossesAreSPECsNames(t *testing.T) {
 	t.Parallel()
-	for l, want := range map[atanycost.Level]string{
-		atanycost.None:          "none",
-		atanycost.Respelled:     "respelled",
-		atanycost.Forked:        "forked",
-		atanycost.SharedSymlink: "shared-symlink",
-		atanycost.Level(99):     "unknown",
+	for l, want := range map[atanycost.Loss]string{
+		atanycost.Respelled:           "respelled",
+		atanycost.Forked:              "forked",
+		atanycost.RecreatableSpelling: "recreatable-spelling",
+		atanycost.CwdRelative:         "cwd-relative",
 	} {
-		if got := l.String(); got != want {
-			t.Errorf("%d: %q, want %q", int(l), got, want)
+		if string(l) != want {
+			t.Errorf("%q, want %q", string(l), want)
 		}
 	}
 }
 
-// A short path is the net package's own: Level None, Route "standard",
-// nothing skipped, and the listener works. A long path that Listen reaches
-// here goes through D: Level Respelled, Route one of the routes through D. A
-// failure is the error alone, with an empty Result.
-func TestListenReportsTheLevelAndRoute(t *testing.T) {
+// Has tells whether a loss is among a Result's losses, whatever their order;
+// a Result with no losses has none.
+func TestResultHas(t *testing.T) {
+	t.Parallel()
+	r := atanycost.Result{Losses: []atanycost.Loss{atanycost.Respelled, atanycost.RecreatableSpelling}}
+	if !r.Has(atanycost.Respelled) || !r.Has(atanycost.RecreatableSpelling) || r.Has(atanycost.Forked) {
+		t.Fatalf("%+v", r)
+	}
+	if (atanycost.Result{}).Has(atanycost.Respelled) || (atanycost.Result{Losses: []atanycost.Loss{}}).Has(atanycost.Respelled) {
+		t.Fatal("an empty Result has a loss")
+	}
+}
+
+// losses is a Result's losses as strings, in order.
+func losses(r atanycost.Result) []string {
+	var out []string
+	for _, l := range r.Losses {
+		out = append(out, string(l))
+	}
+	return out
+}
+
+// A short path is the net package's own: no losses (an empty list, not nil),
+// Route "standard", nothing skipped, and the listener works. A long path that
+// Listen reaches here goes through D: [respelled], Route one of the routes
+// through D.
+func TestListenReportsTheLossesAndTheRoute(t *testing.T) {
 	t.Parallel()
 	short := tmpDir(t) + "/s.sock"
 	l, res, err := atanycost.Listen(short)
-	if err != nil || res.Level != atanycost.None || res.Route != "standard" || len(res.Skipped) != 0 {
+	if err != nil || res.Losses == nil || len(res.Losses) != 0 || res.Has(atanycost.Respelled) || res.Route != "standard" || len(res.Skipped) != 0 {
 		t.Fatalf("a short path: %+v, %v", res, err)
 	}
 	talk(t, l, short)
 	l.Close()
 
+	if !longListen() {
+		return
+	}
+	p := deep(t, "s.sock")
+	l, res, err = atanycost.Listen(p)
+	if err != nil || strings.Join(losses(res), ",") != "respelled" || !res.Has(atanycost.Respelled) || res.Has(atanycost.RecreatableSpelling) {
+		t.Fatalf("a long path: %+v, %v", res, err)
+	}
+	switch res.Route {
+	case "thread-cwd", "proc", "at":
+	default:
+		t.Fatalf("a long path: route %q, want one through D", res.Route)
+	}
+	talk(t, l, p)
+	l.Close()
+}
+
+// longListen: a listen of a long path has a route through D here.
+func longListen() bool {
 	switch runtime.GOOS {
 	case "linux", "darwin", "freebsd":
-		p := deep(t, "s.sock")
-		l, res, err := atanycost.Listen(p)
-		if err != nil || res.Level != atanycost.Respelled {
-			t.Fatalf("a long path: %+v, %v", res, err)
+		return true
+	}
+	return false
+}
+
+// A failure is an *atanycost.Error with no listener and an empty Result. It
+// wraps the net package's *net.OpError, so errors.Is reaches the errno and
+// errors.As the *net.OpError. Its Route is the route that bound and failed:
+//
+//   - a missing directory: ENOENT from the lookup before any route; no Route,
+//     nothing skipped;
+//   - a file already at a long path: EADDRINUSE from the route through D that
+//     bound (where a listen has one);
+//   - a 254-byte file name: ENAMETOOLONG, every route unusable, so no Route,
+//     and the routes skipped end with symlink, the last tried.
+func TestAFailureIsAnErrorWithTheRouteThatFailed(t *testing.T) {
+	t.Parallel()
+	check := func(what, path string, errno syscall.Errno) *atanycost.Error {
+		t.Helper()
+		l, res, err := atanycost.Listen(path)
+		var ae *atanycost.Error
+		var oe *net.OpError
+		if l != nil || !errors.As(err, &ae) || !errors.Is(err, errno) || !errors.As(err, &oe) || oe.Addr.String() != path {
+			t.Fatalf("%s: %v, %T %v", what, l, err, err)
 		}
-		switch res.Route {
-		case "thread-cwd", "proc", "at":
-		default:
-			t.Fatalf("a long path: route %q, want one through D", res.Route)
+		if res.Losses != nil || res.Route != "" || res.Skipped != nil {
+			t.Fatalf("%s: a Result %+v beside the error", what, res)
 		}
-		talk(t, l, p)
-		l.Close()
+		return ae
+	}
+	ae := check("a missing directory", tmpDir(t)+"/nope/"+strings.Repeat("n", 200), syscall.ENOENT)
+	if ae.Route != "" || len(ae.Skipped) != 0 {
+		t.Fatalf("a missing directory: %+v", ae)
 	}
 
-	missing := tmpDir(t) + "/nope/" + strings.Repeat("n", 200)
-	l, res, err = atanycost.Listen(missing)
-	var oe *net.OpError
-	if !errors.Is(err, syscall.ENOENT) || !errors.As(err, &oe) || l != nil || res.Level != 0 || res.Route != "" || res.Skipped != nil {
-		t.Fatalf("a missing directory: %v, %v, %v", l, res, err)
+	if longListen() {
+		p := deep(t, "s.sock")
+		l, _, err := atanycost.Listen(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer l.Close()
+		ae = check("an existing socket", p, syscall.EADDRINUSE)
+		switch ae.Route {
+		case "thread-cwd", "proc", "at":
+		default:
+			t.Fatalf("an existing socket: route %q, want the route through D that bound", ae.Route)
+		}
+	}
+
+	ae = check("a 254-byte name", tmpDir(t)+"/"+strings.Repeat("n", 254), syscall.ENAMETOOLONG)
+	if ae.Route != "" || len(ae.Skipped) == 0 || ae.Skipped[len(ae.Skipped)-1].Name != "symlink" {
+		t.Fatalf("a 254-byte name: %+v, want no route and symlink skipped last", ae)
 	}
 }
 
@@ -122,10 +199,11 @@ func TestListenReportsTheLevelAndRoute(t *testing.T) {
 // thread cwd: Docker's default profile), an 82-byte file name does not fit
 // proc (/proc/self/fd/<n>/ and R/), so Listen is ENAMETOOLONG; ListenAny
 // binds through symlink in /tmp (sticky, shared: TMPDIR and XDG_RUNTIME_DIR
-// unset there) with Level SharedSymlink, and /tmp keeps nothing of it. The
+// unset there) with the losses [respelled, recreatable-spelling], and /tmp
+// keeps nothing of it. The
 // routes skipped come in the order SPEC tries them: thread-cwd (the filter),
 // then proc (too long); D is never made, so no -sockdir route is tried.
-func TestUnderASeccompFilterAnEightyTwoByteNameIsSharedSymlink(t *testing.T) {
+func TestUnderASeccompFilterAnEightyTwoByteNameIsRecreatableSpelling(t *testing.T) {
 	t.Parallel()
 	if !seccompFiltered() {
 		t.Skip("no seccomp filter here; run on Linux under Docker's default profile")
@@ -136,7 +214,7 @@ func TestUnderASeccompFilterAnEightyTwoByteNameIsSharedSymlink(t *testing.T) {
 	p := deep(t, strings.Repeat("n", 82))
 	before, _ := os.ReadDir("/tmp")
 	l, res, err := atanycost.Listen(p)
-	if err != nil || res.Level != atanycost.SharedSymlink || res.Route != "symlink" {
+	if err != nil || strings.Join(losses(res), ",") != "respelled,recreatable-spelling" || res.Route != "symlink" {
 		t.Fatalf("%+v, %v", res, err)
 	}
 	var names []string
@@ -152,10 +230,20 @@ func TestUnderASeccompFilterAnEightyTwoByteNameIsSharedSymlink(t *testing.T) {
 	t.Logf("skipped: %+v", res.Skipped)
 	defer l.Close()
 	talk(t, l, p)
+	// Other tests (other packages too) make and remove sockat.* entries in
+	// /tmp at the same time, so only a symlink of ours is looked for: one
+	// pointing to the socket's directory.
+	real, err := filepath.EvalSymlinks(filepath.Dir(p))
+	if err != nil {
+		t.Fatal(err)
+	}
 	after, _ := os.ReadDir("/tmp")
 	for _, e := range after {
-		if strings.HasPrefix(e.Name(), "sockat.") && !contains(before, e.Name()) {
-			t.Fatalf("left in /tmp: %s", e.Name())
+		if !strings.HasPrefix(e.Name(), "sockat.") || contains(before, e.Name()) {
+			continue
+		}
+		if to, err := os.Readlink("/tmp/" + e.Name()); err == nil && to == real {
+			t.Fatalf("left in /tmp: %s -> %s", e.Name(), to)
 		}
 	}
 }
@@ -167,4 +255,56 @@ func contains(es []os.DirEntry, name string) bool {
 		}
 	}
 	return false
+}
+
+// A relative path that the standard library takes as it is (short) leaves the
+// kernel a path relative to the cwd: Losses [cwd-relative], Route "standard".
+// A relative path long enough to go through D is respelled only: the kernel
+// keeps R/<name>, not the relative path. An absolute short path loses nothing
+// (TestListenReportsTheLossesAndTheRoute), nor does an abstract name (Linux),
+// which is no path. The relative paths need a chosen cwd, which belongs to the
+// whole process: they run in a child whose cwd is a temporary directory.
+func TestARelativePathTakenAsItIsIsCwdRelative(t *testing.T) {
+	t.Parallel()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestChildRelativePaths$", "-test.v", "-test.count=1")
+	cmd.Dir = tmpDir(t)
+	cmd.Env = append(os.Environ(), "SOCKAT_ANY_CHILD=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "--- PASS: TestChildRelativePaths") {
+		t.Fatalf("child: %v\n%s", err, out)
+	}
+
+	if runtime.GOOS == "linux" {
+		l, res, err := atanycost.Listen("@sockat-any-" + t.Name())
+		if err != nil || len(res.Losses) != 0 || res.Route != "standard" {
+			t.Fatalf("an abstract name: %+v, %v", res, err)
+		}
+		l.Close()
+	}
+}
+
+func TestChildRelativePaths(t *testing.T) {
+	if os.Getenv("SOCKAT_ANY_CHILD") == "" {
+		t.Skip("runs only in a child process started by another test")
+	}
+	l, res, err := atanycost.Listen("s.sock")
+	if err != nil || strings.Join(losses(res), ",") != "cwd-relative" || !res.Has(atanycost.CwdRelative) || res.Route != "standard" {
+		t.Fatalf("a short relative path: %+v, %v", res, err)
+	}
+	l.Close()
+	if !longListen() {
+		return
+	}
+	rel := strings.Repeat("d", 60) + "/" + strings.Repeat("d", 60)
+	if err := os.MkdirAll(rel, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	l, res, err = atanycost.Listen(rel + "/s.sock")
+	if err != nil || strings.Join(losses(res), ",") != "respelled" || res.Has(atanycost.CwdRelative) {
+		t.Fatalf("a long relative path: %+v, %v", res, err)
+	}
+	if fi, err := os.Lstat(rel + "/s.sock"); err != nil || fi.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("no socket at the relative path: %v", err)
+	}
+	l.Close()
 }

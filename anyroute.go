@@ -13,40 +13,44 @@ import (
 func init() {
 	anyhook.Listen = func(path string) (*net.UnixListener, anyhook.Outcome, error) {
 		ep, out, err := listenAny(path, nil)
-		if err != nil {
-			return nil, anyhook.Outcome{}, err
-		}
-		o := anyhook.Outcome{Level: int(out.loss), Route: string(out.route)}
+		o := anyhook.Outcome{Losses: out.losses, Route: string(out.route)}
 		for _, s := range out.skipped {
 			o.Skipped = append(o.Skipped, anyhook.Skip{Name: string(s.name), Reason: s.reason})
+		}
+		if err != nil {
+			return nil, o, err
 		}
 		return ep.(*net.UnixListener), o, nil
 	}
 }
 
-// loss is what a route gave up compared with the standard library (SPEC
-// "失ったものの段階"); atanycost.Loss mirrors the values.
-type loss int
-
+// The names of what a route gives up compared with the standard library
+// (SPEC "失うもの"); atanycost.Loss has the same values.
 const (
-	lossNone          loss = iota // the standard library itself
-	lossRespelled                 // the kernel keeps a spelling, not the path
-	lossForked                    // and a fork's side effects (no fork route in Go)
-	lossSharedSymlink             // and others can make the spelling again
+	lossRespelled           = "respelled"            // the kernel keeps a spelling, not the path
+	lossRecreatableSpelling = "recreatable-spelling" // the spelling goes through a shared place
+	lossCwdRelative         = "cwd-relative"         // the kernel keeps a path relative to the cwd
 )
 
-// lossOf is the loss of a route other than ListenAny's symlink.
-func lossOf(r route) loss {
+// lossesOf is what a bind of path through r gave up: for standard, nothing,
+// or cwd-relative when path is relative (the kernel keeps it as given, to be
+// resolved against whatever the cwd is later; an abstract name is no path);
+// respelled for the others (a shared symlink is told apart by listenAny).
+func lossesOf(r route, path string) []string {
 	if r == routeStandard {
-		return lossNone
+		if !isAbs(path) && !abstractName(path) {
+			return []string{lossCwdRelative}
+		}
+		return nil
 	}
-	return lossRespelled
+	return []string{lossRespelled}
 }
 
-// anyOutcome is what listenAny reports beside the listener: the loss, the
-// route taken and the routes tried and found unusable before it.
+// anyOutcome is what listenAny reports: on success the losses, the route
+// taken and the routes tried and found unusable before it; on failure the
+// route that bound and failed (if any) and the routes found unusable.
 type anyOutcome struct {
-	loss    loss
+	losses  []string
 	route   route
 	skipped []skipped
 }
@@ -61,21 +65,21 @@ func listenAny(path string, cfg *config) (endpoint, anyOutcome, error) {
 	c.trace = &trace{}
 	ep, r, err := runWith(opListen, path, &c)
 	if err == nil {
-		return ep, anyOutcome{lossOf(r), r, c.trace.skipped}, nil
+		return ep, anyOutcome{lossesOf(r, path), r, c.trace.skipped}, nil
 	}
 	if !errors.Is(err, syscall.ENAMETOOLONG) || len(path) <= directMax || abstractName(path) {
-		return nil, anyOutcome{}, err
+		return nil, anyOutcome{route: r, skipped: c.trace.skipped}, err
 	}
 	ep, shared, err2 := symlinkBind(path, &c)
 	switch {
 	case errors.Is(err2, errUnusable):
-		return nil, anyOutcome{}, err
+		return nil, anyOutcome{skipped: c.trace.skipped}, err
 	case err2 != nil:
-		return nil, anyOutcome{}, opError(opListen, path, err2)
+		return nil, anyOutcome{route: routeSymlink, skipped: c.trace.skipped}, opError(opListen, path, err2)
 	case shared:
-		return ep, anyOutcome{lossSharedSymlink, routeSymlink, c.trace.skipped}, nil
+		return ep, anyOutcome{[]string{lossRespelled, lossRecreatableSpelling}, routeSymlink, c.trace.skipped}, nil
 	default:
-		return ep, anyOutcome{lossRespelled, routeSymlink, c.trace.skipped}, nil
+		return ep, anyOutcome{[]string{lossRespelled}, routeSymlink, c.trace.skipped}, nil
 	}
 }
 

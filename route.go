@@ -113,7 +113,7 @@ func runWith(o op, path string, cfg *config) (endpoint, route, error) {
 	}
 	ep, r, err := runLong(o, path, cfg)
 	if err != nil {
-		return nil, "", opError(o, path, err)
+		return nil, r, opError(o, path, err)
 	}
 	return ep, r, nil
 }

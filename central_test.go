@@ -1048,7 +1048,7 @@ func TestChildUnopenableD(t *testing.T) {
 	if runtime.GOOS == "darwin" {
 		wantSkipped = []route{routeThreadCwd}
 	}
-	if out.route != listenWant || out.loss != lossRespelled || !slices.Equal(names, wantSkipped) {
+	if out.route != listenWant || !slices.Equal(out.losses, []string{lossRespelled}) || !slices.Equal(names, wantSkipped) {
 		t.Fatalf("listen any: %+v, want %s after %v", out, listenWant, wantSkipped)
 	}
 	l.Close()

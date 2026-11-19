@@ -94,6 +94,9 @@ func centralRoute(o op, dir string, sdir *os.File, name string, cfg *config) (en
 	ep, r, err := throughD(o, sdir, real, name, thread, proc, cfg)
 	if errors.Is(err, errNoD) {
 		if o == opListen {
+			// The routes through D were tried and found unusable, fork
+			// (which Go cannot make) among them; then the form without D.
+			cfg.trace.add(routeFork, noForkRoute)
 			ep, r, err = withoutD(o, sdir, real, name, thread, proc, cfg)
 			if errors.Is(err, errUnusable) {
 				cfg.trace.add(routeForkSockdir, noForkRoute)

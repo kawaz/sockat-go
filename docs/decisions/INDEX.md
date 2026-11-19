@@ -25,7 +25,7 @@ Status は各 DR ファイルの `Status:` 行が正本。
 | [DR-0011](DR-0011-central-route.md) | ✅ 実装済 | 長いパスは自分専用のディレクトリ D と乱数の symlink R を通す。Listen は symlink-file の次に D を通す経路 (と D 無しの形)。D は 1 回の呼び出しで 1 度だけ作る |
 | [DR-0013](DR-0013-connect-order.md) | ✅ 実装済 | Dial は OS ごとの「connect の順」(書き込みもスレッドも要らない経路を先に) で試し、D を使う経路は D を共有する。proc-held は D に置く |
 | [DR-0014](DR-0014-ex-last-resort-and-diagnostics.md) | ✅ 実装済 | `ListenEx` / `DialEx` は最終手段を使うかを `LastResort` で受け取り、失ったもの・通った経路・飛ばした経路を `Result` で、失敗は `*RouteError` で返す。Listen の最終手段は symlink-dir、Dial の最終手段 (fork-cwd-direct) は作れず飛ばす |
-| [DR-0015](DR-0015-listen-through-file-symlink.md) | ✅ 実装済 | Listen は Linux / Android 以外で standard の次に symlink-file を試す (bind が失敗して元のパスに物が無ければ次へ) |
+| [DR-0015](DR-0015-listen-through-file-symlink.md) | ✅ 実装済 | Listen は bind が symlink を辿る OS (macOS・NetBSD・実測していない OS) で standard の次に symlink-file を試す (bind が失敗して元のパスに物が無ければ次へ) |
 
 言語によらない振る舞いの正本は [ハブの SPEC](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md)。
 

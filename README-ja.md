@@ -167,13 +167,14 @@ if res.Has(sockat.RecreatableSpelling) {
 | Linux / Android (`/proc` を使える) | thread-cwd → proc | proc-direct → thread-cwd → proc → proc-held → symlink-file |
 | Linux / Android (`/proc` を使えない) | thread-cwd | relative → thread-cwd → symlink-file |
 | macOS | symlink-file → thread-cwd | relative → (widened は無い) → thread-cwd → symlink-file |
-| FreeBSD | symlink-file → at (bindat) | at-direct → at (connectat) |
-| NetBSD / OpenBSD / illumos / その他の Unix | symlink-file だけ | relative → symlink-file |
+| FreeBSD | at (bindat) | at-direct → at (connectat) |
+| NetBSD / その他の Unix | symlink-file だけ | relative → symlink-file |
+| OpenBSD / illumos | なし | relative → symlink-file |
 | Windows | 対象外 | 対象外 |
 
 Listen:
 
-- **symlink-file** (Linux / Android 以外): `TMPDIR` か `/tmp` の、他人が差し替えられない置き場に、元のパスのソケットのファイルを指す短い symlink `sockat.XXXXXXXXXX` を作ってその綴りで bind し、すぐ消す。bind が最後の要素の symlink を辿る OS (macOS) では元のパスにソケットができ、綴りにファイル名が出ないのでファイル名の長さによらず届く。辿らない OS では bind が失敗するので、元のパスに物が無ければ次の経路へ進む (物があればそのエラー)。Linux は辿らないので試さない。FreeBSD・NetBSD・OpenBSD・illumos は辿るか未確認で、実行時に見分ける
+- **symlink-file** (bind が最後の要素の symlink を辿る OS): `TMPDIR` か `/tmp` の、他人が差し替えられない置き場に、元のパスのソケットのファイルを指す短い symlink `sockat.XXXXXXXXXX` を作ってその綴りで bind し、すぐ消す。元のパスにソケットができ、綴りにファイル名が出ないのでファイル名の長さによらず届く。辿ると実測したのは macOS と NetBSD で、辿らないと実測した Linux / Android・FreeBSD・OpenBSD・illumos では試さない。どちらとも分からない OS では実行時に見分け、bind が失敗して元のパスに物が無ければ次の経路へ進む (物があればそのエラー)
 - **D を通す経路**: 自分専用のディレクトリ D を作って fd で掴み、その中にソケットのディレクトリを指す乱数の名前の symlink R を作り、D を基準に `R/<ファイル名>` で bind する。終わったら R と D を消す
   - **thread-cwd**: OS スレッドに固定した使い捨ての goroutine で、そのスレッドだけ cwd を D に移し、`R/<ファイル名>` で渡す。スレッドは使い終わったら捨てる (Unlock せずに goroutine を終える)。Linux は `unshare(CLONE_FS)` (seccomp の filter が掛かった環境では使わない。docker の既定等)、macOS は `__pthread_fchdir`
   - **proc**: `/proc/self/fd/<D の fd>/R/<ファイル名>` で渡す。スレッドを使わない
@@ -202,7 +203,8 @@ D は 1 回の呼び出しで 1 度だけ作り、D を使う経路で共有す�
 
 **fork が無いので、次の環境では長いパスの Listen が `ENAMETOOLONG` になる:**
 
-- **NetBSD / OpenBSD / illumos** で bind が symlink を辿らない時: D を通す経路の手段 (thread-cwd、proc、at) が無い
+- **OpenBSD / illumos**: D を通す経路の手段 (thread-cwd、proc、at) が無く、bind が symlink を辿らない
+- **NetBSD**: symlink-file の置き場 (`TMPDIR`・`/tmp`) が無い環境
 - Linux で seccomp の filter が掛かり `/proc` も無い環境
 - macOS で `__pthread_fchdir` が使えず、symlink-file の置き場 (`TMPDIR`・`/tmp`) も無い環境
 
@@ -218,10 +220,10 @@ D は 1 回の呼び出しで 1 度だけ作り、D を使う経路で共有す�
 | Linux (`/proc` 無し) | ファイル名 > 96。seccomp の filter が掛かった環境では全部 | thread-cwd が使えず (ファイル名 > 96 かスレッド cwd が使えない)、相対パス > 107 で、symlink-file も使えない時 |
 | macOS | 届く (symlink-file)。symlink-file の置き場が無い時はファイル名 > 92 | thread-cwd が使えず (ファイル名 > 92 かスレッド cwd が使えない)、相対パス > 103 で、symlink-file も使えない時 |
 | FreeBSD | ファイル名 > 92 | ファイル名 > 103 |
-| NetBSD / OpenBSD | 全部 | 相対パス > 103 で symlink-file も使えない時 |
+| NetBSD | 届く (symlink-file)。symlink-file の置き場が無い時は全部 | 相対パス > 103 で symlink-file も使えない時 |
+| OpenBSD | 全部 | 相対パス > 103 で symlink-file も使えない時 |
 | illumos | 全部 | 相対パス > 107 で symlink-file も使えない時 |
 
-- Listen の欄で symlink-file を数えているのは macOS だけ。FreeBSD・NetBSD・OpenBSD・illumos は bind が symlink を辿るか未確認で、欄は数えていない (辿れば、symlink-file の置き場がある時はファイル名によらず届く)
 - `/proc` のある Linux で D を作れる時と、FreeBSD 以外で `/tmp` に symlink を作れる普通の環境では、Dial はディレクトリの深さにもファイル名の長さにもよらず届く。D をどこにも作れない時、Dial は D を使わない経路 (proc-direct、relative、at-direct、symlink-file) の分だけ届く
 - パス全体が `PATH_MAX` (macOS 1024、Linux 4096 バイト) を超えるパスは、他のシステムコールでも開けないので sockat の責務外で、`ENAMETOOLONG` になる
 

@@ -111,6 +111,7 @@ const dOpenFlagsRetry = 0
 // hasProc: no /proc routes here.
 const hasProc = false
 
-// listenTriesSymlinkFile: a listen tries symlink-file after standard; whether
-// a bind follows the symlink is told at run time (symlinkFile).
-const listenTriesSymlinkFile = true
+// listenTriesSymlinkFile: a bind here does not follow a symlink in the last
+// component (measured, SPEC "試す順番"), so a listen never tries
+// symlink-file.
+const listenTriesSymlinkFile = false

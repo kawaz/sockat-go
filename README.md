@@ -167,13 +167,14 @@ A longer path goes through the routes that make a short spelling ([the specifica
 | Linux / Android (`/proc` usable) | thread-cwd → proc | proc-direct → thread-cwd → proc → proc-held → symlink-file |
 | Linux / Android (`/proc` not usable) | thread-cwd | relative → thread-cwd → symlink-file |
 | macOS | symlink-file → thread-cwd | relative → (no widened) → thread-cwd → symlink-file |
-| FreeBSD | symlink-file → at (bindat) | at-direct → at (connectat) |
-| NetBSD / OpenBSD / illumos / other Unix | symlink-file only | relative → symlink-file |
+| FreeBSD | at (bindat) | at-direct → at (connectat) |
+| NetBSD / other Unix | symlink-file only | relative → symlink-file |
+| OpenBSD / illumos | none | relative → symlink-file |
 | Windows | not supported | not supported |
 
 Listen:
 
-- **symlink-file** (not on Linux / Android): create a short symlink `sockat.XXXXXXXXXX` to the socket file at the path passed, in `TMPDIR` or `/tmp` where no other user can replace it, bind by it, and remove it right away. On a system whose bind follows a symlink in the last component (macOS), the socket is made at the path, and since the file name is not in the spelling, a file name of any length is reached. On a system whose bind does not follow it, the bind fails; with nothing at the path, the next route is tried (with something there, that error is returned). Linux does not follow it, so it is not tried there. Whether FreeBSD, NetBSD, OpenBSD and illumos follow it is not known; it is told at run time
+- **symlink-file** (where the bind follows a symlink in the last component): create a short symlink `sockat.XXXXXXXXXX` to the socket file at the path passed, in `TMPDIR` or `/tmp` where no other user can replace it, bind by it, and remove it right away. The socket is made at the path, and since the file name is not in the spelling, a file name of any length is reached. macOS and NetBSD were measured to follow it; Linux / Android, FreeBSD, OpenBSD and illumos were measured not to, and do not try it. On a system not measured it is told at run time: when the bind fails with nothing at the path, the next route is tried (with something there, that error is returned)
 - **The routes through D**: make a directory D of sockat's own, held by its fd, with a symlink R of a random name in it pointing to the socket's directory, and bind by `R/<file name>` relative to D. R and D are removed afterwards
   - **thread-cwd**: a throwaway goroutine locked to its OS thread moves that thread's cwd (and no other's) into D and passes `R/<file name>`; the thread is then discarded (the goroutine ends without unlocking). Linux uses `unshare(CLONE_FS)` (not under a seccomp filter, such as Docker's default), macOS `__pthread_fchdir`
   - **proc**: pass `/proc/self/fd/<D's fd>/R/<file name>`, without a thread
@@ -202,7 +203,8 @@ No route changes the process's cwd or the calling thread's, so any goroutine may
 
 **Without fork, Listen gets `ENAMETOOLONG` for a long path here:**
 
-- **NetBSD / OpenBSD / illumos** where the bind does not follow a symlink: there is no means for the routes through D (thread-cwd, proc, at)
+- **OpenBSD / illumos**: there is no means for the routes through D (thread-cwd, proc, at), and the bind does not follow a symlink
+- **NetBSD** with no place for symlink-file (`TMPDIR`, `/tmp`)
 - Linux under a seccomp filter without `/proc`
 - macOS where `__pthread_fchdir` cannot be used and there is no place for symlink-file (`TMPDIR`, `/tmp`)
 
@@ -218,10 +220,10 @@ When a path over the limit gets `ENAMETOOLONG` (with the directory there and D c
 | Linux (without `/proc`) | file name > 96. Under a seccomp filter every long path | thread-cwd cannot be used (file name > 96, or no thread cwd), the relative path > 107 and symlink-file cannot be used |
 | macOS | reached (symlink-file). With no place for symlink-file, file name > 92 | thread-cwd cannot be used (file name > 92, or no thread cwd), the relative path > 103 and symlink-file cannot be used |
 | FreeBSD | file name > 92 | file name > 103 |
-| NetBSD / OpenBSD | every long path | relative path > 103 and symlink-file cannot be used |
+| NetBSD | reached (symlink-file). With no place for symlink-file, every long path | relative path > 103 and symlink-file cannot be used |
+| OpenBSD | every long path | relative path > 103 and symlink-file cannot be used |
 | illumos | every long path | relative path > 107 and symlink-file cannot be used |
 
-- Only macOS counts symlink-file in the Listen column. Whether the bind follows a symlink on FreeBSD, NetBSD, OpenBSD and illumos is not known, and their column does not count it (where it does, a file name of any length is reached while there is a place for symlink-file)
 - On Linux with `/proc` where D can be made, and outside FreeBSD in an ordinary environment where a symlink can be made in `/tmp`, Dial reaches a path whatever the directory depth and the file name length. When D can be made nowhere, Dial reaches what the routes without D (proc-direct, relative, at-direct, symlink-file) reach
 - A path longer than `PATH_MAX` (1024 bytes on macOS, 4096 on Linux) cannot be opened by any other system call either; it is outside what sockat handles and gets `ENAMETOOLONG`
 

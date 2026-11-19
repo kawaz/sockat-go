@@ -27,21 +27,29 @@ func symlinkFileCfg(place, dBase string) *config {
 	return &config{dBases: []string{dBase}, tmpBases: []string{place}, procSelfFD: "/proc/self/fd", threadCwd: true}
 }
 
-// SPEC's premise, pinned where it was observed: macOS's bind(2) follows a
-// symlink in the last component to a path where nothing is yet, Linux's does
-// not. Elsewhere it is only reported; the tests below follow what the kernel
-// does there.
+// SPEC's premise, pinned where it was measured (SPEC "試す順番"): the bind(2)
+// of macOS and NetBSD follows a symlink in the last component to a path where
+// nothing is yet; that of Linux, FreeBSD, OpenBSD and illumos does not, and a
+// listen there never tries symlink-file (listenTriesSymlinkFile), so a kernel
+// that changed would go unnoticed but for this test. Elsewhere it is only
+// reported; the tests below follow what the kernel does there.
 func TestWhetherABindFollowsASymlinkIsAsObserved(t *testing.T) {
 	t.Parallel()
 	got := bindFollowsSymlink()
 	switch runtime.GOOS {
-	case "darwin":
+	case "darwin", "netbsd":
 		if !got {
-			t.Fatal("macOS's bind did not follow the symlink")
+			t.Fatalf("%s's bind did not follow the symlink", runtime.GOOS)
 		}
-	case "linux", "android":
+		if !listenTriesSymlinkFile {
+			t.Fatalf("a listen on %s does not try symlink-file", runtime.GOOS)
+		}
+	case "linux", "android", "freebsd", "openbsd", "illumos":
 		if got {
-			t.Fatal("Linux's bind followed the symlink")
+			t.Fatalf("%s's bind followed the symlink", runtime.GOOS)
+		}
+		if listenTriesSymlinkFile {
+			t.Fatalf("a listen on %s tries symlink-file", runtime.GOOS)
 		}
 	default:
 		t.Logf("bind follows a symlink here: %v", got)

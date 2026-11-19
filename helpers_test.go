@@ -598,8 +598,8 @@ func assertTouched(t *testing.T, dir string) {
 
 // bindFollowsSymlink reports whether this kernel's bind(2) follows a symlink
 // in the last component to a path where nothing is yet, making the socket
-// there: SPEC's premise for symlink-file in a bind (macOS does, Linux does
-// not; the other systems are not known). Found out once, with a raw socket
+// there: SPEC's premise for symlink-file in a bind (macOS and NetBSD do;
+// Linux, FreeBSD, OpenBSD and illumos do not). Found out once, with a raw socket
 // bound at a symlink in a fresh directory under /tmp, independently of the
 // code under test.
 var bindFollowsSymlink = sync.OnceValue(func() bool {

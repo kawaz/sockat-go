@@ -4,6 +4,7 @@ package sockat
 
 import (
 	"os"
+	"runtime"
 
 	"golang.org/x/sys/unix"
 )
@@ -47,6 +48,8 @@ const dOpenFlagsRetry = 0
 // hasProc: no /proc routes here.
 const hasProc = false
 
-// listenTriesSymlinkFile: a listen tries symlink-file after standard; whether
-// a bind follows the symlink is told at run time (symlinkFile).
-const listenTriesSymlinkFile = true
+// listenTriesSymlinkFile: a listen tries symlink-file after standard, except
+// where a bind is measured not to follow a symlink in the last component
+// (OpenBSD, illumos; SPEC "試す順番"). NetBSD follows it; on a system not
+// measured, whether it follows is told at run time (symlinkFile).
+const listenTriesSymlinkFile = runtime.GOOS != "openbsd" && runtime.GOOS != "illumos"

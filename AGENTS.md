@@ -32,7 +32,7 @@ sockat-go は、`sun_path` の上限を超えるパスでも Unix domain socket 
 - **振る舞いを変える時は、先にハブの SPEC を直す。** sockat-go の docs と実装はその後に追従させる
 - **標準が受け付けるパスには何も足さない。** `net.ListenUnix` / `net.DialUnix` をそのまま呼ぶ (DR-0002。例外は NUL の `EINVAL`)
 - **経路の本当の失敗は次の経路でやり直さない。** 次へ進むのは経路自体が使えない時だけ (DR-0011)
-- **bind は symlink-file (Linux / Android 以外) と D を通す経路 (と D 無しの形)、`ListenEx` の最終手段の symlink-dir だけ。** 綴りが後で無関係なファイルに当たる経路 (/proc の D を通さない形、相対パス、ファイル名だけ) を bind に使わない (DR-0011、DR-0015)。symlink-file の bind が失敗したら元のパスを lstat し、物があればそのエラーを返す
+- **bind は symlink-file (bind が symlink を辿らないと実測した Linux / Android・FreeBSD・OpenBSD・illumos 以外) と D を通す経路 (と D 無しの形)、`ListenEx` の最終手段の symlink-dir だけ。** 綴りが後で無関係なファイルに当たる経路 (/proc の D を通さない形、相対パス、ファイル名だけ) を bind に使わない (DR-0011、DR-0015)。symlink-file の bind が失敗したら元のパスを lstat し、物があればそのエラーを返す
 - **Dial は OS ごとの connect の順の 1 つの列で試し、D は 1 回の呼び出しで 1 度だけ作る。** 作れなければ D を使う経路を全部飛ばし、作り直さない (DR-0013)
 - **スレッド cwd の goroutine は `UnlockOSThread` しない。** cwd が変わったスレッドは goroutine と一緒に捨てる (DR-0004)
 - **長いパスの listener は `SetUnlinkOnClose(false)`。** 覚えているアドレスは綴りなので (DR-0007)

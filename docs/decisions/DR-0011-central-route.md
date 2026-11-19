@@ -14,7 +14,7 @@ Listen の試す順番:
 | 順 | Listen |
 |---|---|
 | 1 | 標準に渡す長さ以下なら標準にそのまま (standard) |
-| 2 | symlink-file (Linux / Android 以外、[DR-0015](DR-0015-listen-through-file-symlink.md)) |
+| 2 | symlink-file (bind が symlink を辿らないと実測した Linux / Android・FreeBSD・OpenBSD・illumos 以外、[DR-0015](DR-0015-listen-through-file-symlink.md)) |
 | 3 | D を通す経路 (Linux / macOS は thread-cwd、FreeBSD は at (bindat)) |
 | 4 | proc (`/proc` を使える Linux) |
 | 5 | `ENAMETOOLONG` (`ListenEx` が最終手段を使う時は symlink-dir、[DR-0014](DR-0014-ex-last-resort-and-diagnostics.md)) |

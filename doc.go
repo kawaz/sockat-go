@@ -40,17 +40,18 @@
 //	| Linux with /proc    | thread-cwd, proc          | proc-direct, thread-cwd, proc, proc-held, symlink-file      |
 //	| Linux without /proc | thread-cwd                | relative, thread-cwd, symlink-file                          |
 //	| macOS               | symlink-file, thread-cwd  | relative, widened (not made here), thread-cwd, symlink-file |
-//	| FreeBSD             | symlink-file, at (bindat) | at-direct, at (connectat)                                   |
-//	| NetBSD, OpenBSD     | symlink-file only         | relative, symlink-file                                      |
-//	| illumos, other      | symlink-file only         | relative, symlink-file                                      |
+//	| FreeBSD             | at (bindat)               | at-direct, at (connectat)                                   |
+//	| NetBSD, other       | symlink-file only         | relative, symlink-file                                      |
+//	| OpenBSD, illumos    | none                      | relative, symlink-file                                      |
 //
-// A listen goes first through symlink-file, except on Linux: a symlink
-// <place>/sockat.XXXXXXXXXX to the socket file, made in $TMPDIR or /tmp where
-// no other user can replace it, bound by and removed right after. It reaches
-// a path only where bind(2) follows a symlink in the last component (macOS
-// does, Linux does not, the others are told at run time: a failed bind with
-// nothing at the path moves on to the next route). Its spelling holds no file
-// name, so on macOS a listen reaches a file name of any length.
+// A listen goes first through symlink-file where bind(2) follows a symlink in
+// the last component (macOS and NetBSD do; Linux, FreeBSD, OpenBSD and
+// illumos do not, and do not try it; on other systems it is told at run time:
+// a failed bind with nothing at the path moves on to the next route): a
+// symlink <place>/sockat.XXXXXXXXXX to the socket file, made in $TMPDIR or
+// /tmp where no other user can replace it, bound by and removed right after.
+// Its spelling holds no file name, so there a listen reaches a file name of
+// any length.
 //
 // Then a listen goes through a directory D of sockat's own, held by its fd,
 // with a symlink R of a random name in it pointing to the socket's directory:

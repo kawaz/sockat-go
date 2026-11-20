@@ -1,44 +1,57 @@
 package sockat
 
 import (
+	"fmt"
 	"os"
 	"testing"
 
 	"golang.org/x/sys/unix"
 )
 
-// TestMain runs the tests, then takes away what this test process made
-// through the public API (defaultWorld) in the real places: its D and the E
-// in them, and a B of a default name (/tmp/sockat-<euid>,
-// $XDG_RUNTIME_DIR/sockat, $TMPDIR/sockat-<euid>) that was not there when
-// the process started, once it is empty. So running the tests leaves no
-// directory or symlink behind in /tmp, $XDG_RUNTIME_DIR or $TMPDIR. Every
-// child process of the tests runs this too.
+// placeEnv carries the test place of the test process to its child
+// processes, so they share one B as the processes of a user do.
+const placeEnv = "SOCKAT_TEST_PLACE"
+
+// TestMain points the public API (defaultWorld) at a place of the tests' own
+// instead of the real /tmp, $XDG_RUNTIME_DIR and $TMPDIR, runs the tests, and
+// takes that place away with everything in it. The tests then never use nor
+// remove the B other processes of the user share there (/tmp/sockat-<euid>),
+// in which the tests of another implementation may be running at the same
+// time. The place is a fresh directory under /tmp of mode 1777, as /tmp is,
+// so a child process dropped to another user makes its B there too. Every
+// child process of the tests uses its parent's place (placeEnv) and leaves it
+// to the parent.
 func TestMain(m *testing.M) {
-	var made []string
-	for _, b := range defaultBNames() {
-		if !exists(b) {
-			made = append(made, b)
+	place, own := os.Getenv(placeEnv), false
+	if place == "" {
+		d, err := os.MkdirTemp("/tmp", "sockat-t")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
 		}
+		if err := unix.Chmod(d, 0o1777); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		place, own = d, true
+		os.Setenv(placeEnv, place)
 	}
+	defaultWorld = newWorld(placeConfig(place))
 	code := m.Run()
 	takeAway(defaultWorld)
-	for _, b := range made {
-		// Only an empty B goes: another process may have put its D in it.
-		unix.Rmdir(b)
+	if own {
+		os.RemoveAll(place)
 	}
 	os.Exit(code)
 }
 
-// defaultBNames are the paths of the B of a default name in the places 1 to
-// 3 of the process's environment.
-func defaultBNames() []string {
-	w := newWorld(envConfig())
-	var out []string
-	for _, p := range w.autoPlaces() {
-		out = append(out, joinUnder(p.path, bName(p.kind)))
-	}
-	return out
+// placeConfig is the process's configuration with place as /tmp and neither
+// $XDG_RUNTIME_DIR nor $TMPDIR.
+func placeConfig(place string) config {
+	cfg := envConfig()
+	cfg.tmp = place
+	cfg.getenv = func(string) string { return "" }
+	return cfg
 }
 
 // takeAway removes the D w holds (with the symlinks in it) and closes the fds

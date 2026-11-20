@@ -46,6 +46,27 @@ type bindCall struct {
 	real  string // the socket's directory as a real path
 	dirID fileID // the socket's directory's (st_dev, st_ino)
 	opts  Options
+	// noD is the B in which D could not be made during this call: the later
+	// routes of the call do not try to make it there again (SPEC-routes
+	// "実体の置き場"), and do not look for another B either.
+	noD map[*base]bool
+}
+
+// ownD is b's D for a route of this call: errUnusable when it could not be
+// made, for this route and, without trying again, every later one.
+func (c *bindCall) ownD(b *base) (*procD, error) {
+	if c.noD[b] {
+		return nil, unusable("D not made")
+	}
+	d, err := b.ownD(&c.w.cfg)
+	if err != nil {
+		if c.noD == nil {
+			c.noD = map[*base]bool{}
+		}
+		c.noD[b] = true
+		return nil, unusable("D not made")
+	}
+	return d, nil
 }
 
 // bindStep is one route of the bind order.
@@ -95,7 +116,7 @@ func (w *world) bindLong(path string, opts Options, tr *trace) (*net.UnixListene
 		return nil, bound{}, err
 	}
 	if opts.Base != "" {
-		if err := checkGiven(opts.Base, opts.UsableCrossUID); err != nil {
+		if err := w.checkGiven(opts.Base, opts.UsableCrossUID); err != nil {
 			return nil, bound{}, err
 		}
 	}
@@ -115,7 +136,7 @@ func (w *world) bindLong(path string, opts Options, tr *trace) (*net.UnixListene
 
 // base is the B for a route of this bind: Options.Base's when given (its
 // error returned as it is, an Options.Base error, not a reason to pass the
-// route over); otherwise the world's B of the places 1 to 3 (cross: one
+// route over, but for a spelling estimated not to fit); otherwise the world's B of the places 1 to 3 (cross: one
 // others can follow), and, when none of them has or can make one (not for
 // cross), the socket's directory's. fits estimates, before a B is made,
 // whether a spelling of the route through it can fit: where it cannot, the
@@ -123,7 +144,7 @@ func (w *world) bindLong(path string, opts Options, tr *trace) (*net.UnixListene
 // not depend on the length of the path).
 func (c *bindCall) base(cross bool, fits fitsFunc) (*base, error) {
 	if c.opts.Base != "" {
-		return c.w.givenBase(c.opts.Base)
+		return c.w.givenBase(c.opts.Base, fits)
 	}
 	b, err := c.w.autoBase(cross, fits)
 	if !errors.Is(err, errNoBase) {
@@ -209,9 +230,9 @@ func (c *bindCall) linkFile() (*net.UnixListener, bound, error) {
 // target, and returns what the bind is (route, sp, baseVal) with E kept. A
 // failure of the bind removes E before it is returned.
 func (c *bindCall) throughE(b *base, spell, target, rest string, r route, sp Spelling, baseVal string) (*net.UnixListener, bound, error) {
-	d, err := b.ownD(&c.w.cfg)
+	d, err := c.ownD(b)
 	if err != nil {
-		return nil, bound{}, unusable("D not made")
+		return nil, bound{}, err
 	}
 	e, err := b.resolveE(d, target)
 	if err != nil {
@@ -260,9 +281,9 @@ func (c *bindCall) dangling() (*net.UnixListener, bound, error) {
 	if err != nil {
 		return nil, bound{}, err
 	}
-	d, err := b.ownD(&w.cfg)
+	d, err := c.ownD(b)
 	if err != nil {
-		return nil, bound{}, unusable("D not made")
+		return nil, bound{}, err
 	}
 	e, err := b.callE(d, c.real, w.cfg.random)
 	if err != nil {

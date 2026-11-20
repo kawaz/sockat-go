@@ -510,7 +510,7 @@ func TestOptionsBaseIsCheckedAndMakesNothing(t *testing.T) {
 		{d + "/own", false, nil},
 		{d + "/own0700", false, nil},
 	} {
-		err := checkGiven(c.base, c.cross)
+		err := w.checkGiven(c.base, c.cross)
 		if c.want == nil && err != nil || c.want != nil && !errors.Is(err, c.want) {
 			t.Errorf("checkGiven(%q, cross %v) = %v, want %v", c.base, c.cross, err, c.want)
 		}
@@ -525,21 +525,67 @@ func TestOptionsBaseIsCheckedAndMakesNothing(t *testing.T) {
 	for _, p := range []string{ps.tmp, ps.runtime, ps.tmpdir} {
 		assertUntouched(t, p)
 	}
-	b, err := w.givenBase(d + "/b")
+	b, err := w.givenBase(d+"/b", anyFits)
 	if err != nil || b.kind != kindGiven || modeOf(t, d+"/b") != 0o711 {
 		t.Fatalf("given B %v, %v", b, err)
 	}
-	if again, err := w.givenBase(d + "/b"); err != nil || again != b {
+	if again, err := w.givenBase(d+"/b", anyFits); err != nil || again != b {
 		t.Fatalf("given again: %v, %v", again, err)
 	}
-	if b, err := w.givenBase(d + "/own0700"); err != nil || modeOf(t, d+"/own0700") != 0o700 || b.crossUID {
+	if b, err := w.givenBase(d+"/own0700", anyFits); err != nil || modeOf(t, d+"/own0700") != 0o700 || b.crossUID {
 		t.Fatalf("an existing given B: %v, %v", b, err)
 	}
 	if err := os.Chmod(d, 0o711); err != nil {
 		t.Fatal(err)
 	}
-	if err := checkGiven(d+"/own/b", true); err != nil {
+	if err := w.checkGiven(d+"/own/b", true); err != nil {
 		t.Fatalf("cross-uid base below directories others can search: %v", err)
+	}
+}
+
+// The safety of Options.Base (the ancestors, B's owner, nobody else writing)
+// is checked at every call, but whether others can search it all the way
+// (UsableCrossUID) is decided when the world first holds the B and not
+// looked at again (SPEC-routes "実体の置き場"): a held B made 0711 under
+// directories others can search stays good for a cross-uid bind after it is
+// set to 0700, a held B of 0700 stays EPERM after it is set to 0711, while a
+// B the world does not hold is judged by its mode now. A held B made
+// writable by its group fails at the next call whatever was decided before.
+func TestTheCrossUIDJudgmentOfAGivenBIsTheOneWhenItWasFirstHeld(t *testing.T) {
+	t.Parallel()
+	w, _ := testWorld(t, nil)
+	d := tmpDir(t)
+	if err := os.Chmod(d, 0o711); err != nil {
+		t.Fatal(err)
+	}
+	open, closed := d+"/open", d+"/closed"
+	if _, err := w.givenBase(open, anyFits); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(closed, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := w.givenBase(closed, anyFits); err != nil || b.crossUID {
+		t.Fatalf("a 0700 given B: %+v, %v", b, err)
+	}
+	os.Chmod(open, 0o700)
+	os.Chmod(closed, 0o711)
+	if err := w.checkGiven(open, true); err != nil {
+		t.Fatalf("a held B judged usable across uids, now 0700: %v", err)
+	}
+	if err := w.checkGiven(closed, true); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("a held B judged not usable across uids, now 0711: %v", err)
+	}
+	other, _ := testWorld(t, nil)
+	if err := other.checkGiven(open, true); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("a 0700 B not held: %v", err)
+	}
+	if err := other.checkGiven(closed, true); err != nil {
+		t.Fatalf("a 0711 B not held: %v", err)
+	}
+	os.Chmod(closed, 0o731)
+	if err := w.checkGiven(closed, false); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("a held B its group can write to: %v", err)
 	}
 }
 
@@ -567,7 +613,7 @@ func TestChildBUnderAUmask(t *testing.T) {
 	if b != nil {
 		dd, err = b.ownD(&w.cfg)
 	}
-	g, gerr := w.givenBase(d + "/b")
+	g, gerr := w.givenBase(d+"/b", anyFits)
 	syscall.Umask(0o077)
 	if b == nil || err != nil {
 		t.Fatalf("B %v, D: %v", b, err)
@@ -637,12 +683,12 @@ func TestARemovedBOrDIsMadeAgain(t *testing.T) {
 		t.Fatalf("the socket's directory's B after its removal: %+v", s2)
 	}
 	g := tmpDir(t) + "/b"
-	gb, err := w.givenBase(g)
+	gb, err := w.givenBase(g, anyFits)
 	if err != nil {
 		t.Fatal(err)
 	}
 	os.Remove(g)
-	if gb2, err := w.givenBase(g); err != nil || gb2 == gb || !exists(g) {
+	if gb2, err := w.givenBase(g, anyFits); err != nil || gb2 == gb || !exists(g) {
 		t.Fatalf("Options.Base's B after its removal: %+v, %v", gb2, err)
 	}
 }

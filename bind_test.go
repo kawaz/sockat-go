@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 )
@@ -234,6 +235,122 @@ func TestABindWhoseSpellingDoesNotFitTheFirstPlaceTriesNoOtherPlace(t *testing.T
 	}
 	assertEmpty(t, ps.runtime)
 	assertEmpty(t, ps.tmpdir)
+}
+
+// Options.Base's B is estimated as the places are, before it is made
+// (SPEC-routes "実体の置き場"): where the spelling of no route through it can
+// fit (the given B's parent is over 100 bytes, the file name over 80 so that
+// procB does not fit either), a bind passes link-dir and link-file over as
+// too long and a dial passes link-file over, and the B is not made. The
+// thread's cwd is turned off so the bind has no route left that makes D;
+// both end with ENAMETOOLONG.
+func TestAGivenBIsNotMadeWhereNoSpellingFitsThroughIt(t *testing.T) {
+	t.Parallel()
+	w, _ := testWorld(t, func(c *config, _ testPlaces) { c.threadCwd = false })
+	if atSupported {
+		t.Skip("at needs no thread cwd: a bind makes D there")
+	}
+	g := nest(t, tmpDir(t), 120, "b")
+	p := tmpDir(t) + "/" + strings.Repeat("s", 100)
+	_, _, err := w.listenEx(p, Options{Base: g})
+	re := routeErr(t, err)
+	if !errors.Is(err, syscall.ENAMETOOLONG) || re.Route != "" {
+		t.Fatalf("bind: %v (route %q)", err, re.Route)
+	}
+	for _, s := range re.Skipped {
+		if (s.Name == string(routeLinkDir) || s.Name == string(routeLinkFile)) && s.Reason != "spelling too long" {
+			t.Errorf("bind: %s skipped for %q", s.Name, s.Reason)
+		}
+	}
+	tr := &trace{}
+	_, r, err := w.dial(p, Options{Base: g}, tr)
+	if !errors.Is(err, syscall.ENAMETOOLONG) || r != "" {
+		t.Fatalf("dial: %v (route %q)", err, r)
+	}
+	if got := namesOf(t, tr.skipped); got[len(got)-1] != routeLinkFile || tr.skipped[len(got)-1].reason != "spelling too long" {
+		t.Fatalf("dial: skipped %v", tr.skipped)
+	}
+	if exists(g) {
+		t.Fatal("the given B was made")
+	}
+}
+
+// D that could not be made in a B is not tried again in that B by the later
+// routes of the same call (SPEC-routes "実体の置き場"): with the names for D
+// failing (cfg.random errs), a bind whose link-dir, link-file (macOS) and
+// thread-cwd all need D asks for a name once and passes each of them over
+// as "D not made" (thread-cwd under a seccomp filter is passed over before
+// it needs D). The next call tries again.
+func TestDNotMadeIsNotTriedAgainInTheSameCall(t *testing.T) {
+	t.Parallel()
+	w, _ := testWorld(t, nil)
+	if autoOf(w, false) == nil {
+		t.Fatal("no B")
+	}
+	var asked atomic.Int32
+	w.cfg.random = func() (string, error) {
+		asked.Add(1)
+		return "", errors.New("no name")
+	}
+	p := nest(t, tmpDir(t), 300, "s.sock")
+	_, _, err := w.listenEx(p, Options{})
+	re := routeErr(t, err)
+	if !errors.Is(err, syscall.ENAMETOOLONG) {
+		t.Fatalf("%v, skipped %v", err, re.Skipped)
+	}
+	if n := asked.Load(); n != 1 {
+		t.Fatalf("a name for D asked %d times in one call", n)
+	}
+	for _, s := range re.Skipped[1:] {
+		if s.Reason != "D not made" && s.Reason != "seccomp filter" && s.Reason != "thread cwd off" {
+			t.Errorf("%s skipped for %q", s.Name, s.Reason)
+		}
+	}
+	w.listenEx(p, Options{})
+	if n := asked.Load(); n != 2 {
+		t.Fatalf("the next call asked %d times in all", n)
+	}
+}
+
+// B is chosen in order (SPEC-routes "実体の置き場"): the places known to fail
+// without making anything are passed over (a /tmp that is not there; for
+// UsableCrossUID, the 0700 places others cannot search), the spelling is
+// estimated in the first place left, and where it does not fit there the
+// bind stops looking (the deep $XDG_RUNTIME_DIR), so the later $TMPDIR, where
+// it would fit, gets nothing. The B of a UsableCrossUID bind and the
+// process's own B are held apart: after a cross-uid bind made its B in the
+// one place others can search ($TMPDIR), a bind without it makes and keeps
+// the B of the first place (/tmp) rather than move to that one.
+func TestBIsChosenInOrderAndTheCrossUIDBIsHeldApart(t *testing.T) {
+	t.Parallel()
+	w, ps := testWorld(t, func(c *config, ps testPlaces) {
+		c.tmp = ps.tmp + "/missing"
+		c.proc = "/nonexistent/proc"
+		deep, _, _ := splitPath(nest(t, ps.runtime, 90, "x"))
+		env := map[string]string{"XDG_RUNTIME_DIR": deep, "TMPDIR": ps.tmpdir}
+		c.getenv = func(k string) string { return env[k] }
+	})
+	p := nest(t, tmpDir(t), 300, "s.sock")
+	if l, _, err := w.listenEx(p, Options{}); err == nil {
+		l.Close()
+	}
+	assertEmpty(t, ps.tmpdir)
+
+	w2, ps2 := testWorld(t, func(c *config, _ testPlaces) { c.proc = "/nonexistent/proc" })
+	root, _, _ := splitPath(ps2.tmpdir)
+	for _, d := range []string{root, ps2.tmpdir} {
+		os.Chmod(d, 0o711)
+	}
+	q := nest(t, tmpDir(t), 200, "s.sock")
+	_, b := listenExIn(t, w2, q, Options{UsableCrossUID: true})
+	if b.Base != "tmpdir" || !b.Spelling.UsableCrossUID {
+		t.Fatalf("cross-uid bind: %s %q %+v", b.Route, b.Base, b.Spelling)
+	}
+	r := nest(t, tmpDir(t), 200, "t.sock")
+	_, b = listenExIn(t, w2, r, Options{})
+	if b.Base != "tmp" || w2.auto == nil || w2.auto == w2.autoCross {
+		t.Fatalf("bind after it: %s %q, auto %v, cross %v", b.Route, b.Base, w2.auto, w2.autoCross)
+	}
 }
 
 // mustRealDir is realDir(d), failing the test on an error.

@@ -130,7 +130,7 @@ func (w *world) dialLong(path string, opts Options, tr *trace) (endpoint, route,
 		return nil, "", err
 	}
 	if opts.Base != "" {
-		if err := checkGiven(opts.Base, false); err != nil {
+		if err := w.checkGiven(opts.Base, false); err != nil {
 			return nil, "", err
 		}
 	}
@@ -184,8 +184,8 @@ func (c *dialCall) threadCwdDirect() (endpoint, error) {
 // the socket file (the path, made absolute against the cwd), B spelt by its
 // real path (SPEC-routes "link-file", the default connect's), and unlinks E
 // right after, whatever the outcome. No D is made. B is Options.Base's when
-// given (made here when it is not there yet; an error making it is the
-// call's), otherwise the process's B of the places 1 to 3 (made here when the
+// given (made here when it is not there yet, unless the spelling is
+// estimated not to fit through it; an error making it is the call's), otherwise the process's B of the places 1 to 3 (made here when the
 // process has none yet, and kept): the socket's directory, whose real-path
 // spelling is longer than the path, is no place for it.
 func (c *dialCall) linkFile() (endpoint, error) {
@@ -193,13 +193,16 @@ func (c *dialCall) linkFile() (endpoint, error) {
 	if !ok {
 		return nil, unusable("cwd unreadable")
 	}
+	fits := func(_, breal string) bool { return linkConnectLen(breal) <= directMax }
 	var b *base
 	var err error
 	if c.opts.Base != "" {
-		if b, err = c.w.givenBase(c.opts.Base); err != nil {
+		if b, err = c.w.givenBase(c.opts.Base, fits); errors.Is(err, errUnusable) {
+			return nil, err
+		} else if err != nil {
 			return nil, notRouted{err}
 		}
-	} else if b, err = c.w.autoBase(false, func(_, breal string) bool { return linkConnectLen(breal) <= directMax }); err != nil {
+	} else if b, err = c.w.autoBase(false, fits); err != nil {
 		return nil, err
 	}
 	if linkConnectLen(b.real) > directMax {

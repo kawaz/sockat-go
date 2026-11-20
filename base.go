@@ -172,7 +172,9 @@ func (b *base) gone() bool {
 
 // dirGone reports whether the directory fd, of (st_dev, st_ino) id, was
 // removed: st_nlink 0, or its name (looked up by lookup, not following a
-// symlink) gone or naming something else.
+// symlink) gone or naming something else. The name is looked up even when
+// st_nlink is not 0: a removed directory keeps st_nlink 2 on macOS (APFS),
+// where only Linux gives 0.
 func dirGone(fd int, id fileID, lookup func(*unix.Stat_t) error) bool {
 	var st unix.Stat_t
 	if unix.Fstat(fd, &st) != nil || st.Nlink == 0 {
@@ -217,14 +219,18 @@ func crossPlace(real, name string) bool {
 }
 
 // checkGiven checks Options.Base before any route is tried (SPEC-routes
-// "B の作り方"), making nothing: an absolute path ending with a name (EINVAL
-// otherwise, givenShape), whose parent exists (ENOENT) and is a directory
-// (ENOTDIR), with every ancestor passing checkAncestors (EPERM), and B
-// itself, when it is there, a directory of ours that others cannot write to
-// (a symlink is EPERM, anything else ENOTDIR).
+// "B の作り方"), at every call, making nothing: an absolute path ending with a
+// name (EINVAL otherwise, givenShape), whose parent exists (ENOENT) and is a
+// directory (ENOTDIR), with every ancestor passing checkAncestors (EPERM),
+// and B itself, when it is there, a directory of ours that others cannot
+// write to (a symlink is EPERM, anything else ENOTDIR).
+//
 // With cross (UsableCrossUID of a bind), every one of them must also have
-// search permission for others (EPERM). The error is an *os.PathError.
-func checkGiven(b string, cross bool) error {
+// search permission for others (EPERM): looked at now while the world does
+// not hold the B there yet, and taken from when it was first held once it
+// does (base.crossUID, not looked at again; SPEC-routes "実体の置き場"). The
+// error is an *os.PathError.
+func (w *world) checkGiven(b string, cross bool) error {
 	pathErr := func(err error) error { return &os.PathError{Op: "base", Path: b, Err: err} }
 	if err := givenShape(b); err != nil {
 		return err
@@ -241,11 +247,14 @@ func checkGiven(b string, cross bool) error {
 	if uint32(st.Mode)&unix.S_IFMT != unix.S_IFDIR {
 		return pathErr(syscall.ENOTDIR)
 	}
-	if err := checkAncestors(real, cross); err != nil {
+	if err := checkAncestors(real, false); err != nil {
 		return pathErr(errnoOf(err))
 	}
 	switch err := unix.Lstat(joinUnder(real, name), &st); {
 	case errors.Is(err, unix.ENOENT):
+		if cross && checkAncestors(real, true) != nil {
+			return pathErr(syscall.EPERM)
+		}
 		return nil
 	case err != nil:
 		return pathErr(err)
@@ -256,10 +265,29 @@ func checkGiven(b string, cross bool) error {
 		return pathErr(syscall.EPERM)
 	case mode&unix.S_IFMT != unix.S_IFDIR:
 		return pathErr(syscall.ENOTDIR)
-	case st.Uid != uint32(os.Geteuid()) || mode&0o022 != 0 || (cross && mode&0o001 == 0):
+	case st.Uid != uint32(os.Geteuid()) || mode&0o022 != 0:
+		return pathErr(syscall.EPERM)
+	}
+	if !cross {
+		return nil
+	}
+	if held := w.heldGiven(fileID{uint64(st.Dev), uint64(st.Ino)}); held != nil {
+		if !held.crossUID {
+			return pathErr(syscall.EPERM)
+		}
+		return nil
+	}
+	if mode&0o001 == 0 || checkAncestors(real, true) != nil {
 		return pathErr(syscall.EPERM)
 	}
 	return nil
+}
+
+// heldGiven is the B of Options.Base the world holds at id, nil when none.
+func (w *world) heldGiven(id fileID) *base {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.given[id]
 }
 
 // givenShape checks the form of Options.Base, whatever the length of the
@@ -282,12 +310,15 @@ func errnoOf(err error) error {
 }
 
 // givenBase is the world's B at b (Options.Base, checked by checkGiven),
-// made when there is none there yet. The error is an *os.PathError: B could
-// not be made or opened (the open's error, a umask taking the owner's bits
-// for example), or what is at b is not a private directory of ours (EPERM).
-func (w *world) givenBase(b string) (*base, error) {
+// made when there is none there yet. Before it is made, fits estimates the
+// spelling through it as autoBase does: where it cannot fit, nothing is made
+// and the error is errSpellingTooLong (the route is unusable). Otherwise the
+// error is an *os.PathError: B could not be made or opened (the open's
+// error, a umask taking the owner's bits for example), or what is at b is not
+// a private directory of ours (EPERM).
+func (w *world) givenBase(b string, fits fitsFunc) (*base, error) {
 	pathErr := func(err error) error { return &os.PathError{Op: "base", Path: b, Err: err} }
-	parent, _, err := splitPath(b)
+	parent, name, err := splitPath(b)
 	if err != nil {
 		return nil, pathErr(err)
 	}
@@ -304,6 +335,9 @@ func (w *world) givenBase(b string) (*base, error) {
 			}
 			delete(w.given, id)
 		}
+	}
+	if !fits(kindGiven, joinUnder(real, name)) {
+		return nil, errSpellingTooLong
 	}
 	nb, err := w.makeBase(place{kindGiven, b}, real, true)
 	if errors.Is(err, errNotOurs) {

@@ -14,36 +14,62 @@ import (
 // path and (st_dev, st_ino)), and the E its spelling goes through, if any
 // (SPEC "remove と cleanup").
 type SocketFile struct {
-	file     string // the socket file's real path; "" for none (an abstract name)
-	id       fileID
-	clean    *cleaner // the spelling's E (link-dir, link-file)
-	removeMu sync.Once
-	removed  error
+	file  string // the socket file's real path; "" for none (an abstract name)
+	id    fileID
+	clean *cleaner // the spelling's E (link-dir, link-file), and the lock
+
+	removed bool // the file side of Remove has succeeded (under clean.mu)
 }
 
-// cleaner cleans up the E of a spelling (nil for none) once, for every
-// holder of it: the SocketFile of ListenEx, and the ForBind (and the
-// SocketFiles it gives) or ForConnect of a resolve.
+// cleaner cleans up the E of a spelling (nil for none) for every holder of
+// it: the SocketFile of ListenEx, and the ForBind (and the SocketFiles it
+// gives) or ForConnect of a resolve. Its lock is the one lock of them all:
+// every removal they do, of E or of a socket file, is done under it, one at a
+// time, so a Cleanup does not remove E while a Remove is removing the file,
+// and two SocketFiles of the same file (ForBind.SocketFile called twice) do
+// not remove it at once.
 type cleaner struct {
 	e    *link
-	once sync.Once
-	err  error
+	mu   sync.Mutex
+	done bool // E has been removed (or found gone)
 }
 
-// cleanup removes E the first time it is called and returns that outcome
-// every time: an *os.PathError, or nil (no E, or one already gone).
+// unlinkE and unlinkFile are the unlinks of cleanup and of Remove's file
+// side.
+//
+// Design rationale: package variables rather than direct calls so that a
+// test (in a child process of its own, as with bindEx) can count the
+// unlinks and see that concurrent calls never overlap or repeat one; the
+// results alone cannot show it, as a second unlink of a file already gone
+// counts as a success.
+var (
+	unlinkE    = (*link).remove
+	unlinkFile = os.Remove
+)
+
+// cleanup removes E until it has once succeeded (SPEC "remove と cleanup"):
+// after a success it does nothing and returns nil; after a failure the next
+// call tries again. It removes under c.mu. The error is an
+// *os.PathError; nil for no E, or one already gone.
 func (c *cleaner) cleanup() error {
-	c.once.Do(func() {
-		if c.e != nil {
-			if err := c.e.remove(); err != nil {
-				c.err = &os.PathError{Op: "unlink", Path: c.e.path(), Err: err}
-			}
-		}
-	})
-	return c.err
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cleanupLocked()
 }
 
-// Remove removes the socket file, once, and then does what Cleanup does.
+// cleanupLocked is cleanup with c.mu held.
+func (c *cleaner) cleanupLocked() error {
+	if c.done || c.e == nil {
+		return nil
+	}
+	if err := unlinkE(c.e); err != nil {
+		return &os.PathError{Op: "unlink", Path: c.e.path(), Err: err}
+	}
+	c.done = true
+	return nil
+}
+
+// Remove removes the socket file, and then does what Cleanup does.
 //
 // The file is removed only while its path still names the file bound (the
 // same (st_dev, st_ino)), so a socket that someone else has bound at the path
@@ -59,20 +85,33 @@ func (c *cleaner) cleanup() error {
 // bound; an error (an *os.PathError) when the file cannot be checked (lstat
 // fails otherwise than for a missing file, EACCES for example) or the removal
 // fails, joined with Cleanup's error if any. The cleanup is done either way.
-// Calling it again does nothing.
+//
+// Once a side has succeeded, later calls leave it alone: after a full
+// success Remove does nothing and returns nil. A side that failed is tried
+// again by the next call (the file checked again against the one bound), so
+// a call after the cause is fixed finishes the job. Concurrent calls, of it
+// and of the Cleanup of everything sharing the E, remove one at a time.
 func (f *SocketFile) Remove() error {
-	f.removeMu.Do(func() {
-		f.removed = errors.Join(f.removeFile(), f.Cleanup())
-	})
-	return f.removed
+	f.clean.mu.Lock()
+	defer f.clean.mu.Unlock()
+	var ferr error
+	if !f.removed {
+		if ferr = f.removeFile(); ferr == nil {
+			f.removed = true
+		}
+	}
+	return errors.Join(ferr, f.clean.cleanupLocked())
 }
 
-// Cleanup removes the E the spelling goes through, once: the spelling then
-// names nothing (do not use it afterwards). B and D stay. It does nothing for
-// a spelling that goes through no E. The error is an *os.PathError. Calling it
-// again does nothing. For a SocketFile from ForBind.SocketFile it is the
-// same cleanup as the ForBind's: the E is removed once by whichever comes
-// first.
+// Cleanup removes the E the spelling goes through: the spelling then names
+// nothing (do not use it afterwards). B and D stay. It does nothing for a
+// spelling that goes through no E. The error is an *os.PathError. After a
+// success, calling it again does nothing and returns nil; after a failure,
+// the next call tries again. Concurrent calls, with those of Remove and of
+// everything else sharing the E, remove one at a time. For a
+// SocketFile from ForBind.SocketFile it is the same cleanup as the
+// ForBind's: whichever succeeds first removes the E, and the others then do
+// nothing.
 func (f *SocketFile) Cleanup() error {
 	return f.clean.cleanup()
 }
@@ -96,7 +135,7 @@ func (f *SocketFile) removeFile() error {
 		return nil
 	}
 	// Gone in the meantime is as good as removed.
-	if err := os.Remove(f.file); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := unlinkFile(f.file); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil

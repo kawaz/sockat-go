@@ -7,14 +7,17 @@ package sockat
 // included), so removing it is Remove's alone. Remove remembers the file
 // bound by its real path and (st_dev, st_ino) and removes it only while that
 // path still names that file; it does not close the listener (Go's own Close
-// is the way to do that); a second call does nothing.
+// is the way to do that); a call after a success does nothing, and one after
+// a failure tries again.
 
 import (
 	"errors"
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -641,37 +644,46 @@ func TestChildListenExThroughASymlinkToANonSocket(t *testing.T) {
 
 // The cleanups inside a call keep a failure to remove E to themselves (the
 // call's outcome is the bind's or the connect's), but a Cleanup the caller
-// calls reports it (SPEC "remove と cleanup"): with D made read-only, so that
-// E cannot be unlinked (EACCES), Cleanup of ListenEx's SocketFile, of a
-// ForBind and of a ForConnect returns an *os.PathError of Op "unlink" for E,
-// and the same error when called again (it runs once). Remove reports the
-// cleanup's error too, after removing the socket file, which it can (its
-// directory is not D). Root ignores the permission, so as root it runs in a
-// child that has dropped to nobody (unprivileged).
-func TestCleanupReportsAFailureToRemoveE(t *testing.T) {
+// calls reports it, and is tried again by the next call until it succeeds
+// (SPEC "remove と cleanup": a failure kept and returned for ever would leave
+// no way to clean up). With D made read-only, so that E cannot be unlinked
+// (EACCES), Cleanup of ListenEx's SocketFile, of a ForBind and of a
+// ForConnect returns an *os.PathError of Op "unlink" for E on every call and
+// leaves E; once D's mode is given back, the next Cleanup removes E and
+// returns nil, and a Cleanup after that success does nothing and returns nil.
+// Remove reports the cleanup's error too, after removing the socket file,
+// which it can (its directory is not D); the next Remove, with D given back,
+// removes E and does not go back to the file: its directory is then made
+// unsearchable, so a second look at the file would fail with EACCES. Root
+// ignores the permission, so as root it runs in a child that has dropped to
+// nobody (unprivileged).
+func TestCleanupRetriesAfterAFailureToRemoveE(t *testing.T) {
 	t.Parallel()
 	if !unprivileged(t) {
 		return
 	}
 	w, _ := testWorld(t, nil)
-	// readOnly makes the directory of e read-only until the returned
-	// function gives it back its mode.
-	readOnly := func(e *link) func() {
+	// chmod sets the mode of d until the returned function gives it back.
+	chmod := func(d string, mode os.FileMode) func() {
 		t.Helper()
-		d := filepath.Dir(e.path())
 		fi, err := os.Stat(d)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Chmod(d, 0o500); err != nil {
+		if err := os.Chmod(d, mode); err != nil {
 			t.Fatal(err)
 		}
 		back := func() { os.Chmod(d, fi.Mode().Perm()) }
 		t.Cleanup(back)
 		return back
 	}
-	wantUnlinkErr := func(what string, e *link, cleanup func() error) {
+	readOnly := func(e *link) func() { return chmod(filepath.Dir(e.path()), 0o500) }
+	// retried fails to clean up E while D is read-only, every time, then
+	// gives D back and expects the next cleanup to remove E and the one
+	// after it to do nothing.
+	retried := func(what string, e *link, cleanup func() error) {
 		t.Helper()
+		back := readOnly(e)
 		for range 2 {
 			err := cleanup()
 			var pe *os.PathError
@@ -682,6 +694,13 @@ func TestCleanupReportsAFailureToRemoveE(t *testing.T) {
 		if !exists(e.path()) {
 			t.Fatalf("%s: E is gone", what)
 		}
+		back()
+		if err := cleanup(); err != nil || exists(e.path()) {
+			t.Fatalf("%s: Cleanup after D is given back: %v, E there %v; want nil and E gone", what, err, exists(e.path()))
+		}
+		if err := cleanup(); err != nil {
+			t.Fatalf("%s: Cleanup after a success: %v", what, err)
+		}
 	}
 
 	p := nest(t, tmpDir(t), 600, "s.sock")
@@ -690,27 +709,27 @@ func TestCleanupReportsAFailureToRemoveE(t *testing.T) {
 	if e == nil {
 		t.Fatalf("ListenEx of %d bytes made no E (%s)", len(p), b.Route)
 	}
-	back := readOnly(e)
-	wantUnlinkErr("ListenEx", e, b.File.Cleanup)
-	back()
+	retried("ListenEx", e, b.File.Cleanup)
 
 	p = nest(t, tmpDir(t), 600, "s.sock")
 	_, b = listenExIn(t, w, p, Options{})
 	e = b.File.clean.e
-	back = readOnly(e)
+	back := readOnly(e)
 	if err := b.File.Remove(); !errors.Is(err, syscall.EACCES) || exists(p) {
 		t.Fatalf("Remove: %v, socket file there %v; want EACCES and the file removed", err, exists(p))
 	}
 	back()
+	chmod(filepath.Dir(b.File.file), 0)
+	if err := b.File.Remove(); err != nil || exists(e.path()) {
+		t.Fatalf("Remove after D is given back: %v, E there %v; want nil (the file not looked at again) and E gone", err, exists(e.path()))
+	}
 
 	p = nest(t, tmpDir(t), 600, "s.sock")
 	fb := resolveBindIn(t, w, p, Options{})
 	if fb.clean.e == nil {
 		t.Fatalf("ResolveForBind made no E (%s)", fb.Route)
 	}
-	back = readOnly(fb.clean.e)
-	wantUnlinkErr("ForBind", fb.clean.e, fb.Cleanup)
-	back()
+	retried("ForBind", fb.clean.e, fb.Cleanup)
 
 	l := listenAt(t, p)
 	defer l.Close()
@@ -718,6 +737,166 @@ func TestCleanupReportsAFailureToRemoveE(t *testing.T) {
 	if fc.clean.e == nil {
 		t.Fatalf("ResolveForConnect made no E (%s)", fc.Route)
 	}
-	readOnly(fc.clean.e)
-	wantUnlinkErr("ForConnect", fc.clean.e, fc.Cleanup)
+	retried("ForConnect", fc.clean.e, fc.Cleanup)
+}
+
+// Remove tries the socket file again after failing to remove it, and only
+// while the path still names the file bound (SPEC "remove と cleanup": a
+// failed removal is retried; SPEC "remove": what is no longer the file bound
+// is left). With the socket file's directory read-only, Remove returns EACCES
+// and leaves the file (the cleanup of E, in D, succeeds); with the mode given
+// back, the next Remove removes it. Where the file is replaced between the
+// failure and the retry, the retry checks (st_dev, st_ino) again and leaves
+// the replacement, returning nil. Root ignores the permission, so as root it
+// runs in a child that has dropped to nobody (unprivileged).
+func TestRemoveRetriesTheFileAfterAFailure(t *testing.T) {
+	t.Parallel()
+	if !unprivileged(t) {
+		return
+	}
+	w, _ := testWorld(t, nil)
+	for _, replace := range []bool{false, true} {
+		p := nest(t, tmpDir(t), 600, "s.sock")
+		_, b := listenExIn(t, w, p, Options{})
+		dir := filepath.Dir(b.File.file)
+		fi, err := os.Stat(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(dir, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Chmod(dir, fi.Mode().Perm()) })
+		err = b.File.Remove()
+		var pe *os.PathError
+		if !errors.Is(err, syscall.EACCES) || !errors.As(err, &pe) || !exists(p) {
+			t.Fatalf("replace %v: Remove in a read-only directory: %v, file there %v; want EACCES and the file left", replace, err, exists(p))
+		}
+		if e := b.File.clean.e; e != nil && exists(e.path()) {
+			t.Fatalf("replace %v: E (%s) left by the first Remove", replace, e.path())
+		}
+		if err := os.Chmod(dir, fi.Mode().Perm()); err != nil {
+			t.Fatal(err)
+		}
+		if replace {
+			if err := os.Remove(p); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := b.File.Remove(); err != nil || exists(p) != replace {
+			t.Fatalf("replace %v: Remove again: %v, file there %v", replace, err, exists(p))
+		}
+		if err := b.File.Remove(); err != nil || exists(p) != replace {
+			t.Fatalf("replace %v: Remove after a success: %v, file there %v", replace, err, exists(p))
+		}
+	}
+}
+
+// Concurrent calls of Cleanup and Remove remove one at a time, among all
+// that share an E, and each thing once (SPEC "remove と cleanup": however
+// many calls race, one removal at a time and each done once). The results
+// alone cannot show it, as an unlink of what is already gone counts as a
+// success, so the unlinks are counted: unlinkE and unlinkFile are replaced by
+// wrappers that note how many are in flight in the same group (the things
+// sharing an E: ListenEx's E and socket file; a ForBind's E and the socket
+// file its SocketFiles name), yielding inside to widen the window, and how
+// many ran on each path. Many goroutines, started together, call Remove and
+// Cleanup of ListenEx's SocketFile, and Cleanup of a ForBind, and Remove and
+// Cleanup of two SocketFiles it gave for the same file (ForBind.SocketFile
+// called twice). Every call returns nil, each E and socket file is unlinked
+// exactly once, no two unlinks of a group run at a time, and all are gone. Replacing package variables is not safe beside parallel
+// tests, so the body runs in a child process of its own; run with -race, it
+// also checks the state the calls share.
+func TestCleanupAndRemoveUnlinkOnceWhenConcurrent(t *testing.T) {
+	t.Parallel()
+	if os.Getenv(childEnv) != t.Name() {
+		runChild(t, t.Name(), "/")
+		return
+	}
+	var mu sync.Mutex
+	group := map[string]string{} // path -> its group, set before the calls
+	ran := map[string]int{}
+	inFlight := map[string]int{}
+	overlaps := map[string]int{} // group -> unlinks begun beside another
+	watch := func(path string, unlink func() error) error {
+		g := group[path]
+		mu.Lock()
+		inFlight[g]++
+		if inFlight[g] > 1 {
+			overlaps[g]++
+		}
+		mu.Unlock()
+		for range 100 {
+			runtime.Gosched()
+		}
+		err := unlink()
+		mu.Lock()
+		inFlight[g]--
+		ran[path]++
+		mu.Unlock()
+		return err
+	}
+	unlinkE = func(e *link) error { return watch(e.path(), e.remove) }
+	unlinkFile = func(name string) error { return watch(name, func() error { return os.Remove(name) }) }
+	t.Cleanup(func() { unlinkE, unlinkFile = (*link).remove, os.Remove })
+
+	w, _ := testWorld(t, nil)
+	p := nest(t, tmpDir(t), 600, "s.sock")
+	_, b := listenExIn(t, w, p, Options{})
+	if b.File.clean.e == nil {
+		t.Fatalf("ListenEx of %d bytes made no E (%s)", len(p), b.Route)
+	}
+	q := nest(t, tmpDir(t), 600, "s.sock")
+	fb := resolveBindIn(t, w, q, Options{})
+	if fb.clean.e == nil {
+		t.Fatalf("ResolveForBind made no E (%s)", fb.Route)
+	}
+	listenSpelling(t, fb.Path)
+	sf, err := fb.SocketFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sf2, err := fb.SocketFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sf2.file != sf.file {
+		t.Fatalf("two SocketFiles of one ForBind name %s and %s", sf.file, sf2.file)
+	}
+	group[b.File.file], group[b.File.clean.e.path()] = "ListenEx", "ListenEx"
+	group[sf.file], group[fb.clean.e.path()] = "ForBind", "ForBind"
+	calls := []func() error{b.File.Remove, b.File.Cleanup, fb.Cleanup, sf.Cleanup, sf.Remove, sf2.Remove, sf2.Cleanup}
+
+	const n = 64
+	start := make(chan struct{})
+	errs := make(chan error, n*len(calls))
+	var wg sync.WaitGroup
+	for i := range n * len(calls) {
+		wg.Go(func() {
+			<-start
+			errs <- calls[i%len(calls)]()
+		})
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("a concurrent call: %v", err)
+		}
+	}
+	if len(overlaps) != 0 {
+		t.Fatalf("unlinks of a group overlapped (group: times): %v", overlaps)
+	}
+	for _, path := range []string{b.File.file, b.File.clean.e.path(), sf.file, fb.clean.e.path()} {
+		if ran[path] != 1 {
+			t.Fatalf("%s (group %s) unlinked %d times, want 1", path, group[path], ran[path])
+		}
+		if exists(path) {
+			t.Fatalf("%s is left", path)
+		}
+	}
 }

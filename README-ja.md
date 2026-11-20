@@ -60,7 +60,7 @@ defer b.File.Remove() // ソケットのファイルを消す (l は閉じない
 - `b.File` (`*sockat.SocketFile`) は bind した直後にソケットのファイルの realpath と `(st_dev, st_ino)` を覚え、`Remove()` はそのパスが今も同じファイルの時だけ消す。覚えられなければ `ListenEx` は listener を閉じ、綴りの E を片付け、ファイルは消さずにエラーを返す
 - 元のパスの最後の要素が既にある symlink の時 (macOS・NetBSD では標準の bind がそれを辿り、その先にソケットを作る)、覚えるのは辿った先のソケットのファイルで、`Remove()` はそれを消す (利用者の symlink は消さない)。辿った先がソケットでなければ覚えられない時と同じに扱う
 - **`Remove()` は listener を閉じる前に呼ぶ** (上の `defer` の順で `Remove` が先に走る)。置き換えを見分けられるのは listener が開いている間だけ: 開いている間はカーネルがソケットのファイルを掴んでいるので、他のプロセスが消して作り直した物は別の `(st_dev, st_ino)` になり、`Remove` は消さない。閉じた後に消して作り直された物は、番号をすぐ使い回すファイルシステム (Linux の ext4、BSD の UFS / FFS) では同じ番号になり、`Remove` が消しうる
-- `Remove()` はファイルを消した後に `Cleanup()` もする。`Cleanup()` は綴りが通る E (symlink) だけを片付け、ファイルは消さない。どちらも 1 回目だけ働き、2 回目以降は何もしない。自動では呼ばれない
+- `Remove()` はファイルを消した後に `Cleanup()` もする。`Cleanup()` は綴りが通る E (symlink) だけを片付け、ファイルは消さない。どちらも成功した後の呼び出しは何もしない。失敗した後の呼び出しはやり直す (`Remove` はファイルを消せた後に `Cleanup` だけ失敗したなら、次はファイルに触らず `Cleanup` だけをやり直す。ファイルをやり直す時も同じファイルかを確かめ直す)。並行して呼ばれても消す操作は同時に 1 つ。自動では呼ばれない
 - `Remove()` がエラーを返すのは、ファイルを確かめられない時 (権限が無い等) と消すのに失敗した時。既に無い・置き換わっていた時は nil。エラーでも `Cleanup` までは行う
 - 確かめてから消すまでの一瞬に置き換えられると見分けられない (POSIX に inode を指定して消す手段が無い)
 - `ListenEx` の listener は Close でファイルを消さない (短いパスも)。消すのは `Remove` だけ
@@ -194,7 +194,7 @@ c, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: f.Path, Net: "unix"}) //
 | 使えない時 | `ENAMETOOLONG` (thread-cwd・at でしか届かない長さ) | `ENAMETOOLONG` (B を作れない等) |
 
 - 標準に渡す長さ以下のパスはそのまま返す (`Spelling` は `Original` / `CwdRelative`)
-- `ForBind.SocketFile()` は呼んだ時点で綴りを辿り、ソケットのファイルを覚えた `*SocketFile` を返す (元のパスの最後の要素が symlink なら、`ListenEx` と同じく辿った先を覚える)。bind の前 (`ENOENT`)、辿った先がソケットでない (`ENOTSOCK`)、`CwdRelative` の綴りで resolve の時と cwd が違う時はエラー。返す `SocketFile` の `Cleanup` は `ForBind` の `Cleanup` と同じ E を 1 回だけ片付ける
+- `ForBind.SocketFile()` は呼んだ時点で綴りを辿り、ソケットのファイルを覚えた `*SocketFile` を返す (元のパスの最後の要素が symlink なら、`ListenEx` と同じく辿った先を覚える)。bind の前 (`ENOENT`)、辿った先がソケットでない (`ENOTSOCK`)、`CwdRelative` の綴りで resolve の時と cwd が違う時はエラー。返す `SocketFile` の `Cleanup` は `ForBind` の `Cleanup` と同じ E を片付ける (先に成功した方が消し、以後はどちらも何もしない)
 - `ForConnect` は `SocketFile` を返さない (消し間違いを型で防ぐ)。`UsableCrossUID` は見ない (connect の綴りは相手に残らない)
 - エラーは `*RouteError` で、中は `*os.PathError` (`Op` は `resolve`、`Path` は渡したパス)
 - 片付けた後の綴りは使わない

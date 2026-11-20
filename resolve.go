@@ -83,17 +83,21 @@ func ResolveForConnect(path string, opts Options) (*ForConnect, error) {
 	return defaultWorld.resolveForConnect(path, opts)
 }
 
-// Cleanup removes the E the spelling goes through, once: Path then names
-// nothing (do not use it afterwards). B and D stay. It does nothing for a
-// spelling that goes through no E. It is the same cleanup as that of every
-// SocketFile f.SocketFile gave: the E is removed once by whichever comes
-// first. The error is an *os.PathError. Calling it again does nothing.
+// Cleanup removes the E the spelling goes through: Path then names nothing
+// (do not use it afterwards). B and D stay. It does nothing for a spelling
+// that goes through no E. It is the same cleanup as that of every SocketFile
+// f.SocketFile gave: whichever succeeds first removes the E, and the others
+// then do nothing. The error is an *os.PathError. After a success, calling
+// it again does nothing and returns nil; after a failure, the next call
+// tries again. Concurrent calls, with those of the SocketFiles' Remove and
+// Cleanup, remove one at a time.
 func (f *ForBind) Cleanup() error { return f.clean.cleanup() }
 
-// Cleanup removes the E the spelling goes through, once: Path then names
-// nothing (do not use it afterwards). B and D stay. It does nothing for a
-// spelling that goes through no E. The error is an *os.PathError. Calling
-// it again does nothing.
+// Cleanup removes the E the spelling goes through: Path then names nothing
+// (do not use it afterwards). B and D stay. It does nothing for a spelling
+// that goes through no E. The error is an *os.PathError. After a success,
+// calling it again does nothing and returns nil; after a failure, the next
+// call tries again. Concurrent calls unlink one at a time.
 func (f *ForConnect) Cleanup() error { return f.clean.cleanup() }
 
 // SocketFile records the socket file bound by f.Path (its real path and

@@ -53,6 +53,17 @@ func danglingLen(name string) int {
 	return linkRandomLen + 1 + len(name)
 }
 
+// linkedSpelling is what a spelling through b is good for: through procB
+// (viaProc) it lasts as long as the process, can be followed by the same uid
+// only, and does not go through /tmp; through B's real path it lasts until
+// the cleanup, and b's mode and place decide the rest.
+func linkedSpelling(b *base, viaProc, removable bool) Spelling {
+	if viaProc {
+		return Spelling{Kind: Linked, Removable: removable, Until: UntilProcess, UsableCrossUID: false, UsableWithPrivateTmp: true}
+	}
+	return Spelling{Kind: Linked, Removable: removable, Until: UntilCleanup, UsableCrossUID: b.crossUID, UsableWithPrivateTmp: !b.tmpPath}
+}
+
 // baseValue is the diagnostics' base of a spelling through b: the form of
 // the spelling for a B in a temporary place (procB is "proc", a real path the
 // place's kind), and the B itself otherwise ("sockdir", "given").

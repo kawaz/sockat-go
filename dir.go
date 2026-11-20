@@ -51,8 +51,8 @@ func (b *base) ownDLocked(cfg *config) (*procD, error) {
 var errDTakenAway = errors.New("sockat: D was removed before it was locked")
 
 // makeOwnD makes a D in B (bfd), SPEC-routes "D と E" steps 1 to 4: mkdirat 0700
-// under a random name (another on EEXIST, linkAttempts at most), opened
-// O_NOFOLLOW and checked to be a directory of ours, set to 0711, locked
+// under a random name (another on EEXIST, linkAttempts at most), set to 0711,
+// opened O_NOFOLLOW and checked to be a directory of ours (openMade), locked
 // (LOCK_SH), and its name looked up again: a D taken away between the mkdirat
 // and the lock (another process's sweep() saw it unlocked) is
 // errDTakenAway, its fd closed.

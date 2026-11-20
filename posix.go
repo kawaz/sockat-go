@@ -30,7 +30,7 @@ func (d *dialer) relative() (endpoint, error) {
 // symlinkFile connects through a symlink to the socket file in the first of
 // cfg.tmpBases where it can be used (symlinkFile).
 func (d *dialer) symlinkFile() (endpoint, error) {
-	return symlinkFile(opDial, d.path, d.cfg.tmpBases)
+	return symlinkFile(d.path, d.cfg.tmpBases)
 }
 
 // relative is a relative spelling of an absolute socket path, checked to

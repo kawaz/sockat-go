@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -35,10 +34,7 @@ func TestDirectMaxIsSunPathLessTheNUL(t *testing.T) {
 // is checked against net.ListenUnix itself: it binds a path of directMax
 // bytes and refuses one byte more. Then run sends the directMax-byte path to
 // the net package unchanged (routeStandard) and the one a byte longer down the
-// routes (anything else), with the socket at the given path either way (on
-// the systems where a listen of a long path has no route, OpenBSD and
-// illumos, the listen is ENAMETOOLONG and only the dial goes down the routes;
-// NetBSD's listen has symlink-file, longListen).
+// routes (anything else), with the socket at the given path either way.
 func TestAPathTheNetPackageAcceptsGoesToItAndOneByteMoreDoesNot(t *testing.T) {
 	t.Parallel()
 	std := tmpDir(t)
@@ -64,12 +60,11 @@ func TestAPathTheNetPackageAcceptsGoesToItAndOneByteMoreDoesNot(t *testing.T) {
 
 	d := tmpDir(t)
 	at = nest(t, d, directMax, "s.sock")
-	ep, r, err := run(opListen, at)
-	ll := must{t}.listener(ep, err)
+	ll, r := listenRoute(t, at)
 	if r != routeStandard {
 		t.Fatalf("%d bytes: %s, want %s", directMax, r, routeStandard)
 	}
-	ep, r, err = run(opDial, at)
+	ep, r, err := runDial(at)
 	cc := must{t}.conn(ep, err)
 	if r != routeStandard {
 		t.Fatalf("%d bytes: %s, want %s", directMax, r, routeStandard)
@@ -77,19 +72,14 @@ func TestAPathTheNetPackageAcceptsGoesToItAndOneByteMoreDoesNot(t *testing.T) {
 	ping(t, ll, cc)
 
 	over = nest(t, d, directMax+1, "o.sock")
-	if longListen() {
-		ep, r, err = run(opListen, over)
-		ll = must{t}.listener(ep, err)
-		if r == routeStandard {
-			t.Fatalf("%d bytes went to the net package", directMax+1)
-		}
-		if !isSocket(over) {
-			t.Fatalf("no socket at %s (route %s)", over, r)
-		}
-	} else {
-		ll = listenPublic(t, over)
+	ll, r = listenRoute(t, over)
+	if r == routeStandard {
+		t.Fatalf("%d bytes went to the net package", directMax+1)
 	}
-	ep, r, err = run(opDial, over)
+	if !isSocket(over) {
+		t.Fatalf("no socket at %s (route %s)", over, r)
+	}
+	ep, r, err = runDial(over)
 	cc = must{t}.conn(ep, err)
 	if r == routeStandard {
 		t.Fatalf("%d bytes went to the net package", directMax+1)
@@ -97,14 +87,12 @@ func TestAPathTheNetPackageAcceptsGoesToItAndOneByteMoreDoesNot(t *testing.T) {
 	ping(t, ll, cc)
 }
 
-// Closing a listener: a short path behaves as the net package does, which
-// removes the socket file (SetUnlinkOnClose defaults to true there). A long
-// path's listener does not remove it: the address it holds is the spelling
-// the kernel was given (R/<name>, or /proc/self/fd/<D>/R/<name>), not the
-// path, and names nothing once R is gone. So the long path's socket file
-// stays, for the caller to remove by the path they hold (or ListenEx's
-// discard).
-func TestOnlyAShortPathsListenerRemovesItsSocketFileOnClose(t *testing.T) {
+// Closing a listener of Listen unlinks the address it holds, as the net
+// package's does: a short path's socket file is removed, and so is a long
+// path's bound through link-dir (its spelling B/D/E/<name> goes through E to
+// the socket's directory, so the unlink reaches the file). The other
+// spellings are TestTheListenerOfListenUnlinksItsSpellingOnClose's.
+func TestAListenersCloseRemovesTheSocketFileThroughTheSpelling(t *testing.T) {
 	t.Parallel()
 	d := tmpDir(t)
 	short := d + "/s.sock"
@@ -116,19 +104,15 @@ func TestOnlyAShortPathsListenerRemovesItsSocketFileOnClose(t *testing.T) {
 	if exists(short) {
 		t.Fatal("a short path's listener left its socket file on Close")
 	}
-
-	if !longListen() {
-		return
-	}
 	for _, total := range []int{directMax + 1, 300} {
 		long := nest(t, d, total, "s.sock")
-		l, err := Listen(long)
-		if err != nil {
-			t.Fatal(err)
+		l, r := listenRoute(t, long)
+		if r != routeLinkDir {
+			t.Fatalf("%d bytes: %s, want %s", total, r, routeLinkDir)
 		}
 		l.Close()
-		if !isSocket(long) {
-			t.Fatalf("%d bytes: a long path's listener removed its socket file on Close", total)
+		if exists(long) {
+			t.Fatalf("%d bytes: a link-dir listener left its socket file on Close", total)
 		}
 	}
 }
@@ -139,9 +123,7 @@ func TestOnlyAShortPathsListenerRemovesItsSocketFileOnClose(t *testing.T) {
 // full working order. The sizes run from directMax + 1 through 150 (past
 // sun_path on every system) and 253 / 254 (where SPEC's widened sockaddr on
 // macOS would end; sockat-go does not use it, so nothing may change there) to
-// 600: no route puts the directory in the sockaddr. Where a listen of a long
-// path has no route (OpenBSD, illumos), the listen is checked to be
-// ENAMETOOLONG and only the dial is the public API's (listenPublic).
+// 600: no route puts the directory in the sockaddr.
 func TestLongPathsListenAtTheGivenPathAndAcceptConnections(t *testing.T) {
 	t.Parallel()
 	for _, total := range []int{directMax + 1, 150, 253, 254, 300, 600} {
@@ -168,9 +150,7 @@ func TestLongPathsListenAtTheGivenPathAndAcceptConnections(t *testing.T) {
 // socket nobody listens on ECONNREFUSED. A route must not turn these into
 // "try the next route" and end up reporting something else, or creating the
 // socket elsewhere. The short path is the net package's own answer, for
-// comparison. A listen on an existing socket at a long path is checked only
-// where a listen of a long path has a route (through D, or symlink-file,
-// which finds the socket at the path and returns its EADDRINUSE).
+// comparison.
 func TestFailuresAreTheKernelsErrorsAsNetOpErrors(t *testing.T) {
 	t.Parallel()
 	for _, total := range []int{60, 150, 300, 600} {
@@ -191,10 +171,8 @@ func TestFailuresAreTheKernelsErrorsAsNetOpErrors(t *testing.T) {
 		wantOpError(t, what("dial a missing socket"), opDial, p, err, syscall.ENOENT)
 
 		listenPublic(t, p)
-		if longListen() || len(p) <= directMax {
-			_, err = Listen(p)
-			wantOpError(t, what("listen on an existing socket"), opListen, p, err, syscall.EADDRINUSE)
-		}
+		_, err = Listen(p)
+		wantOpError(t, what("listen on an existing socket"), opListen, p, err, syscall.EADDRINUSE)
 
 		stale := filepath.Dir(p) + "/stale.sock"
 		staleSocket(t, stale)
@@ -221,23 +199,23 @@ func TestAMissingDirectoryIsENOENTEvenWhenTheNameFitsNoSockaddr(t *testing.T) {
 
 // A file name of 254 bytes (NAME_MAX is 255) directly under a short directory.
 //
-//   - Listen: the routes through D put the file name in the sockaddr behind R/
-//     (and /proc/self/fd/<D>/ in proc), and 254 bytes fits none:
-//     ENAMETOOLONG, the error of a bind to a path too long for sun_path, and
-//     nothing is created. Where a bind follows a symlink (macOS),
-//     symlink-file is spelled without the file name and binds it at the path
-//     (DR-0016); Linux does not try it.
+//   - Listen: link-dir, thread-cwd and at put the file name in the sockaddr
+//     behind B/D/E/ or E/, and 254 bytes fits none: ENAMETOOLONG, the error
+//     of a bind to a path too long for sun_path, and nothing is created.
+//     Where a bind follows a symlink (macOS, NetBSD), link-file is spelled
+//     without the file name and binds it at the path; Linux does not try
+//     it.
 //   - Dial (except FreeBSD, whose connectat takes the name as bindat does): the
 //     symlink to the socket file is spelled without the file name, so the
 //     name's length does not matter. With nothing there the error is the
 //     kernel's ENOENT, not ENAMETOOLONG; a socket bound under a short name and
 //     renamed to the long one is reached and talks.
-func TestAFileNameOf254BytesIsListenedOnOnlyThroughSymlinkFileAndDialed(t *testing.T) {
+func TestAFileNameOf254BytesIsListenedOnOnlyThroughLinkFileAndDialed(t *testing.T) {
 	t.Parallel()
 	d := tmpDir(t)
 	p := d + "/" + strings.Repeat("n", 254)
 	l, err := Listen(p)
-	if listenTriesSymlinkFile && bindFollowsSymlink() {
+	if bindFollowsHere != followsNo && bindFollowsSymlink() {
 		if err != nil || !isSocket(p) {
 			t.Fatalf("listen through symlink-file: %v, socket there %v", err, isSocket(p))
 		}
@@ -401,8 +379,7 @@ func TestALeadingNULIsEINVALWhereThereAreNoAbstractNames(t *testing.T) {
 // Where the kernel has no abstract socket names (all but Linux and Android),
 // a path that starts with '@' is a relative path like any other (SPEC "短いパス"):
 // a short one is bound through the standard library as the file "@..." in the
-// cwd, loses cwd-relative as every relative path taken as it is does, is
-// and reached by a dial of the same path. On illumos the net package would
+// cwd, CwdRelative as every relative path taken as it is, and reached by a dial of the same path. On illumos the net package would
 // read the '@' as an abstract name, which that kernel lacks (ENOENT);
 // sockat-go hands it "./@..." there instead (DR-0002), so the kernel keeps
 // that spelling, which still names the same file. Close leaves the file on
@@ -423,13 +400,13 @@ func TestALeadingAtIsAPathWhereThereAreNoAbstractNames(t *testing.T) {
 		return
 	}
 	const p = "@s.sock"
-	l, _, res, err := ListenEx(p, NoLastResort)
+	l, res, err := ListenEx(p, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer l.Close()
-	if res.Route != string(routeStandard) || !slices.Equal(res.Losses, []Loss{CwdRelative}) {
-		t.Fatalf("%q: %+v, want [cwd-relative] through standard", p, res)
+	if res.Route != string(routeStandard) || res.Spelling != (Spelling{Kind: CwdRelative}) {
+		t.Fatalf("%q: %+v, want CwdRelative through standard", p, res)
 	}
 	if !isSocket(p) {
 		t.Fatalf("%q did not name the file %q in the cwd", p, p)
@@ -463,7 +440,7 @@ func TestALeadingAtIsAPathWhereThereAreNoAbstractNames(t *testing.T) {
 	}
 	edge := "@" + strings.Repeat("e", directMax-1)
 	le := listenAt(t, filepath.Join(wd, edge))
-	ep, r, err := runWith(opDial, edge, nil)
+	ep, r, err := runDialWith(edge, nil)
 	ce := must{t}.conn(ep, err)
 	defer ce.Close()
 	ping(t, le, ce)
@@ -491,11 +468,14 @@ func TestADirectoryPartThatIsAFileIsENOTDIR(t *testing.T) {
 	cfg := configFromTmpdir(base)
 	cfg.dBases = []string{base}
 	markUntouched(t, base)
-	for _, o := range []op{opListen, opDial} {
-		if _, _, err := runLong(o, p, cfg); !errors.Is(err, syscall.ENOTDIR) {
-			t.Fatalf("%s: %v, want ENOTDIR", o.netName(), err)
-		}
+	if _, _, err := runDialLong(p, cfg); !errors.Is(err, syscall.ENOTDIR) {
+		t.Fatalf("dial: %v, want ENOTDIR", err)
 	}
+	w, ps := testWorld(t, nil)
+	if _, _, err := w.listen(p, Options{}, nil); !errors.Is(err, syscall.ENOTDIR) {
+		t.Fatalf("listen: %v, want ENOTDIR", err)
+	}
+	assertEmpty(t, ps.tmp)
 	assertUntouched(t, base)
 }
 
@@ -544,12 +524,16 @@ func TestChildRealPathOfARemovedCwd(t *testing.T) {
 	cfg := configFromTmpdir(os.Getenv("SOCKAT_BASE"))
 	cfg.dBases = []string{os.Getenv("SOCKAT_BASE")}
 	p := "./" + strings.Repeat("n", directMax)
-	for _, o := range []op{opListen, opDial} {
-		_, _, err := runLong(o, p, cfg)
-		if !errors.Is(err, want) || errors.Is(err, syscall.ENAMETOOLONG) {
-			t.Fatalf("%s: %v, want %v", o.netName(), err, want)
-		}
+	_, _, err = runDialLong(p, cfg)
+	if !errors.Is(err, want) || errors.Is(err, syscall.ENAMETOOLONG) {
+		t.Fatalf("dial: %v, want %v", err, want)
 	}
+	w, ps := testWorld(t, nil)
+	_, _, err = w.listen(p, Options{}, nil)
+	if !errors.Is(err, want) || errors.Is(err, syscall.ENAMETOOLONG) {
+		t.Fatalf("listen: %v, want %v", err, want)
+	}
+	assertEmpty(t, ps.tmp)
 }
 
 // TestChildRemoveDir removes the empty directory $SOCKAT_DIR, from a process

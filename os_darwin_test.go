@@ -24,20 +24,17 @@ import (
 //	| way          | path                          | inputs                  | listen       | dial         |
 //	|--------------|-------------------------------|-------------------------|--------------|--------------|
 //	| standard     | directMax bytes               | (the public order)      | standard     | standard     |
-//	| thread-cwd   | 600 bytes under /tmp          | D in a place of its own | thread-cwd   | thread-cwd   |
+//	| thread-cwd   | 600 bytes under /tmp          | D in a place of its own | (listenAt)   | thread-cwd   |
 //	| relative     | directMax bytes below the cwd | no means, no place      | (listenAt)   | relative     |
-//	| symlink-file | 600 bytes under /tmp          | no means, a place       | symlink-file | symlink-file |
-//
-// A listen tries symlink-file first (a bind follows a symlink here), so the
-// ways that force another route give it no place.
+//	| symlink-file | 600 bytes under /tmp          | no means, a place       | (listenAt)   | symlink-file |
 func ways(t *testing.T) []way {
 	t.Helper()
 	d, dbase, short := tmpDir(t), tmpDir(t), tmpDir(t)
 	return []way{
 		{"standard", nest(t, d+"/direct", directMax, "s.sock"), nil, routeStandard, routeStandard},
-		{"thread-cwd", nest(t, d+"/thread", 600, "s.sock"), centralCfg(dbase), routeThreadCwd, routeThreadCwd},
+		{"thread-cwd", nest(t, d+"/thread", 600, "s.sock"), centralCfg(dbase), "", routeThreadCwd},
 		{"relative", belowCwdPath(t, directMax, "s.sock"), fallbackCfg(), "", routeRelative},
-		{"symlink-file", nest(t, d+"/symlink", 600, "s.sock"), fallbackCfg(short), routeSymlinkFile, routeSymlinkFile},
+		{"symlink-file", nest(t, d+"/symlink", 600, "s.sock"), fallbackCfg(short), "", routeSymlinkFile},
 	}
 }
 
@@ -201,10 +198,12 @@ func TestTheSocketsDirectoryIsOpenedForSearchOnly(t *testing.T) {
 	p := nestTail(t, locked, 500, "s.sock")
 	unreadable(t, filepath.Dir(p))
 	t.Cleanup(func() { os.Chmod(filepath.Dir(p), 0o700) })
-	l, r := listenLong(t, p, centralCfg())
-	if r != routeThreadCwd || !isSocket(p) {
-		t.Fatalf("listen in a directory without read permission: %s", r)
+	w, _ := testWorld(t, nil)
+	l, b, err := w.listen(p, Options{}, nil)
+	if err != nil || b.route != routeLinkDir || !isSocket(p) {
+		t.Fatalf("listen in a directory without read permission: %s, %v", b.route, err)
 	}
+	t.Cleanup(func() { l.Close() })
 	c, r := dialLong(t, p, centralCfg())
 	if r != routeThreadCwd {
 		t.Fatalf("dial: %s", r)
@@ -235,6 +234,6 @@ func TestTheSocketsDirectoryIsOpenedForSearchOnly(t *testing.T) {
 		_, err = searchOrReadOnly(filepath.Dir(p), -1, e)
 		wantErrno(t, e.Error()+" for a directory without read permission", err, syscall.EACCES)
 	}
-	_, err := searchOrReadOnly(readable, -1, syscall.EACCES)
+	_, err = searchOrReadOnly(readable, -1, syscall.EACCES)
 	wantErrno(t, "an EACCES from O_SEARCH", err, syscall.EACCES)
 }

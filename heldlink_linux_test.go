@@ -174,7 +174,7 @@ func TestAFailureThroughProcHeldIsReturnedAndNotRetried(t *testing.T) {
 	}
 	for _, c := range cases {
 		markUntouched(t, later)
-		_, r, err := runLong(opDial, c.path, cfg)
+		_, r, err := runDialLong(c.path, cfg)
 		wantErrno(t, "dial "+c.what, err, c.errno)
 		if r != c.via {
 			t.Fatalf("dial %s: failed through %q, want %q", c.what, r, c.via)
@@ -202,30 +202,11 @@ func TestWithoutProcThereIsNoProcHeld(t *testing.T) {
 		markUntouched(t, base)
 		cfg := heldCfg(place, base)
 		cfg.procSelfFD = none
-		_, _, err := runLong(opDial, p, cfg)
+		_, _, err := runDialLong(p, cfg)
 		wantErrno(t, "dial with "+none, err, syscall.ENAMETOOLONG)
 		assertUntouched(t, place)
 		assertUntouched(t, base)
 	}
-}
-
-// A listen never takes proc-held, or any route of a dial alone: it creates
-// nothing in a place for symlink-file, unsafe or not. With the thread cwd off, a
-// 95-byte name is too long for proc, so the listen is ENAMETOOLONG; a short
-// name takes proc (D goes in the socket's directory here, procCfg giving no
-// place for D).
-func TestAListenCreatesNothingInAnUnsafePlace(t *testing.T) {
-	t.Parallel()
-	base := unsafePlace(t)
-	markUntouched(t, base)
-	d := tmpDir(t)
-	_, _, err := runLong(opListen, d+"/"+strings.Repeat("n", 95), procCfg(base))
-	wantErrno(t, "listen on a 95-byte name", err, syscall.ENAMETOOLONG)
-	_, r := listenLong(t, d+"/s"+strings.Repeat("x", 60), procCfg(base))
-	if r != routeProc {
-		t.Fatalf("listen on a short name: %s", r)
-	}
-	assertUntouched(t, base)
 }
 
 // A umask that takes the owner's bits makes mkdir(0700) create a directory
@@ -293,7 +274,7 @@ func TestADialThroughProcHeldFailsAtOnceOnAFullBacklog(t *testing.T) {
 			err error
 		}
 		res := atOnce(t, "a dial to a full backlog", func() result {
-			ep, r, err := runLong(opDial, p, heldCfg(place))
+			ep, r, err := runDialLong(p, heldCfg(place))
 			return result{ep, r, err}
 		})
 		if res.err != nil {

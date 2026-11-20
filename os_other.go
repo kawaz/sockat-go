@@ -48,12 +48,6 @@ const dOpenFlagsRetry = 0
 // hasProc: no /proc routes here.
 const hasProc = false
 
-// listenTriesSymlinkFile: a listen tries symlink-file after standard, except
-// where a bind is measured not to follow a symlink in the last component
-// (OpenBSD, illumos; SPEC "試す順番"). NetBSD follows it; on a system not
-// measured, whether it follows is told at run time (symlinkFile).
-const listenTriesSymlinkFile = runtime.GOOS != "openbsd" && runtime.GOOS != "illumos"
-
 // bindFollowsHere is whether bind(2) here follows a symlink in the last
 // component: measured to on NetBSD and not to on OpenBSD and illumos (SPEC
 // "bind の順"); told at run time elsewhere.

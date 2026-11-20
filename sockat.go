@@ -9,18 +9,22 @@ import "net"
 // behaves exactly as with the net package (including the removal of the
 // socket file when the listener is closed). A longer path is reached by the
 // routes the system has (see the package documentation); the socket file is
-// created at path, and is not removed when the listener is closed.
+// created at path, and the spelling the kernel keeps for it (the listener's
+// Addr()) goes through a directory of this user's processes in /tmp (or
+// $XDG_RUNTIME_DIR, $TMPDIR, the socket's directory), left there for as long
+// as the process lives. Closing the listener unlinks that spelling as the net
+// package does: through a spelling that names the socket's directory the
+// socket file is removed, through one that names the socket file itself the
+// symlink is removed and the file stays, and through a spelling that names
+// nothing, nothing is. ListenEx tells which, and removes the file reliably.
 //
 // The error is a *net.OpError, as from the net package: for example
 // EADDRINUSE when path exists, ENOENT when its directory does not,
 // ENAMETOOLONG when no route reaches path, EINVAL for a path that contains a
 // NUL byte or for a long path that does not end with a file name.
 func Listen(path string) (*net.UnixListener, error) {
-	ep, _, err := run(opListen, path)
-	if err != nil {
-		return nil, err
-	}
-	return ep.(*net.UnixListener), nil
+	l, _, err := defaultWorld.listen(path, Options{}, nil)
+	return l, err
 }
 
 // Dial connects to the socket at path, like net.DialUnix("unix", nil, ...)
@@ -36,9 +40,42 @@ func Listen(path string) (*net.UnixListener, error) {
 // ENAMETOOLONG when no route reaches path, EINVAL for a path that contains a
 // NUL byte or for a long path that does not end with a file name.
 func Dial(path string) (*net.UnixConn, error) {
-	ep, _, err := run(opDial, path)
+	ep, _, err := runDial(path)
 	if err != nil {
 		return nil, err
 	}
 	return ep.(*net.UnixConn), nil
+}
+
+// ListenEx is Listen with Options, reporting what the spelling the kernel
+// keeps is good for (Bound.Spelling), a SocketFile that removes the socket
+// file and cleans up the spelling, and the routes tried.
+//
+// Right after the bind it records the socket file (its real path and
+// (st_dev, st_ino)) for Bound.File's Remove. When the file cannot be
+// recorded, the listener is closed, the file is left, and an error is
+// returned; so too for a relative path when the cwd changes (another
+// goroutine's os.Chdir) between the resolving of its real path and the bind.
+//
+// The listener does not remove the socket file on Close, short paths
+// included: the removal is Bound.File's alone. Neither Remove nor Cleanup is
+// done for you.
+//
+// The error is a *RouteError.
+func ListenEx(path string, opts Options) (*net.UnixListener, *Bound, error) {
+	return defaultWorld.listenEx(path, opts)
+}
+
+// DialEx is Dial, reporting the route taken and the routes tried. The
+// connection is the same as Dial's; a connect leaves no spelling with the
+// peer, so there is nothing to clean up.
+//
+// The error is a *RouteError.
+func DialEx(path string, opts Options) (*net.UnixConn, Report, error) {
+	tr := &trace{}
+	ep, r, err := runDialTraced(path, nil, tr)
+	if err != nil {
+		return nil, Report{}, &RouteError{Route: string(r), Skipped: tr.skips(), Err: err}
+	}
+	return ep.(*net.UnixConn), Report{Route: string(r), Skipped: tr.skips()}, nil
 }

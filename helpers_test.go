@@ -27,7 +27,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -473,7 +472,7 @@ func openTestDir(t *testing.T, dir string) *os.File {
 
 // dialFrom dials p by the system's connect order started at from (the routes
 // before it left out, so that a later route can be forced where an earlier
-// one would take p), as runLong does but with the socket's directory given as
+// one would take p), as runDialLong does but with the socket's directory given as
 // sdir (nil: as if it could not be opened). errUnusable when no route from
 // there can be used.
 func dialFrom(t *testing.T, p string, sdir *os.File, cfg *config, from route) (endpoint, route, error) {
@@ -498,14 +497,14 @@ func dialFrom(t *testing.T, p string, sdir *os.File, cfg *config, from route) (e
 	return nil, "", nil
 }
 
-// dialTraced dials p through runLong with cfg (a copy of it, given a trace)
-// and returns what runLong returned and the routes it recorded as tried and
+// dialTraced dials p through runDialLong with cfg (a copy of it, given a
+// trace) and returns what it returned and the routes it recorded as tried and
 // found unusable, in order. A connection is closed at the end of the test.
 func dialTraced(t *testing.T, p string, cfg *config) (endpoint, route, []skipped, error) {
 	t.Helper()
 	c := *cfg
 	c.trace = &trace{}
-	ep, r, err := runLong(opDial, p, &c)
+	ep, r, err := runDialLong(p, &c)
 	if ep != nil {
 		t.Cleanup(func() { ep.Close() })
 	}
@@ -554,36 +553,49 @@ func listenAt(t *testing.T, p string) *net.UnixListener {
 	return l
 }
 
-// longListen reports whether a listen of a long path has a route here: the
-// routes through D have a means (a thread cwd on Linux and macOS, /proc on
-// Linux, bindat on FreeBSD), or a listen tries symlink-file and bind(2)
-// follows the symlink (NetBSD; macOS too). OpenBSD and illumos have neither,
-// and Go has no fork: there a listen of a long path is ENAMETOOLONG.
-func longListen() bool {
-	switch runtime.GOOS {
-	case "linux", "android", "darwin", "ios", "freebsd":
-		return true
-	}
-	return listenTriesSymlinkFile && bindFollowsSymlink()
-}
-
-// listenPublic is Listen(p) where a listen of a long path has a route (the
-// listen must succeed: through D, or symlink-file on NetBSD); where it has
-// none (OpenBSD, illumos), it checks that Listen(p) is ENAMETOOLONG and makes
-// the listener with listenAt instead. So a test using it checks one of the
-// two on every system.
+// listenPublic is Listen(p), failing the test on an error; the listener is
+// closed at the end of the test.
 func listenPublic(t *testing.T, p string) *net.UnixListener {
 	t.Helper()
 	l, err := Listen(p)
-	if len(p) > directMax && !longListen() {
-		wantErrno(t, "listen of a long path with no means", err, syscall.ENAMETOOLONG)
-		return listenAt(t, p)
-	}
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { l.Close() })
 	return l
+}
+
+// listenRoute binds p as Listen does and returns the route taken, failing the
+// test on an error; the listener is closed at the end of the test.
+func listenRoute(t *testing.T, p string) (*net.UnixListener, route) {
+	t.Helper()
+	l, b, err := defaultWorld.listen(p, Options{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	return l, b.route
+}
+
+// threadName is a file name thread-cwd carries on Linux and macOS alike
+// (E/<name> and R/<name> are 103 bytes, macOS's directMax) and proc-direct
+// and link-dir do not (/proc/self/fd/<n>/<name> is at least 108 bytes, past
+// Linux's 107).
+var threadName = strings.Repeat("t", 92)
+
+// assertNoSockatEntry checks that dir holds nothing of sockat's (sockat.* or
+// .sockat.*): no D or R left behind.
+func assertNoSockatEntry(t *testing.T, dir string) {
+	t.Helper()
+	es, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range es {
+		if strings.HasPrefix(e.Name(), linkPrefix) || strings.HasPrefix(e.Name(), "."+linkPrefix) {
+			t.Fatalf("left behind in %s: %s", dir, e.Name())
+		}
+	}
 }
 
 // assertTouched checks that something was created in or removed from dir

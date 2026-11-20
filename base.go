@@ -125,20 +125,18 @@ func (w *world) autoBase(cross bool, fits fitsFunc) *base {
 
 // checkGiven checks Options.Base before any route is tried (SPEC-routes
 // "B の作り方"), making nothing: an absolute path ending with a name (EINVAL
-// otherwise), whose parent exists (ENOENT) and is a directory (ENOTDIR), with
-// every ancestor passing checkAncestors (EPERM), and B itself, when it is
-// there, a directory (ENOTDIR) of ours that others cannot write to (EPERM).
+// otherwise, givenShape), whose parent exists (ENOENT) and is a directory
+// (ENOTDIR), with every ancestor passing checkAncestors (EPERM), and B
+// itself, when it is there, a directory of ours that others cannot write to
+// (a symlink is EPERM, anything else ENOTDIR).
 // With cross (UsableCrossUID of a bind), every one of them must also have
 // search permission for others (EPERM). The error is an *os.PathError.
 func checkGiven(b string, cross bool) error {
 	pathErr := func(err error) error { return &os.PathError{Op: "base", Path: b, Err: err} }
-	if !isAbs(b) {
-		return pathErr(syscall.EINVAL)
+	if err := givenShape(b); err != nil {
+		return err
 	}
-	parent, name, err := splitPath(b)
-	if err != nil {
-		return pathErr(err)
-	}
+	parent, name, _ := splitPath(b)
 	real, err := realDir(parent)
 	if err != nil {
 		return pathErr(errnoOf(err))
@@ -161,10 +159,22 @@ func checkGiven(b string, cross bool) error {
 	}
 	mode := uint32(st.Mode)
 	switch {
+	case mode&unix.S_IFMT == unix.S_IFLNK:
+		return pathErr(syscall.EPERM)
 	case mode&unix.S_IFMT != unix.S_IFDIR:
 		return pathErr(syscall.ENOTDIR)
 	case st.Uid != uint32(os.Geteuid()) || mode&0o022 != 0 || (cross && mode&0o001 == 0):
 		return pathErr(syscall.EPERM)
+	}
+	return nil
+}
+
+// givenShape checks the form of Options.Base, whatever the length of the
+// socket path (SPEC "エラー"): absolute and ending with a name ("dir/", "..",
+// "/" do not). EINVAL, as an *os.PathError, otherwise.
+func givenShape(b string) error {
+	if _, _, err := splitPath(b); err != nil || !isAbs(b) {
+		return &os.PathError{Op: "base", Path: b, Err: syscall.EINVAL}
 	}
 	return nil
 }
@@ -299,8 +309,8 @@ func (w *world) makeBase(p place, real string, given bool) (*base, error) {
 var errNotOurs = errors.New("sockat: not a private directory of ours")
 
 // makeOrOpen makes B named name in the directory pfd, or opens the one there
-// (SPEC-routes "B の作り方" steps 3 to 5): mkdirat 0700, opened O_NOFOLLOW,
-// checked (a directory owned by us), then 0711. One already there is used
+// (SPEC-routes "B の作り方" steps 3 to 5): mkdirat 0700, then openMade. One
+// already there is used
 // when it is a directory owned by us that others cannot write to, whatever
 // its mode otherwise (left as it is); errNotOurs when it is not.
 func makeOrOpen(pfd int, name string) (int, error) {
@@ -328,31 +338,35 @@ func makeOrOpen(pfd int, name string) (int, error) {
 // tests list B), never through a symlink.
 const dirOpenFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
 
-// openMade opens the directory name just made in pfd (mkdirat 0700), checks
-// it is a directory owned by us, and sets it to 0711.
+// openMade sets the directory name just made in pfd (mkdirat 0700) to 0711
+// by its name (fchmodat: whatever a umask took off is put back, so it can be
+// opened), opens it O_DIRECTORY | O_NOFOLLOW and checks it is a directory
+// owned by us (SPEC-routes "B の作り方" step 4, "D と E" step 2). The parent
+// passed its check, so nobody else can replace the name in between.
 //
-// A umask that takes the owner's read or search bit leaves a directory we
-// cannot open: then the directory made is removed, when the name still looks
-// like it (a directory of ours; AT_REMOVEDIR takes only an empty one), and
-// the open's error returned (SPEC-routes "B の作り方" step 4).
+// When the mode cannot be set or the directory cannot be opened, the
+// directory made is removed, when the name still looks like it (a directory
+// of ours; AT_REMOVEDIR takes only an empty one), and the error returned.
 func openMade(pfd int, name string) (int, error) {
-	fd, err := unix.Openat(pfd, name, dirOpenFlags, 0)
-	if err != nil {
+	drop := func() {
 		var st unix.Stat_t
 		if unix.Fstatat(pfd, name, &st, unix.AT_SYMLINK_NOFOLLOW) == nil && isOurDir(&st) {
 			unix.Unlinkat(pfd, name, unix.AT_REMOVEDIR)
 		}
+	}
+	if err := unix.Fchmodat(pfd, name, 0o711, 0); err != nil {
+		drop()
+		return -1, err
+	}
+	fd, err := unix.Openat(pfd, name, dirOpenFlags, 0)
+	if err != nil {
+		drop()
 		return -1, err
 	}
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil || !isOurDir(&st) {
 		unix.Close(fd)
 		return -1, errNotOurs
-	}
-	if err := unix.Fchmod(fd, 0o711); err != nil {
-		unix.Close(fd)
-		unix.Unlinkat(pfd, name, unix.AT_REMOVEDIR)
-		return -1, err
 	}
 	return fd, nil
 }
@@ -380,12 +394,8 @@ func isOurDir(st *unix.Stat_t) bool {
 // could put another directory in its place. With otherX, each must also have
 // search permission for others (mode & 0o001), for a spelling another uid
 // follows. EPERM when one fails; the lstat's error when one cannot be looked
-// up.
-//
-// Design rationale: SPEC's "持ち主が root か自分で他人が書けない、か、sticky"
-// is read as an owner of root or ours in either case. A sticky directory
-// owned by another user lets that user rename what is in it, which is the
-// replacement the check is there to rule out.
+// up. A sticky directory needs that owner too: its owner can rename what is
+// in it.
 func checkAncestors(real string, otherX bool) error {
 	cs := components(real)
 	p := ""

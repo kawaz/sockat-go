@@ -49,17 +49,11 @@ func centralCfg(dBases ...string) *config {
 	return &config{dBases: dBases, procSelfFD: "/proc/self/fd", threadCwd: true}
 }
 
-// listenLong and dialLong run the long-path route order with cfg and return
-// the net package's types, failing the test on an error.
-func listenLong(t *testing.T, p string, cfg *config) (*net.UnixListener, route) {
-	t.Helper()
-	ep, r, err := runLong(opListen, p, cfg)
-	return must{t}.listener(ep, err), r
-}
-
+// dialLong runs the long-path connect order with cfg and returns the net
+// package's type, failing the test on an error.
 func dialLong(t *testing.T, p string, cfg *config) (*net.UnixConn, route) {
 	t.Helper()
-	ep, r, err := runLong(opDial, p, cfg)
+	ep, r, err := runDialLong(p, cfg)
 	return must{t}.conn(ep, err), r
 }
 
@@ -295,10 +289,8 @@ func TestSymlinkFileIsUnusableWhereItCannotBeUsedAndCreatesNothing(t *testing.T)
 		markUntouched(t, pl)
 	}
 	for _, pl := range append([]string{"/nonexistent", file}, places...) {
-		for _, o := range []op{opDial, opListen} {
-			if _, err := symlinkFile(o, p, []string{pl}); !errors.Is(err, errUnusable) {
-				t.Errorf("%s under %s: %v, want errUnusable", o.sysName(), pl, err)
-			}
+		if _, err := symlinkFile(p, []string{pl}); !errors.Is(err, errUnusable) {
+			t.Errorf("dial under %s: %v, want errUnusable", pl, err)
 		}
 	}
 	for _, pl := range places {
@@ -428,7 +420,7 @@ func TestAFailureThroughTheSymlinkIsReturnedAndNotRetried(t *testing.T) {
 		{"a missing directory", dir + "/nope/s.sock", syscall.ENOENT},
 	}
 	for _, c := range cases {
-		_, _, err := runLong(opDial, c.path, cfg)
+		_, _, err := runDialLong(c.path, cfg)
 		wantErrno(t, "dial "+c.what, err, c.errno)
 		assertEmpty(t, first)
 	}
@@ -479,7 +471,7 @@ func TestAnUnsafePlaceForTheSymlinkIsPassedOver(t *testing.T) {
 
 	q := dir + "/onlybad.sock"
 	listenAt(t, q)
-	_, _, err := runLong(opDial, q, fallbackCfg(bad...))
+	_, _, err := runDialLong(q, fallbackCfg(bad...))
 	wantErrno(t, "dial with only unsafe places", err, syscall.ENAMETOOLONG)
 	for _, pl := range bad {
 		assertUntouched(t, pl)
@@ -648,12 +640,10 @@ func TestWithNoRouteLeftAPathIsENAMETOOLONGAndNothingIsMade(t *testing.T) {
 	markUntouched(t, long)
 	markUntouched(t, dir)
 	none := fallbackCfg(long)
-	_, _, err := runLong(opDial, p, none)
+	_, _, err := runDialLong(p, none)
 	wantErrno(t, "dial", err, syscall.ENAMETOOLONG)
-	_, _, err = runLong(opDial, dir+"/nope/s.sock", none)
+	_, _, err = runDialLong(dir+"/nope/s.sock", none)
 	wantErrno(t, "dial in a missing directory", err, syscall.ENOENT)
-	_, _, err = runLong(opListen, dir+"/other.sock", none)
-	wantErrno(t, "listen", err, syscall.ENAMETOOLONG)
 	assertUntouched(t, long)
 	assertUntouched(t, dir)
 	assertNothingAccepted(t, l)
@@ -701,9 +691,9 @@ func TestAFailureThroughTheRelativeSpellingIsReturnedAndNotRetried(t *testing.T)
 	cfg := fallbackCfg(base)
 	staleSocket(t, dir+"/z.sock")
 	markUntouched(t, base)
-	_, _, err := runLong(opDial, p, cfg)
+	_, _, err := runDialLong(p, cfg)
 	wantErrno(t, "dial a missing socket", err, syscall.ENOENT)
-	_, _, err = runLong(opDial, dir+"/z.sock", cfg)
+	_, _, err = runDialLong(dir+"/z.sock", cfg)
 	wantErrno(t, "dial a socket nobody listens on", err, syscall.ECONNREFUSED)
 	assertUntouched(t, base)
 }

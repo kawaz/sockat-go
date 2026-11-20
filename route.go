@@ -50,30 +50,22 @@ type route string
 const (
 	// The names are SPEC's ("経路の名前"): the means, then what it is about.
 	routeStandard route = "standard" // the path itself, through the standard library
-	// A symlink <place>/sockat.XXXXXXXXXX to the socket file: a dial, and a
-	// listen where bind(2) follows it (not Linux).
-	routeSymlinkFile route = "symlink-file"
-	// Through D: R/<name> relative to D.
-	routeThreadCwd route = "thread-cwd" // a thread whose own cwd is D (Linux, macOS)
-	routeProc      route = "proc"       // /proc/self/fd/<D>/R/<name> (Linux)
-	routeAt        route = "at"         // bindat(2) / connectat(2) on D (FreeBSD)
-	routeForkCwd   route = "fork-cwd"   // SPEC's; Go has no fork route (named in skipped)
-	// A bind's form without D: .sockat.R/<name> relative to the socket's directory.
-	routeThreadCwdSockdir route = "thread-cwd-sockdir"
-	routeProcSockdir      route = "proc-sockdir"
-	routeAtSockdir        route = "at-sockdir"
-	routeForkCwdSockdir   route = "fork-cwd-sockdir" // SPEC's; Go has no fork route
-	// ListenEx's last resort: a symlink <place>/sockat.XXXXXXXXXX to the
-	// socket's directory, the bind by <place>/sockat.XXXXXXXXXX/<name>.
-	routeSymlinkDir route = "symlink-dir"
+	// The bind's routes (bind.go).
+	routeLinkDir  route = "link-dir"  // <B>/<D>/<E>/<name>, E a symlink to the socket's directory
+	routeLinkFile route = "link-file" // <B>/<D>/<E>, E a symlink to the socket file
+	// <E>/<name> relative to D, E removed right after: thread-cwd from a
+	// thread whose own cwd is D (Linux, macOS), at by bindat(2) (FreeBSD). A
+	// dial's thread-cwd and at go through D and R (central.go).
+	routeThreadCwd route = "thread-cwd"
+	routeAt        route = "at"
 	// The routes of a dial only (the connect order).
-	routeProcDirect route = "proc-direct" // /proc/self/fd/<dirfd>/<name> (Linux)
-	routeProcHeld   route = "proc-held"   // /proc/self/fd/<D>/s, s a symlink to the file (Linux)
-	routeRelative   route = "relative"    // the path relative to the cwd
-	routeWidened    route = "widened"     // SPEC's; sockat-go does not make it (named in skipped, macOS)
-	routeAtDirect   route = "at-direct"   // connectat(2) on the socket's directory (FreeBSD)
-	// DialEx's last resort, SPEC's; Go has no fork route (named in skipped).
-	routeForkCwdDirect route = "fork-cwd-direct"
+	routeProc        route = "proc"         // /proc/self/fd/<D>/R/<name> (Linux)
+	routeSymlinkFile route = "symlink-file" // a symlink <place>/sockat.XXXXXXXXXX to the socket file
+	routeProcDirect  route = "proc-direct"  // /proc/self/fd/<dirfd>/<name> (Linux)
+	routeProcHeld    route = "proc-held"    // /proc/self/fd/<D>/s, s a symlink to the file (Linux)
+	routeRelative    route = "relative"     // the path relative to the cwd
+	routeWidened     route = "widened"      // SPEC's; sockat-go does not make it (named in skipped, macOS)
+	routeAtDirect    route = "at-direct"    // connectat(2) on the socket's directory (FreeBSD)
 )
 
 // directMax is the longest path the standard library accepts: sun_path less
@@ -110,38 +102,91 @@ func reasonOf(err error) string {
 // through a path relative to it.
 var errCwdChanged = errors.New("the current directory changed while binding / connecting through a path relative to it; the result was discarded")
 
-// run binds (and listens) or connects to path, trying the routes in order.
+// listen binds (and listens) at path (Listen, ListenEx), recording the
+// routes found unusable in tr (nil records nothing).
+//
+// A path the standard library accepts goes to it as is (stdSpelling), before
+// anything else is looked at (the environment and Options included), and
+// its listener removes the socket file on Close as the net package's does. So
+// does an abstract socket name (Linux, Android). A NUL anywhere else, a
+// leading one too where the kernel has no abstract names, is EINVAL, whatever
+// the length: the standard library would cut the path short there and bind
+// some other path; so is an Options.Base of the wrong form (relative, or not
+// ending with a name). A longer path takes the bind order (bindLong). The error
+// is a *net.OpError for path; the route that bound and failed, if any, is in
+// the bound returned.
+func (w *world) listen(path string, opts Options, tr *trace) (*net.UnixListener, bound, error) {
+	if opts.Base != "" {
+		if err := givenShape(opts.Base); err != nil {
+			return nil, bound{}, opError(opListen, path, err)
+		}
+	}
+	if abstractName(path) {
+		ep, err := viaStd(opListen, path, true)
+		if err != nil {
+			return nil, bound{route: routeStandard}, err
+		}
+		return ep.(*net.UnixListener), bound{route: routeStandard, spelling: Spelling{Kind: Original}}, nil
+	}
+	if strings.IndexByte(path, 0) >= 0 {
+		return nil, bound{}, opError(opListen, path, fmt.Errorf("socket path must not contain a NUL byte: %w", syscall.EINVAL))
+	}
+	if s := stdSpelling(path); len(s) <= directMax {
+		ep, err := viaStd(opListen, s, s == path)
+		if err != nil {
+			if s != path {
+				err = opError(opListen, path, unwrapOpError(err))
+			}
+			return nil, bound{route: routeStandard}, err
+		}
+		l := ep.(*net.UnixListener)
+		if s != path {
+			l.SetUnlinkOnClose(false)
+		}
+		kind := Original
+		if !isAbs(path) {
+			kind = CwdRelative
+		}
+		return l, bound{route: routeStandard, spelling: Spelling{Kind: kind}}, nil
+	}
+	l, b, err := w.bindLong(path, opts, tr)
+	if err != nil {
+		return nil, b, opError(opListen, path, err)
+	}
+	return l, b, nil
+}
+
+// runDial connects to path (Dial, DialEx), trying the connect order.
 //
 // A path the standard library accepts goes to it as is (stdSpelling), before
 // anything else is looked at (the environment included). So does an abstract
 // socket name (Linux, Android). A NUL anywhere else, a leading one too where
-// the kernel has no abstract names, is EINVAL, whatever the length: the
-// standard library would cut the path short there and bind / connect some
-// other path.
-func run(o op, path string) (endpoint, route, error) {
-	return runTraced(o, path, nil, nil)
+// the kernel has no abstract names, is EINVAL, whatever the length.
+func runDial(path string) (endpoint, route, error) {
+	return runDialTraced(path, nil, nil)
 }
 
-// runWith is run with the environment's inputs given as cfg (the tests pass
-// their own); nil reads them from the environment, and only for a long path.
-func runWith(o op, path string, cfg *config) (endpoint, route, error) {
-	return runTraced(o, path, cfg, nil)
+// runDialWith is runDial with the environment's inputs given as cfg (the tests
+// pass their own); nil reads them from the environment, and only for a long
+// path.
+func runDialWith(path string, cfg *config) (endpoint, route, error) {
+	return runDialTraced(path, cfg, nil)
 }
 
-// runTraced is runWith recording the routes found unusable in tr (ListenEx,
-// DialEx), in place of cfg's own trace, unless tr is nil.
-func runTraced(o op, path string, cfg *config, tr *trace) (endpoint, route, error) {
+// runDialTraced is runDialWith recording the routes found unusable in tr
+// (DialEx), in place of cfg's own trace, unless tr is nil.
+func runDialTraced(path string, cfg *config, tr *trace) (endpoint, route, error) {
 	if abstractName(path) {
-		ep, err := viaStd(o, path, true)
+		ep, err := viaStd(opDial, path, true)
 		return ep, routeStandard, err
 	}
 	if strings.IndexByte(path, 0) >= 0 {
-		return nil, "", opError(o, path, fmt.Errorf("socket path must not contain a NUL byte: %w", syscall.EINVAL))
+		return nil, "", opError(opDial, path, fmt.Errorf("socket path must not contain a NUL byte: %w", syscall.EINVAL))
 	}
 	if s := stdSpelling(path); len(s) <= directMax {
-		ep, err := viaStd(o, s, s == path)
+		ep, err := viaStd(opDial, s, s == path)
 		if err != nil && s != path {
-			err = opError(o, path, unwrapOpError(err))
+			err = opError(opDial, path, unwrapOpError(err))
 		}
 		return ep, routeStandard, err
 	}
@@ -153,9 +198,9 @@ func runTraced(o op, path string, cfg *config, tr *trace) (endpoint, route, erro
 		c.trace = tr
 		cfg = &c
 	}
-	ep, r, err := runLong(o, path, cfg)
+	ep, r, err := runDialLong(path, cfg)
 	if err != nil {
-		return nil, r, opError(o, path, err)
+		return nil, r, opError(opDial, path, err)
 	}
 	return ep, r, nil
 }
@@ -192,15 +237,13 @@ func stdSpelling(path string) string {
 }
 
 // viaStd binds (and listens) or connects through the standard library with
-// spelling as the address.
+// spelling as the address. A listener removes its address on Close, as the
+// net package's do; the caller turns that off where the address is not to be
+// unlinked.
 //
-// direct is true when spelling is the caller's own path. Otherwise the
-// listener must not remove its "path" on Close: that is the spelling (a
-// /proc/self/fd path, a relative path, a symlink that is gone, a bare file
-// name), which by then may name some other file.
-//
-// The error of a spelling is the bare system call error (an *os.SyscallError)
-// so the caller can wrap it with the caller's path.
+// direct is true when spelling is the caller's own path; otherwise the error
+// is the bare system call error (an *os.SyscallError), for the caller to wrap
+// with the caller's path.
 func viaStd(o op, spelling string, direct bool) (endpoint, error) {
 	addr := &net.UnixAddr{Name: spelling, Net: "unix"}
 	var ep endpoint
@@ -209,9 +252,6 @@ func viaStd(o op, spelling string, direct bool) (endpoint, error) {
 	case opListen:
 		var l *net.UnixListener
 		if l, err = net.ListenUnix("unix", addr); err == nil {
-			if !direct {
-				l.SetUnlinkOnClose(false)
-			}
 			ep = l
 		}
 	case opDial:

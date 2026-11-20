@@ -17,16 +17,14 @@ func freebsdCfg(dBases ...string) *config {
 	return &config{dBases: dBases, procSelfFD: "/proc/self/fd", threadCwd: true}
 }
 
-// Every path over directMax bytes, however long its directory part, is bound
-// as R/<name> relative to D's fd (at) and connected by at-direct, the first of
-// the connect order (the name relative to the socket's directory), which makes
-// nothing: the socket is at the given path, the two talk, they are the net
-// package's types in working order, and D's place is empty afterwards.
-// R/<name> holds the name and 11 bytes, so a name of directMax - 11 bytes (92)
-// still takes at for a listen; one byte more is ENAMETOOLONG for a listen and
-// still at-direct for a dial (up to 103 bytes). Past that, neither at-direct
-// nor at fits: ENAMETOOLONG, with both recorded as unusable in that order. A
-// missing directory is ENOENT from opening it.
+// A bind no link-dir spelling fits takes at (bindat(2) on D, E/<name>): a
+// name of directMax - 11 bytes (92) still fits E/<name>, its spelling
+// Dangling and the socket at the path; one byte more is ENAMETOOLONG for a
+// bind and still at-direct for a dial (connectat(2) with the bare name, up to
+// 103 bytes). Past that, neither at-direct nor at fits a dial: ENAMETOOLONG,
+// with both recorded as unusable in that order. Of any long path whose name
+// fits, a dial takes at-direct and makes nothing. A missing directory is
+// ENOENT for both.
 func TestAtAndAtDirectBindAndConnect(t *testing.T) {
 	t.Parallel()
 	if got, want := stepNames(dialSteps(false)), []route{routeAtDirect, routeAt}; !slices.Equal(got, want) {
@@ -35,11 +33,7 @@ func TestAtAndAtDirectBindAndConnect(t *testing.T) {
 	base := tmpDir(t)
 	for _, total := range []int{directMax + 1, 300, 1000} {
 		p := nest(t, tmpDir(t), total, "s.sock")
-		ep, r, err := runLong(opListen, p, freebsdCfg(base))
-		l := must{t}.listener(ep, err)
-		if r != routeAt || !isSocket(p) {
-			t.Fatalf("%d: listen %s", total, r)
-		}
+		l := listenAt(t, p)
 		markUntouched(t, base)
 		ep, r, sks, err := dialTraced(t, p, freebsdCfg(base))
 		c := must{t}.conn(ep, err)
@@ -48,39 +42,38 @@ func TestAtAndAtDirectBindAndConnect(t *testing.T) {
 		}
 		assertUntouched(t, base)
 		checkStdTypes(t, l, c)
-		assertEmpty(t, base)
 	}
+	w, _ := testWorld(t, nil)
 	d := tmpDir(t)
 	fits := d + "/" + strings.Repeat("f", directMax-11)
-	ep, r, err := runLong(opListen, fits, freebsdCfg(base))
-	l := must{t}.listener(ep, err)
-	if r != routeAt {
-		t.Fatalf("a %d-byte name: listen %s", directMax-11, r)
+	l, b, err := w.listen(fits, Options{}, nil)
+	if err != nil || b.route != routeAt || b.spelling.Kind != Dangling || !isSocket(fits) {
+		t.Fatalf("a %d-byte name: listen %s %v, %v", directMax-11, b.route, b.spelling, err)
 	}
+	t.Cleanup(func() { l.Close() })
 	over := d + "/" + strings.Repeat("o", directMax-10)
-	_, _, err = runLong(opListen, over, freebsdCfg(base))
+	_, _, err = w.listen(over, Options{}, nil)
 	wantErrno(t, "listen past at", err, syscall.ENAMETOOLONG)
 	if err := syscall.Rename(fits, over); err != nil {
 		t.Fatal(err)
 	}
-	ep, r, err = runLong(opDial, over, freebsdCfg(base))
+	ep, r, err := runDialLong(over, freebsdCfg(base))
 	c := must{t}.conn(ep, err)
 	if r != routeAtDirect {
 		t.Fatalf("dial past at: %s", r)
 	}
 	ping(t, l, c)
 	long := d + "/" + strings.Repeat("n", directMax+1)
-	_, _, err = runLong(opListen, long, freebsdCfg(base))
-	wantErrno(t, "listen a long name", err, syscall.ENAMETOOLONG)
 	_, _, sks, err := dialTraced(t, long, freebsdCfg(base))
 	wantErrno(t, "dial a long name", err, syscall.ENAMETOOLONG)
 	if want := []route{routeStandard, routeAtDirect, routeAt}; !slices.Equal(namesOf(t, sks), want) {
 		t.Fatalf("dial a long name: skipped %v, want %v", sks, want)
 	}
-	for _, o := range []op{opListen, opDial} {
-		_, _, err = runLong(o, d+"/nope/"+strings.Repeat("n", 200), freebsdCfg(base))
-		wantErrno(t, o.sysName()+" in a missing directory", err, syscall.ENOENT)
-	}
+	missing := d + "/nope/" + strings.Repeat("n", 200)
+	_, _, err = runDialLong(missing, freebsdCfg(base))
+	wantErrno(t, "dial in a missing directory", err, syscall.ENOENT)
+	_, _, err = w.listen(missing, Options{}, nil)
+	wantErrno(t, "listen in a missing directory", err, syscall.ENOENT)
 	assertEmpty(t, base)
 }
 

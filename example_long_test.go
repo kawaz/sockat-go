@@ -1,5 +1,3 @@
-//go:build linux || android || darwin || ios || freebsd || netbsd
-
 package sockat_test
 
 import (
@@ -9,31 +7,40 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/kawaz/sockat-go"
 )
 
-// The examples here listen on a long path without the last resort, so they
-// run only where Listen has a route for one (OpenBSD and illumos have none:
-// there a long path is ENAMETOOLONG unless ListenEx is given UseLastResort,
-// as in ExampleListenEx_lastResort).
+// longDir makes a directory whose path is too long for sun_path, inside a
+// temporary directory that the caller removes.
+func longDir() (tmp, long string) {
+	tmp, err := os.MkdirTemp("", "sockat-example")
+	if err != nil {
+		log.Fatal(err)
+	}
+	long = filepath.Join(tmp, strings.Repeat("d", 60), strings.Repeat("e", 60))
+	if err := os.MkdirAll(long, 0o700); err != nil {
+		log.Fatal(err)
+	}
+	return tmp, long
+}
 
-// The listener of a long path does not remove the socket file on Close, and
-// its Addr is not the path passed (SPEC "respelled"): remove the file with
-// discard, not by the spelling Addr reports. NoLastResort tries the routes
-// Listen tries, and no more.
+// The listener of ListenEx does not remove the socket file on Close: remove
+// it with Bound.File's Remove, before closing the listener (Remove does not
+// close it). Remove also cleans up the symlink the spelling goes through.
 func ExampleListenEx() {
 	tmp, dir := longDir()
 	defer os.RemoveAll(tmp)
 	path := filepath.Join(dir, "server.sock")
 
 	func() {
-		l, discard, _, err := sockat.ListenEx(path, sockat.NoLastResort)
+		l, b, err := sockat.ListenEx(path, sockat.Options{})
 		if err != nil {
 			log.Fatal(err)
 		}
 		defer l.Close()
-		defer discard() // removes the socket file at path (does not close l)
+		defer b.File.Remove() // runs before l.Close
 	}()
 
 	_, err := os.Stat(path)
@@ -41,21 +48,20 @@ func ExampleListenEx() {
 	// Output: removed: true
 }
 
-// DialEx reports the route taken and the routes skipped before it, for a log;
-// a connect gives nothing up. The route names are for diagnostics: branch on
-// the losses, not on them.
+// DialEx reports the route taken and the routes skipped before it, for a log.
+// The route names are for diagnostics: do not branch on them.
 func ExampleDialEx() {
 	tmp, dir := longDir()
 	defer os.RemoveAll(tmp)
 	path := filepath.Join(dir, "server.sock")
-	l, discard, _, err := sockat.ListenEx(path, sockat.NoLastResort)
+	l, b, err := sockat.ListenEx(path, sockat.Options{})
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer l.Close()
-	defer discard()
+	defer b.File.Remove()
 
-	c, res, err := sockat.DialEx(path, sockat.NoLastResort)
+	c, rep, err := sockat.DialEx(path, sockat.Options{})
 	if err != nil {
 		var re *sockat.RouteError
 		if errors.As(err, &re) {
@@ -64,6 +70,6 @@ func ExampleDialEx() {
 		log.Fatal(err)
 	}
 	defer c.Close()
-	fmt.Println("losses:", len(res.Losses))
-	// Output: losses: 0
+	fmt.Println("connected through a route:", rep.Route != "")
+	// Output: connected through a route: true
 }

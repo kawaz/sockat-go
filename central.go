@@ -4,12 +4,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strconv"
 
 	"golang.org/x/sys/unix"
 )
 
-// The routes through D (SPEC "D と R"): a directory D of our own, held by its
+// The connect routes through D (SPEC "D と R", until the connect order is
+// rebuilt): a directory D of our own, held by its
 // fd, with a symlink R of a random name in it pointing to the socket's
 // directory; the bind / connect goes by R/<name> relative to D's fd.
 //
@@ -18,18 +18,20 @@ import (
 // wherever it is resolved later: not a file of the same name in someone's cwd,
 // not one behind a reused fd number.
 
-// runLong is the routes for a path longer than directMax.
+// rNameLen is the length of R's name, so R/<name> is rNameLen+1+len(name).
+const rNameLen = 10
+
+// runDialLong is the connect order for a path longer than directMax.
 //
 // The socket's directory is looked up (stat, then its real path) first, so a
 // missing one is ENOENT, one that is not a directory ENOTDIR, and a failure to
 // resolve it its own error, before anything else is decided or made. It is
 // then opened for the routes that need its fd (the socket's directory as a
-// place for D, a dial's proc-direct and at-direct); when it cannot be opened
-// (no read permission where directories are opened O_RDONLY), sdir is nil and
-// those routes cannot be used. Then a listen takes its order (listenRoutes)
-// and a dial the system's connect order (dialer); when no route can be used,
-// the error is ENAMETOOLONG.
-func runLong(o op, path string, cfg *config) (endpoint, route, error) {
+// place for D, proc-direct and at-direct); when it cannot be opened (no read
+// permission where directories are opened O_RDONLY), sdir is nil and those
+// routes cannot be used. When no route can be used, the error is
+// ENAMETOOLONG.
+func runDialLong(path string, cfg *config) (endpoint, route, error) {
 	dir, name, err := splitPath(path)
 	if err != nil {
 		return nil, "", err
@@ -56,187 +58,13 @@ func runLong(o op, path string, cfg *config) (endpoint, route, error) {
 	} else {
 		defer sdir.Close()
 	}
-	var ep endpoint
-	var r route
-	if o == opListen {
-		ep, r, err = listenRoutes(path, sdir, real, name, cfg)
-	} else {
-		d := newDialer(path, dir, real, name, sdir, cfg)
-		ep, r, err = d.run(dialSteps(d.procUsable))
-		d.close()
-	}
+	d := newDialer(path, dir, real, name, sdir, cfg)
+	ep, r, err := d.run(dialSteps(d.procUsable))
+	d.close()
 	if errors.Is(err, errUnusable) {
-		return nil, "", errNameTooLong(o)
+		return nil, "", errNameTooLong(opDial)
 	}
 	return ep, r, err
-}
-
-// rNameLen is the length of R's name, so R/<name> is rNameLen+1+len(name).
-const rNameLen = 10
-
-// listenRoutes binds name inside the socket's directory (real, opened as
-// sdir; path as the caller spelt it), by the first route that can be used:
-//
-//	| route        | system                    | spelling                          |
-//	|--------------|---------------------------|-----------------------------------|
-//	| symlink-file | not Linux                 | <place>/sockat.XXXXXXXXXX         |
-//	| at           | FreeBSD                   | bindat(D, R/<name>)               |
-//	| thread-cwd   | Linux, macOS              | R/<name> from a thread in D       |
-//	| proc         | Linux with /proc          | /proc/self/fd/<D>/R/<name>        |
-//	| fork-cwd     | (none: Go has no fork)    |                                   |
-//
-// symlink-file needs the kernel to follow a symlink in the last component of
-// a bind, which is told at run time (symlinkFile); Linux does not, and is
-// not tried. For the routes through D, what can be told without making
-// anything (the length, a seccomp filter, /proc) is checked first; nothing is
-// made when no means can be used. When D can be made nowhere, the same means
-// without D (withoutD). errUnusable when no route can be used (nothing left
-// behind).
-//
-// D is made once and removed when the routes through D are done: no later
-// route of a listen uses it (fork-cwd, which would, Go does not have).
-func listenRoutes(path string, sdir *os.File, real, name string, cfg *config) (endpoint, route, error) {
-	if listenTriesSymlinkFile {
-		ep, err := symlinkFile(opListen, path, cfg.tmpBases)
-		if !errors.Is(err, errUnusable) {
-			return ep, routeSymlinkFile, err
-		}
-		cfg.trace.add(routeSymlinkFile, reasonOf(err))
-	}
-	thread := cfg.threadCwd && threadCwdPossible()
-	proc := procFDUsableFor(sdir, cfg.procSelfFD)
-	ep, r, err := throughD(sdir, real, name, thread, proc, cfg)
-	if errors.Is(err, errNoD) {
-		// The routes through D were tried and found unusable, fork-cwd (which
-		// Go cannot make) among them; then the form without D.
-		cfg.trace.add(routeForkCwd, noForkRoute)
-		ep, r, err = withoutD(sdir, real, name, thread, proc, cfg)
-		if errors.Is(err, errUnusable) {
-			cfg.trace.add(routeForkCwdSockdir, noForkRoute)
-		}
-		return ep, r, err
-	}
-	if errors.Is(err, errUnusable) {
-		// SPEC's next route for a bind; Go cannot make it.
-		cfg.trace.add(routeForkCwd, noForkRoute)
-	}
-	return ep, r, err
-}
-
-// errNoD means that D could be made in no place (the form without D comes
-// next for a bind).
-var errNoD = errors.New("sockat: no place for D")
-
-// throughD is a bind's routes through D: what can be told without making
-// anything (the length, the means) first, then D, then the means in order.
-// errNoD when D could be made nowhere; errUnusable when the routes cannot be
-// used.
-func throughD(sdir *os.File, real, name string, thread, proc bool, cfg *config) (endpoint, route, error) {
-	spellingLen := rNameLen + 1 + len(name)
-	if spellingLen > directMax {
-		cfg.trace.skipMeans(dRoutes, "spelling too long")
-		return nil, "", errUnusable
-	}
-	// With the /proc variant as the only means, its spelling must fit even
-	// with a one-digit fd (the shortest it can be); D's real fd is checked
-	// again once D is made.
-	if !atSupported && !thread && proc && len(cfg.procSelfFD)+len("/0/")+spellingLen > directMax {
-		cfg.trace.skipThread(dRoutes, cfg)
-		cfg.trace.add(routeProc, "spelling too long")
-		return nil, "", errUnusable
-	}
-	if !atSupported && !thread && !proc {
-		cfg.trace.skipThread(dRoutes, cfg)
-		cfg.trace.skipProc(dRoutes)
-		return nil, "", errUnusable
-	}
-	d, err := makeD(cfg.dBases, sdir, real, proc, cfg.procSelfFD, randomPart, randomPart)
-	if err != nil {
-		cfg.trace.skipMeans(dRoutes, "no place for D")
-		return nil, "", errNoD
-	}
-	defer d.cleanup()
-	return byMeans(d.fd, d.r+"/"+name, thread, proc, cfg, dRoutes)
-}
-
-// routes names the routes of the means, for D or without it.
-type routes struct{ at, thread, proc route }
-
-var (
-	dRoutes   = routes{routeAt, routeThreadCwd, routeProc}
-	noDRoutes = routes{routeAtSockdir, routeThreadCwdSockdir, routeProcSockdir}
-)
-
-// byMeans binds through spelling relative to the directory fd, by the first
-// means that can be used: bindat (FreeBSD), a thread whose cwd is fd,
-// /proc/self/fd/<fd>/<spelling>. errUnusable when none can.
-func byMeans(fd int, spelling string, thread, proc bool, cfg *config, rs routes) (endpoint, route, error) {
-	if atSupported {
-		ep, err := atOp(opListen, fd, spelling)
-		return ep, rs.at, err
-	}
-	if thread {
-		ep, err := inThreadCwd(opListen, fd, spelling)
-		if !errors.Is(err, errUnusable) {
-			return ep, rs.thread, err
-		}
-		cfg.trace.add(rs.thread, "thread cwd refused")
-	} else {
-		cfg.trace.skipThread(rs, cfg)
-	}
-	if !proc {
-		cfg.trace.skipProc(rs)
-		return nil, "", errUnusable
-	}
-	via := cfg.procSelfFD + "/" + strconv.Itoa(fd) + "/" + spelling
-	if len(via) > directMax {
-		cfg.trace.add(rs.proc, "spelling too long")
-		return nil, "", errUnusable
-	}
-	ep, err := viaStd(opListen, via, false)
-	return ep, rs.proc, err
-}
-
-// noDPrefix is what R's name starts with when it is made in the socket's
-// directory (the form without D).
-const noDPrefix = "." + linkPrefix
-
-// withoutD binds when D can be made nowhere (SPEC "D 無しの形"): R, named
-// .sockat.XXXXXXXXXX and pointing to the socket's directory (real), is made in
-// the socket's directory itself, and the bind goes by .sockat.XXXXXXXXXX/<name>
-// relative to that directory's fd (sdir), by the same means as with D. R is
-// removed afterwards, so the spelling the kernel keeps names nothing later
-// either. errUnusable when sdir could not be opened, the spelling does not
-// fit, or R cannot be made.
-func withoutD(sdir *os.File, real, name string, thread, proc bool, cfg *config) (endpoint, route, error) {
-	if sdir == nil {
-		cfg.trace.skipMeans(noDRoutes, "socket directory not opened")
-		return nil, "", errUnusable
-	}
-	spellingLen := len(noDPrefix) + rNameLen + 1 + len(name)
-	if spellingLen > directMax {
-		cfg.trace.skipMeans(noDRoutes, "spelling too long")
-		return nil, "", errUnusable
-	}
-	fd := int(sdir.Fd())
-	if !atSupported && !thread && proc && len(cfg.procSelfFD)+len("/")+len(strconv.Itoa(fd))+len("/")+spellingLen > directMax {
-		cfg.trace.skipThread(noDRoutes, cfg)
-		cfg.trace.add(routeProcSockdir, "spelling too long")
-		return nil, "", errUnusable
-	}
-	if !atSupported && !thread && !proc {
-		cfg.trace.skipThread(noDRoutes, cfg)
-		cfg.trace.skipProc(noDRoutes)
-		return nil, "", errUnusable
-	}
-	part, err := createAt(randomPart, func(n string) error { return symlinkat(real, fd, "", noDPrefix+n) })
-	if err != nil {
-		cfg.trace.skipMeans(noDRoutes, "R not made")
-		return nil, "", errUnusable
-	}
-	r := noDPrefix + part
-	defer unix.Unlinkat(fd, r, 0)
-	return byMeans(fd, r+"/"+name, thread, proc, cfg, noDRoutes)
 }
 
 // realDir is dir as a real path (symlinks resolved, absolute), for R to point
@@ -457,41 +285,3 @@ func (t *trace) add(r route, reason string) {
 		t.skipped = append(t.skipped, skipped{r, reason})
 	}
 }
-
-// skipThread records the thread-cwd means of rs as unusable, where the system
-// has it: turned off (the tests), or under a seccomp filter.
-func (t *trace) skipThread(rs routes, cfg *config) {
-	if atSupported || !hasThreadCwd {
-		return
-	}
-	reason := "seccomp filter"
-	if !cfg.threadCwd {
-		reason = "thread cwd off"
-	}
-	t.add(rs.thread, reason)
-}
-
-// skipProc records the /proc means of rs as unusable, where the system has it.
-func (t *trace) skipProc(rs routes) {
-	if !atSupported && hasProc {
-		t.add(rs.proc, "/proc unusable")
-	}
-}
-
-// skipMeans records every means of rs the system has as unusable for reason.
-func (t *trace) skipMeans(rs routes, reason string) {
-	switch {
-	case atSupported:
-		t.add(rs.at, reason)
-	default:
-		if hasThreadCwd {
-			t.add(rs.thread, reason)
-		}
-		if hasProc {
-			t.add(rs.proc, reason)
-		}
-	}
-}
-
-// noForkRoute is the reason the fork routes are skipped: Go cannot fork bare.
-const noForkRoute = "no fork route in sockat-go"

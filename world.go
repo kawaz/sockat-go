@@ -43,10 +43,6 @@ type config struct {
 	// procSelfFD is where the kernel lists the fds of the process (Linux).
 	// The tests point it elsewhere to stand in for a system without /proc.
 	procSelfFD string
-	// dirBases is where the symlink of symlink-dir (ListenEx's last resort)
-	// may go, in the order tried within each kind of place: XDG_RUNTIME_DIR,
-	// TMPDIR (when set to absolute paths), then /tmp.
-	dirBases []string
 	// trace, when set (ListenEx, DialEx), records the routes found unusable.
 	trace *trace
 	// threadCwd is whether to try the thread-cwd route. Always true outside
@@ -103,32 +99,10 @@ func configFromTmpdir(tmpdir string) *config {
 	if tmpdir != "" && !sameComponents(tmpdir, "/tmp") {
 		dBases = []string{tmpdir, "/tmp"}
 	}
-	runtimeDir, _ := os.LookupEnv("XDG_RUNTIME_DIR")
 	c := envConfig()
-	c.dBases, c.tmpBases, c.dirBases = dBases, bases, dirBasesFrom(runtimeDir, tmpdir)
+	c.dBases, c.tmpBases = dBases, bases
 	c.procSelfFD = "/proc/self/fd"
 	return &c
-}
-
-// dirBasesFrom is symlink-dir's places for the symlink: XDG_RUNTIME_DIR and
-// TMPDIR when absolute, then /tmp, each spelling once.
-func dirBasesFrom(runtimeDir, tmpdir string) []string {
-	var bases []string
-	for _, b := range []string{runtimeDir, tmpdir, "/tmp"} {
-		if !isAbs(b) {
-			continue
-		}
-		dup := false
-		for _, seen := range bases {
-			if sameComponents(seen, b) {
-				dup = true
-			}
-		}
-		if !dup {
-			bases = append(bases, b)
-		}
-	}
-	return bases
 }
 
 // sameComponents reports whether a and b are the same spelling component by

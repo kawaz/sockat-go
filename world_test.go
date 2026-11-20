@@ -430,8 +430,8 @@ func TestTheBOfASocketsDirectory(t *testing.T) {
 // Options.Base is checked before anything is made (SPEC-routes
 // "B の作り方"): a relative path or one not ending with a name is an argument
 // error (EINVAL), a missing parent ENOENT, a parent or B that is not a
-// directory ENOTDIR (a symlink at B is not one), B not ours or writable by
-// others, or a directory on the way writable by others, EPERM, and with
+// directory ENOTDIR, a symlink at B, B not ours or writable by others, or a
+// directory on the way writable by others, EPERM, and with
 // usable_cross_uid a directory on the way or B without search permission for
 // others EPERM too. The check makes nothing anywhere; a B that passes is made
 // later with mode 0711, kept, and given kind "given".
@@ -471,7 +471,7 @@ func TestOptionsBaseIsCheckedAndMakesNothing(t *testing.T) {
 		{d + "/missing/b", false, syscall.ENOENT},
 		{d + "/file/b", false, syscall.ENOTDIR},
 		{d + "/file", false, syscall.ENOTDIR},
-		{d + "/link", false, syscall.ENOTDIR},
+		{d + "/link", false, syscall.EPERM},
 		{d + "/groupw", false, syscall.EPERM},
 		{d + "/open/b", false, syscall.EPERM},
 		{d + "/own/b", true, syscall.EPERM},
@@ -512,12 +512,12 @@ func TestOptionsBaseIsCheckedAndMakesNothing(t *testing.T) {
 	}
 }
 
-// Under a umask that takes the owner's read bit (0477), a B just made
-// cannot be opened: it is removed, the place passed over (each in turn, so
-// there is no B and every place is left empty), and an Options.Base is that
-// error instead (no other place is tried). The umask belongs to the whole
-// process, hence a child.
-func TestUnderAUmaskTakingTheOwnersBitsNoBIsLeft(t *testing.T) {
+// Under a umask that takes the owner's read bit (0477), mkdirat(0700) makes
+// a directory of mode 0300 the owner could not open for reading: B and D are
+// set to 0711 by their name before they are opened, so B and D are made all
+// the same, of mode 0711, and so is the B of Options.Base. The umask belongs
+// to the whole process, hence a child.
+func TestUnderAUmaskTakingTheOwnersBitsBAndDAreMadeOf0711(t *testing.T) {
 	t.Parallel()
 	runChild(t, "TestChildBUnderAUmask", tmpDir(t))
 }
@@ -527,22 +527,29 @@ func TestChildBUnderAUmask(t *testing.T) {
 	if !unprivileged(t) {
 		return
 	}
-	w, ps := testWorld(t, nil)
-	syscall.Umask(0o477)
-	b := w.autoBase(false, anyFits)
-	syscall.Umask(0o077)
-	if b != nil {
-		t.Fatalf("B %s", b.real)
-	}
-	for _, p := range []string{ps.tmp, ps.runtime, ps.tmpdir} {
-		assertEmpty(t, p)
-	}
+	w, _ := testWorld(t, nil)
 	d := tmpDir(t)
 	syscall.Umask(0o477)
-	_, err := w.givenBase(d + "/b")
+	b := w.autoBase(false, anyFits)
+	var dd *procD
+	var err error
+	if b != nil {
+		dd, err = b.ownD(&w.cfg)
+	}
+	g, gerr := w.givenBase(d + "/b")
 	syscall.Umask(0o077)
-	wantErrno(t, "given B under umask 0477", err, syscall.EACCES)
-	assertEmpty(t, d)
+	if b == nil || err != nil {
+		t.Fatalf("B %v, D: %v", b, err)
+	}
+	if m := modeOf(t, b.real); m != 0o711 {
+		t.Fatalf("B's mode %o", m)
+	}
+	if m := modeOf(t, b.real+"/"+dd.name); m != 0o711 {
+		t.Fatalf("D's mode %o", m)
+	}
+	if gerr != nil || modeOf(t, g.real) != 0o711 {
+		t.Fatalf("the given B: %v", gerr)
+	}
 }
 
 // D is made in B once per (process, B), named by 10 random letters or

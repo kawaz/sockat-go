@@ -36,8 +36,8 @@ func procCfg(bases ...string) *config {
 //	| way          | path                          | inputs                                  | listen     | dial         |
 //	|--------------|-------------------------------|-----------------------------------------|------------|--------------|
 //	| standard     | directMax bytes               | (the public order)                      | standard   | standard     |
-//	| thread-cwd   | 600 bytes, a 92-byte name     | D in a place (proc-direct does not fit) | thread-cwd | thread-cwd   |
-//	| proc         | 600 bytes, name s.sock        | thread cwd off, D in a place            | proc       | proc-direct  |
+//	| thread-cwd   | 600 bytes, a 92-byte name     | D in a place (proc-direct does not fit) | (listenAt) | thread-cwd   |
+//	| proc         | 600 bytes, name s.sock        | thread cwd off, D in a place            | (listenAt) | proc-direct  |
 //	| proc-direct  | 600 bytes, an 85-byte name    | thread cwd off (proc does not fit)      | (listenAt) | proc-direct  |
 //	| proc-held    | 600 bytes, a 97-byte name     | thread cwd off, D in an unsafe place    | (listenAt) | proc-held    |
 //	| symlink-file | 600 bytes, a 97-byte name     | no means, no /proc; a safe place        | (listenAt) | symlink-file |
@@ -56,8 +56,8 @@ func ways(t *testing.T) []way {
 	n85, n97 := strings.Repeat("p", 85), strings.Repeat("q", 97)
 	return []way{
 		{"standard", nest(t, d+"/direct", directMax, "s.sock"), nil, routeStandard, routeStandard},
-		{"thread-cwd", nest(t, d+"/thread", 600, threadName), centralCfg(dThread), routeThreadCwd, routeThreadCwd},
-		{"proc", nest(t, d+"/procd", 600, "s.sock"), procD, routeProc, routeProcDirect},
+		{"thread-cwd", nest(t, d+"/thread", 600, threadName), centralCfg(dThread), "", routeThreadCwd},
+		{"proc", nest(t, d+"/procd", 600, "s.sock"), procD, "", routeProcDirect},
 		{"proc-direct", nest(t, d+"/proc", 600, n85), direct, "", routeProcDirect},
 		{"proc-held", nest(t, d+"/held", 600, n97), held, "", routeProcHeld},
 		{"symlink-file", nest(t, d+"/symlink", 600, n97), fallbackCfg(safe), "", routeSymlinkFile},
@@ -68,9 +68,6 @@ func ways(t *testing.T) []way {
 // Proc-direct, the first of the connect order with /proc: a dial goes through
 // /proc/self/fd/<dirfd>/<name>, however long the directory part is, without
 // making anything: the place for D and the place for symlink-file are untouched.
-// A listen never takes it: with the thread cwd off and an 85-byte name too
-// long for proc (which holds R/ too), a listen of the same path is
-// ENAMETOOLONG, also without making anything.
 func TestADialTakesProcDirectFirstAndMakesNothing(t *testing.T) {
 	t.Parallel()
 	base, dBase := tmpDir(t), tmpDir(t)
@@ -80,8 +77,6 @@ func TestADialTakesProcDirectFirstAndMakesNothing(t *testing.T) {
 	cfg.dBases = []string{dBase}
 	for _, total := range []int{directMax + 1 + 85, 300, 1000} {
 		p := nest(t, tmpDir(t), total, strings.Repeat("p", 85))
-		_, _, err := runLong(opListen, p, cfg)
-		wantErrno(t, fmt.Sprintf("%d: listen", total), err, syscall.ENAMETOOLONG)
 		l := listenAt(t, p)
 		c, r := dialLong(t, p, cfg)
 		if r != routeProcDirect {
@@ -93,13 +88,12 @@ func TestADialTakesProcDirectFirstAndMakesNothing(t *testing.T) {
 	assertUntouched(t, base)
 }
 
-// A file name over directMax - 11 bytes (97 here) fits no R/<name>, which is
-// told before anything is made (the place for D keeps its mtime): a listen is
-// ENAMETOOLONG. A dial, its name too long for proc-direct too, passes over
-// thread-cwd and proc for the same reason and takes proc-held, whose spelling
-// holds no file name: D is made in its place (and removed), and symlink-file,
-// later in the connect order, is not reached (its safe place is untouched).
-func TestAFileNamePastTheRoutesThroughDIsListenedNowhereAndDialedThroughProcHeld(t *testing.T) {
+// A file name over directMax - 11 bytes (97 here) fits no R/<name> nor
+// proc-direct: a dial passes over thread-cwd and proc and takes proc-held,
+// whose spelling holds no file name: D is made in its place (and removed),
+// and symlink-file, later in the connect order, is not reached (its safe
+// place is untouched).
+func TestADialOfAFileNamePastTheRoutesThroughDTakesProcHeld(t *testing.T) {
 	t.Parallel()
 	d, base, dBase := tmpDir(t), tmpDir(t), tmpDir(t)
 	p := d + "/" + strings.Repeat("n", 97)
@@ -107,9 +101,6 @@ func TestAFileNamePastTheRoutesThroughDIsListenedNowhereAndDialedThroughProcHeld
 	cfg.tmpBases = []string{base}
 	markUntouched(t, dBase)
 	markUntouched(t, base)
-	_, _, err := runLong(opListen, p, cfg)
-	wantErrno(t, "listen", err, syscall.ENAMETOOLONG)
-	assertUntouched(t, dBase)
 	l := listenAt(t, p)
 	c, r := dialLong(t, p, cfg)
 	if r != routeProcHeld {
@@ -122,14 +113,13 @@ func TestAFileNamePastTheRoutesThroughDIsListenedNowhereAndDialedThroughProcHeld
 }
 
 // Without /proc (not mounted, as in some chroots and minimal containers; both
-// shapes: no /proc directory, and an empty one) the routes through D still
-// have the thread cwd (D's mode then set through a second open by name, as
-// there is no /proc to chmod through) where the system allows it. Without it
-// (here turned off), a listen of a long path is ENAMETOOLONG and a dial takes
-// the other routes of the connect order without /proc: relative for a path
-// near the cwd, symlink under a safe place for one far from it. Runs in a
-// child process whose cwd is a temporary directory, to have a socket near the
-// cwd.
+// shapes: no /proc directory, and an empty one) a dial's routes through D
+// still have the thread cwd (D's mode then set through a second open by name,
+// as there is no /proc to chmod through) where the system allows it. Without
+// it (here turned off), a dial takes the other routes of the connect order
+// without /proc: relative for a path near the cwd, symlink under a safe place
+// for one far from it. Runs in a child process whose cwd is a temporary
+// directory, to have a socket near the cwd.
 func TestWithoutProcTheThreadCwdOrTheFallbacksWithoutProcAreUsed(t *testing.T) {
 	t.Parallel()
 	if !inTmpCwd(t) {
@@ -146,10 +136,7 @@ func TestWithoutProcTheThreadCwdOrTheFallbacksWithoutProcAreUsed(t *testing.T) {
 			if threadCwdAvailable() {
 				cfg := centralCfg(dBase)
 				cfg.procSelfFD = none.path
-				l, r := listenLong(t, far, cfg)
-				if r != routeThreadCwd {
-					t.Fatalf("listen: %s", r)
-				}
+				l := listenAt(t, far)
 				c, r := dialLong(t, far, cfg)
 				if r != routeThreadCwd {
 					t.Fatalf("dial: %s", r)
@@ -165,8 +152,6 @@ func TestWithoutProcTheThreadCwdOrTheFallbacksWithoutProcAreUsed(t *testing.T) {
 				path string
 				want route
 			}{{near, routeRelative}, {farther, routeSymlinkFile}} {
-				_, _, err := runLong(opListen, c.path, cfg)
-				wantErrno(t, "listen", err, syscall.ENAMETOOLONG)
 				l := listenAt(t, c.path)
 				cc, r := dialLong(t, c.path, cfg)
 				if r != c.want {
@@ -184,21 +169,19 @@ func TestWithoutProcTheThreadCwdOrTheFallbacksWithoutProcAreUsed(t *testing.T) {
 func TestWithoutProcAMissingDirectoryIsENOENT(t *testing.T) {
 	t.Parallel()
 	p := tmpDir(t) + "/nope/" + strings.Repeat("n", 200)
-	for _, o := range []op{opListen, opDial} {
-		_, _, err := runLong(o, p, fallbackCfg())
-		wantErrno(t, o.sysName(), err, syscall.ENOENT)
-	}
+	_, _, err := runDialLong(p, fallbackCfg())
+	wantErrno(t, "dial", err, syscall.ENOENT)
 }
 
-// Under a seccomp filter thread-cwd is not used at all: unshare(2)
-// is not even called, since a filter may answer it by killing the process
-// (SIGSYS) rather than with an error. With /proc a listen then takes proc,
-// through the real inputs as well (a dial of the same path takes proc-direct,
-// first in its order); without /proc a listen has no means, so a long path is
-// ENAMETOOLONG (nothing made in the place for D), and so is a dial with no
-// other route left. Runs only under a filter
-// (Docker's default profile: PR_GET_SECCOMP is 2); without one,
-// TestThreadCwdIsUsedWithoutASeccompFilter covers the other side, and
+// Under a seccomp filter thread-cwd is not used at all: unshare(2) is not
+// even called, since a filter may answer it by killing the process (SIGSYS)
+// rather than with an error. A bind of a long path then takes link-dir
+// through procB (base "proc"), with the test's places and the real ones alike
+// (a dial of the same path takes proc-direct, first in its order); a file
+// name no link-dir spelling fits (92 bytes) is ENAMETOOLONG, thread-cwd in
+// skipped for the filter. Runs only under a filter (Docker's default profile:
+// PR_GET_SECCOMP is 2); without one, TestThreadCwdIsUsedWithoutASeccompFilter
+// covers the other side, and
 // TestUnderASeccompFilterThatKillsOnUnshareTheProcessSurvives makes a filter
 // of its own.
 func TestUnderASeccompFilterProcIsTaken(t *testing.T) {
@@ -211,10 +194,10 @@ func TestUnderASeccompFilterProcIsTaken(t *testing.T) {
 	checkThreadCwdUnusable(t)
 }
 
-// checkThreadCwdUnusable checks, under a seccomp filter, that the thread-cwd
-// reports itself unusable, that a listen takes proc instead and a dial
-// proc-direct (with the test's inputs and with the real ones), and that
-// without /proc a long path is ENAMETOOLONG with nothing made.
+// checkThreadCwdUnusable checks, under a seccomp filter, that the thread cwd
+// reports itself unusable, that a bind takes link-dir through procB instead
+// and a dial proc-direct, and that a bind no link-dir spelling fits is
+// ENAMETOOLONG with thread-cwd skipped.
 func checkThreadCwdUnusable(t *testing.T) {
 	t.Helper()
 	if threadCwdPossible() {
@@ -227,51 +210,45 @@ func checkThreadCwdUnusable(t *testing.T) {
 			t.Fatalf("%s: %v, want errUnusable", o.sysName(), err)
 		}
 	}
-	dBase := tmpDir(t)
 	p := nest(t, d, 600, "s.sock")
-	real := configFromTmpdir("")
-	real.dBases = []string{dBase}
-	for i, cfg := range []*config{centralCfg(dBase), real} {
-		q := fmt.Sprintf("%s/%d.sock", filepath.Dir(p), i)
-		l, r := listenLong(t, q, cfg)
-		if r != routeProc {
-			t.Fatalf("listen: %s, want %s", r, routeProc)
-		}
-		c, r := dialLong(t, q, cfg)
-		if r != routeProcDirect {
-			t.Fatalf("dial: %s, want %s", r, routeProcDirect)
-		}
-		ping(t, l, c)
-		assertEmpty(t, dBase)
+	w, _ := testWorld(t, nil)
+	l, b, err := w.listen(p, Options{}, nil)
+	if err != nil || b.route != routeLinkDir || b.base != "proc" {
+		t.Fatalf("listen: %s %s, %v", b.route, b.base, err)
 	}
-	none := centralCfg(dBase)
-	none.procSelfFD = noProc
-	markUntouched(t, dBase)
-	for _, o := range []op{opListen, opDial} {
-		_, _, err := runLong(o, filepath.Dir(p)+"/n.sock", none)
-		wantErrno(t, o.sysName()+" without /proc", err, syscall.ENAMETOOLONG)
-		_, _, err = runLong(o, filepath.Dir(p)+"/nope/s.sock", none)
-		wantErrno(t, o.sysName()+" in a missing directory", err, syscall.ENOENT)
+	t.Cleanup(func() { l.Close() })
+	c, r := dialLong(t, p, configFromTmpdir(""))
+	if r != routeProcDirect {
+		t.Fatalf("dial: %s, want %s", r, routeProcDirect)
 	}
-	assertUntouched(t, dBase)
+	ping(t, l, c)
+	tr := &trace{}
+	_, _, err = w.listen(filepath.Dir(p)+"/"+threadName, Options{}, tr)
+	wantErrno(t, "listen of a 92-byte name", err, syscall.ENAMETOOLONG)
+	if got := namesOf(t, tr.skipped); !slices.Equal(got, []route{routeStandard, routeLinkDir, routeThreadCwd}) || tr.skipped[2].reason != "seccomp filter" {
+		t.Fatalf("skipped %v", tr.skipped)
+	}
 }
 
 // Without a seccomp filter (PR_GET_SECCOMP is 0: docker with
-// seccomp=unconfined, or a plain host) the routes through D take thread-cwd,
-// through the real inputs too: a listen, and a dial of a name past
-// proc-direct (threadName), the route before it in the connect order.
+// seccomp=unconfined, or a plain host) a bind of a file name no link-dir
+// spelling fits (threadName, 92 bytes) takes thread-cwd (Dangling), and a dial
+// of it thread-cwd too (a name past proc-direct, the route before it in the
+// connect order).
 func TestThreadCwdIsUsedWithoutASeccompFilter(t *testing.T) {
 	t.Parallel()
 	if mode := seccompMode(t); mode != 0 {
 		t.Skipf("under a seccomp filter (PR_GET_SECCOMP = %d)", mode)
 	}
 	p := nest(t, tmpDir(t), 600, threadName)
+	w, _ := testWorld(t, nil)
+	l, b, err := w.listen(p, Options{}, nil)
+	if err != nil || b.route != routeThreadCwd || b.spelling.Kind != Dangling || !isSocket(p) {
+		t.Fatalf("listen: %s %v, %v", b.route, b.spelling, err)
+	}
+	t.Cleanup(func() { l.Close() })
 	cfg := configFromTmpdir("")
 	cfg.dBases = []string{tmpDir(t)}
-	l, r := listenLong(t, p, cfg)
-	if r != routeThreadCwd || !isSocket(p) {
-		t.Fatalf("listen: %s", r)
-	}
 	c, r := dialLong(t, p, cfg)
 	if r != routeThreadCwd {
 		t.Fatalf("dial: %s", r)
@@ -283,9 +260,8 @@ func TestThreadCwdIsUsedWithoutASeccompFilter(t *testing.T) {
 // a filter may kill the process for it. A child process installs such a
 // filter on itself (unshare(2) answered with SECCOMP_RET_KILL_PROCESS, as
 // systemd's SystemCallFilter= does by default; every other call allowed) and
-// then runs the route order to the thread-cwd route. It must survive and get
-// proc; a route that called unshare(2) would
-// kill it (SIGSYS).
+// then binds past link-dir to the thread-cwd route. It must survive and get
+// ENAMETOOLONG; a route that called unshare(2) would kill it (SIGSYS).
 func TestUnderASeccompFilterThatKillsOnUnshareTheProcessSurvives(t *testing.T) {
 	t.Parallel()
 	runChild(t, "TestChildUnderAKillingSeccompFilter", tmpDir(t))
@@ -308,12 +284,12 @@ func TestAbstractNamesGoToTheNetPackageAsTheyAre(t *testing.T) {
 	cwd, _ := os.Getwd()
 	for i, prefix := range []string{"@", "\x00"} {
 		name := fmt.Sprintf("%ssockat-test-%d-%d", prefix, os.Getpid(), i)
-		ep, r, err := run(opListen, name)
-		l := must{t}.listener(ep, err)
-		if r != routeStandard {
-			t.Fatalf("%q: %s", name, r)
+		l, b, err := defaultWorld.listen(name, Options{}, nil)
+		if err != nil || b.route != routeStandard || b.spelling.Kind != Original {
+			t.Fatalf("%q: %s %v, %v", name, b.route, b.spelling, err)
 		}
-		ep, r, err = run(opDial, name)
+		t.Cleanup(func() { l.Close() })
+		ep, r, err := runDial(name)
 		c := must{t}.conn(ep, err)
 		if r != routeStandard {
 			t.Fatalf("%q: %s", name, r)
@@ -412,50 +388,6 @@ func TestADOfAnotherOwnerIsNotUsed(t *testing.T) {
 	}
 	if in, err := os.ReadDir(base + "/" + es[0].Name()); err != nil || len(in) != 0 {
 		t.Fatalf("in the directory left: %v, %v (R was made in it)", in, err)
-	}
-}
-
-// Without /proc, D is opened O_PATH (no read permission needed) and checked
-// first; its mode is then set by opening it again by its name O_RDONLY. Under
-// a umask of 0477, mkdir(0700) gives 0300, and that second open fails for a
-// non-root user (EACCES): D has passed the check and so is known to be ours,
-// and it is removed rather than left behind. With D made nowhere, a listen
-// takes the form without D (R made in the socket's directory, which a umask
-// does not keep from working: a symlink's mode is not used) and binds at the
-// path; nothing is left in the place or in the socket's directory, however
-// many times it is called. As root, the second open succeeds and D is used,
-// also leaving nothing. A umask belongs to the whole process, hence a child.
-func TestWithoutProcAUmaskTakingTheOwnersReadBitLeavesNoD(t *testing.T) {
-	t.Parallel()
-	if !threadCwdAvailable() {
-		t.Skip("the thread cwd cannot be used here (the only means without /proc)")
-	}
-	runChild(t, "TestChildWithoutProcUnderUmask0477", tmpDir(t))
-}
-
-func TestChildWithoutProcUnderUmask0477(t *testing.T) {
-	asChild(t)
-	base := tmpDir(t)
-	dir := tmpDir(t)
-	p := nest(t, dir, 300, "s.sock")
-	cfg := &config{dBases: []string{base}, procSelfFD: "/nonexistent/proc/self/fd", threadCwd: true}
-	syscall.Umask(0o477)
-	for i := range 3 {
-		ep, r, err := runLong(opListen, p, cfg)
-		want := routeThreadCwdSockdir
-		if os.Geteuid() == 0 {
-			want = routeThreadCwd
-		}
-		if err != nil || r != want {
-			t.Fatalf("listen %d: %s, %v, want %s", i, r, err, want)
-		}
-		if !isSocket(p) {
-			t.Fatalf("listen %d: no socket at the path", i)
-		}
-		ep.Close()
-		os.Remove(p)
-		assertEmpty(t, base)
-		assertNoSockatEntry(t, filepath.Dir(p))
 	}
 }
 

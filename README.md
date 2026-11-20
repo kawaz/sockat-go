@@ -24,6 +24,7 @@ go get github.com/kawaz/sockat-go
 - For a long path too, the socket file is created at the path given
 - Errors are the standard `*net.OpError`: `errors.Is(err, syscall.ENOENT)` and the like work
 - The only dependency is `golang.org/x/sys`. Go: the two supported releases (1.26 and later)
+- A bind of a long path leaves D and E outside the application's own places (`/tmp/sockat-<uid>` and the like), so that the spelling the kernel keeps can still be followed later. They go with the system's cleaning of its temporary directories, or with `sockat.Sweep()`. Removing the D of a live process by hand only makes the spelling unfollowable; the socket at the path passed keeps working. Where tests run again and again, one call of `sockat.Sweep()` keeps dead D from piling up ([What stays in the places, and `Sweep`](#what-stays-in-the-places-and-sweep))
 
 ### Functions
 

@@ -24,6 +24,7 @@ go get github.com/kawaz/sockat-go
 - 長いパスでも、ソケットファイルは渡したパスにできる
 - エラーは標準と同じ `*net.OpError`。`errors.Is(err, syscall.ENOENT)` 等が効く
 - 依存は `golang.org/x/sys` だけ。Go は支援中の 2 版 (1.26 以降)
+- 長いパスの bind は、カーネルが覚える綴りを後でも辿れるように、アプリの置き場の外 (`/tmp/sockat-<uid>` 等) に D と E を残す。OS の一時ディレクトリの掃除か `sockat.Sweep()` で消える。生きているプロセスの D を手で消しても、綴りが辿れなくなるだけで、元のパスのソケットは働く。試験を何度も回す環境では `sockat.Sweep()` を 1 回呼べば死んだ D が溜まらない ([置き場に残る物と `Sweep`](#置き場に残る物と-sweep))
 
 ### 関数
 

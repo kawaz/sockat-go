@@ -291,3 +291,38 @@ func TestDialExReportsTheRouteAndTheRoutesSkipped(t *testing.T) {
 		t.Fatalf("a relative base: %v, %+v", err, re)
 	}
 }
+
+// thread-cwd-direct hands the file name, a relative spelling, to the net
+// package, which on Linux reads a leading '@' as an abstract socket name: a
+// file name starting with '@' must go with "./" in front (asSpelling,
+// DR-0002), or the connect goes to an abstract name and never reaches the
+// socket file (ECONNREFUSED). So a dial of a long path whose name starts with
+// '@' and fits thread-cwd-direct with the "./" (past proc-direct, so that
+// thread-cwd-direct is the route) takes thread-cwd-direct and reaches the
+// socket. A name that fits only without the "./" (directMax bytes) cannot be
+// carried by it: the length checked is the spelling's, so the dial goes on
+// to link-file, whose spelling holds no file name, and reaches it there.
+// Only where a thread can have a cwd of its own (macOS; Linux with a seccomp
+// filter that allows unshare, run by just test-linux's unconfined pass).
+func TestThreadCwdDirectReachesAFileNameStartingWithAt(t *testing.T) {
+	t.Parallel()
+	if !threadCwdAvailable() {
+		t.Skip("a thread cannot have a cwd of its own here")
+	}
+	w, _ := testWorld(t, nil)
+	for _, c := range []struct {
+		name string
+		want route
+	}{
+		{"@" + directName, routeThreadCwdDirect},
+		{"@" + strings.Repeat("n", directMax-1), routeLinkFile},
+	} {
+		p := nest(t, tmpDir(t), 600, c.name)
+		l := listenAt(t, p)
+		conn, r, sk, err := dialTraced(t, w, p, Options{})
+		if err != nil || r != c.want {
+			t.Fatalf("%d-byte name: dial %s after %v, %v; want %s", len(c.name), r, sk, err, c.want)
+		}
+		ping(t, l, conn)
+	}
+}

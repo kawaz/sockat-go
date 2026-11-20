@@ -171,7 +171,11 @@ func (w *world) dialLong(o op, path string, opts Options, tr *trace) (endpoint, 
 // the socket's directory (inThreadCwd: Linux, macOS), with no D and no E: the
 // spelling stays with nobody.
 func (c *dialCall) threadCwdDirect() (endpoint, error) {
-	if len(c.name) > directMax {
+	// The file name is a relative spelling handed to the standard library,
+	// which reads a leading '@' as an abstract name on Linux: asSpelling
+	// puts "./" in front of one (DR-0002), and the length is that spelling's.
+	spelling := asSpelling(c.name)
+	if len(spelling) > directMax {
 		return nil, unusable("spelling too long")
 	}
 	if c.sdir == nil {
@@ -183,7 +187,7 @@ func (c *dialCall) threadCwdDirect() (endpoint, error) {
 	if !threadCwdPossible() {
 		return nil, unusable("seccomp filter")
 	}
-	ep, err := inThreadCwd(c.o, int(c.sdir.Fd()), c.name)
+	ep, err := inThreadCwd(c.o, int(c.sdir.Fd()), spelling)
 	if errors.Is(err, errUnusable) {
 		return nil, unusable("thread cwd refused")
 	}

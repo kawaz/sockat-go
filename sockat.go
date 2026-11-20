@@ -49,8 +49,11 @@ func Dial(path string) (*net.UnixConn, error) {
 // file and cleans up the spelling, and the routes tried.
 //
 // Right after the bind it records the socket file (its real path and
-// (st_dev, st_ino)) for Bound.File's Remove. When the file cannot be
-// recorded, the listener is closed, the file is left, and an error is
+// (st_dev, st_ino)) for Bound.File's Remove. A symlink at the last component
+// of the path (which bind(2) follows on macOS and NetBSD) is followed to the
+// socket it leads to: that is what Remove removes, and the symlink stays.
+// When the file cannot be recorded (a symlink there leads to no socket, for
+// example), the listener is closed, the file is left, and an error is
 // returned; so too for a relative path when the cwd changes (another
 // goroutine's os.Chdir) between the resolving of its real path and the bind.
 //

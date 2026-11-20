@@ -429,3 +429,212 @@ func TestRemoveThatCannotCheckTheFileIsAnError(t *testing.T) {
 		os.Remove(p)
 	}
 }
+
+// aliasCase is a symlink of the caller's at the path to bind, and where it
+// leads: links are the symlinks from path on, each to the next (relative
+// when in the same directory, absolute otherwise), actual the file a bind
+// that follows them makes.
+type aliasCase struct {
+	what         string
+	path, actual string
+	links        []string
+}
+
+// aliasCases are symlinks at a short path (the net package) and a long one
+// (link-dir), holding a relative target, an absolute one into another
+// directory, and a chain of two, each in directories of their own. The
+// symlinks are made; the socket file is not.
+func aliasCases(t *testing.T) []aliasCase {
+	t.Helper()
+	mk := func(what, path, actual string, links ...string) aliasCase {
+		t.Helper()
+		chain := append([]string{path}, links...)
+		for i, l := range chain {
+			next := actual
+			if i+1 < len(chain) {
+				next = chain[i+1]
+			}
+			target := next
+			if filepath.Dir(next) == filepath.Dir(l) {
+				target = filepath.Base(next)
+			}
+			if err := os.Symlink(target, l); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return aliasCase{what: what, path: path, actual: actual, links: chain}
+	}
+	short := tmpDir(t)
+	long := filepath.Dir(nest(t, tmpDir(t), 600, "alias.sock"))
+	abs := tmpDir(t)
+	chain := tmpDir(t)
+	return []aliasCase{
+		mk("short, relative", short+"/alias.sock", short+"/actual.sock"),
+		mk("long, relative", long+"/alias.sock", long+"/actual.sock"),
+		mk("short, absolute", abs+"/alias.sock", tmpDir(t)+"/actual.sock"),
+		mk("short, a chain", chain+"/alias.sock", chain+"/actual.sock", chain+"/alias2.sock"),
+	}
+}
+
+// assertLinks checks that the caller's symlinks are all still there, as
+// symlinks: Remove and a refused bind must not take them.
+func assertLinks(t *testing.T, c aliasCase) {
+	t.Helper()
+	for _, l := range c.links {
+		if fi, err := os.Lstat(l); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("%s: the caller's symlink %s is gone or replaced: %v", c.what, l, err)
+		}
+	}
+}
+
+// A symlink of the caller's at the last component of the path (alias.sock ->
+// actual.sock): where bind(2) follows it (macOS, NetBSD) the socket is made
+// where it leads, so ListenEx records the socket file reached (SPEC
+// "remove"), and Remove removes actual.sock and leaves the caller's
+// symlink, which is not ours to remove. A relative target is taken relative
+// to the symlink's directory, as the kernel takes it; a chain is followed to
+// its end. Where bind(2) does not follow it (Linux, FreeBSD, ...), the bind
+// fails as the standard one does, with EADDRINUSE, and leaves the symlink
+// and makes nothing where it leads.
+func TestRemoveAfterABindThroughASymlinkRemovesWhereItLeads(t *testing.T) {
+	t.Parallel()
+	for _, c := range aliasCases(t) {
+		l, b, err := ListenEx(c.path, Options{})
+		if !bindFollowsSymlink() {
+			if !errors.Is(err, syscall.EADDRINUSE) || l != nil || b != nil {
+				t.Fatalf("%s: %v, %v, %v; want EADDRINUSE", c.what, l, b, err)
+			}
+			if exists(c.actual) {
+				t.Fatalf("%s: a refused bind made %s", c.what, c.actual)
+			}
+			assertLinks(t, c)
+			continue
+		}
+		if err != nil {
+			t.Fatalf("%s: %v", c.what, err)
+		}
+		t.Cleanup(func() { l.Close() })
+		if !isSocket(c.actual) {
+			t.Fatalf("%s: no socket at %s", c.what, c.actual)
+		}
+		if err := b.File.Remove(); err != nil {
+			t.Fatalf("%s: %v", c.what, err)
+		}
+		if exists(c.actual) {
+			t.Fatalf("%s: Remove left the socket file %s", c.what, c.actual)
+		}
+		assertLinks(t, c)
+	}
+}
+
+// ForBind.SocketFile follows a symlink of the caller's at the last component
+// of the path as ListenEx does (SPEC "ForBind の SocketFile"): after a bind by
+// the spelling that went through it, it records the socket file where it
+// leads, and its Remove removes that and leaves the symlink. Before the
+// bind the symlink leads to nothing (ENOENT), and a file that is not a
+// socket where it leads is not recorded (ENOTSOCK), both *os.PathError of
+// Op "socketfile" for the caller's path, and neither removes anything. Only
+// where bind(2) follows a symlink: elsewhere no bind through one succeeds
+// (TestRemoveAfterABindThroughASymlinkRemovesWhereItLeads).
+func TestSocketFileOfAResolveFollowsASymlinkAtThePath(t *testing.T) {
+	t.Parallel()
+	if !bindFollowsSymlink() {
+		t.Skip("bind(2) here does not follow a symlink in the last component")
+	}
+	w, _ := testWorld(t, nil)
+	for _, c := range aliasCases(t) {
+		f := resolveBindIn(t, w, c.path, Options{})
+		wantErr := func(when string, errno syscall.Errno) {
+			t.Helper()
+			_, err := f.SocketFile()
+			var pe *os.PathError
+			if !errors.Is(err, errno) || !errors.As(err, &pe) || pe.Op != "socketfile" || pe.Path != c.path {
+				t.Fatalf("%s, %s: %v, want %v", c.what, when, err, errno)
+			}
+		}
+		wantErr("before the bind", syscall.ENOENT)
+		if err := os.WriteFile(c.actual, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		wantErr("a file where it leads", syscall.ENOTSOCK)
+		if !exists(c.actual) {
+			t.Fatalf("%s: the file where the symlink leads was removed", c.what)
+		}
+		os.Remove(c.actual)
+		listenSpelling(t, f.Path)
+		if !isSocket(c.actual) {
+			t.Fatalf("%s: no socket at %s", c.what, c.actual)
+		}
+		sf, err := f.SocketFile()
+		if err != nil {
+			t.Fatalf("%s: %v", c.what, err)
+		}
+		if err := sf.Remove(); err != nil {
+			t.Fatalf("%s: %v", c.what, err)
+		}
+		if exists(c.actual) {
+			t.Fatalf("%s: Remove left the socket file %s", c.what, c.actual)
+		}
+		assertLinks(t, c)
+	}
+}
+
+// When what a symlink at the path leads to is not a socket by the time
+// ListenEx looks (here the socket the bind made is replaced by a regular
+// file), the socket file cannot be recorded (SPEC "remove"):
+// ListenEx closes the listener, cleans up the E, and returns a *RouteError
+// reaching errNotRecorded with no listener or Bound. It removes nothing: the
+// file where the symlink leads and the caller's symlink stay. Only where
+// bind(2) follows a symlink; in a child process, since the seam bindEx is the
+// whole process's. A short path and a long one (link-dir) are both checked.
+func TestListenExThroughASymlinkToANonSocketRecordsNothing(t *testing.T) {
+	t.Parallel()
+	if !bindFollowsSymlink() {
+		t.Skip("bind(2) here does not follow a symlink in the last component")
+	}
+	for _, c := range aliasCases(t)[:2] {
+		runChild(t, "TestChildListenExThroughASymlinkToANonSocket", filepath.Dir(c.path), "SOCKAT_PATH="+c.path, "SOCKAT_ACTUAL="+c.actual)
+		if fi, err := os.Lstat(c.actual); err != nil || !fi.Mode().IsRegular() {
+			t.Fatalf("%s: the file where the symlink leads: %v", c.what, err)
+		}
+		assertLinks(t, c)
+	}
+}
+
+func TestChildListenExThroughASymlinkToANonSocket(t *testing.T) {
+	asChild(t)
+	path, actual := os.Getenv("SOCKAT_PATH"), os.Getenv("SOCKAT_ACTUAL")
+	var bl *net.UnixListener
+	var e *link
+	bindEx = func(w *world, o op, p string, opts Options, tr *trace) (endpoint, bound, error) {
+		l, b, err := w.listen(p, opts, tr)
+		if err != nil {
+			return nil, b, err
+		}
+		bl, e = l, b.link
+		// The socket the bind made, where the symlink leads, is replaced by
+		// a regular file before ListenEx looks at it.
+		if err := os.Remove(actual); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(actual, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return l, b, nil
+	}
+	t.Cleanup(func() { bindEx = (*world).bind })
+	l, b, err := ListenEx(path, Options{})
+	if bl == nil {
+		t.Fatalf("the bind did not go through: %v", err)
+	}
+	re := routeErr(t, err)
+	if !errors.Is(err, errNotRecorded) || l != nil || b != nil || re.Route == "" {
+		t.Fatalf("%v, %v, route %q: %v", l, b, re.Route, err)
+	}
+	if err := bl.Close(); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("the listener was not closed by ListenEx: Close again: %v", err)
+	}
+	if e != nil && exists(e.path()) {
+		t.Fatalf("the E of the spelling (%s) was left", e.path())
+	}
+}

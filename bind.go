@@ -292,6 +292,8 @@ func (c *bindCall) linkFile() (endpoint, bound, error) {
 func (c *bindCall) bindThrough(r route, ln linked) (endpoint, bound, error) {
 	ep, err := viaStd(c.o, ln.spelling, false)
 	if err != nil {
+		// A failure to remove E is not reported: the bind's error is the
+		// call's, and stays as it is (SPEC-routes "D と E").
 		ln.e.remove()
 		return nil, bound{route: r}, err
 	}
@@ -335,6 +337,9 @@ func (c *bindCall) dangling() (endpoint, bound, error) {
 	if err != nil {
 		return nil, bound{}, unusable("E not made")
 	}
+	// E is removed once the bind is done, and a failure to remove it is not
+	// reported: the call succeeds or fails as the bind did, with its own error
+	// (SPEC-routes "D と E").
 	defer e.remove()
 	spelling := e.name + "/" + c.name
 	var ep endpoint
@@ -396,7 +401,13 @@ func (w *world) bindReported(o op, path string, opts Options) (endpoint, *Bound,
 		var id fileID
 		ok := ferr == nil && cwdOK
 		if ok {
-			id, ok = lstatID(file)
+			// Where bind(2) follows a symlink in the last component, the
+			// socket is where it leads, and the symlink is the caller's: what
+			// is recorded is the socket file reached, and a path that reaches
+			// no socket cannot be recorded (SPEC "remove").
+			var err error
+			file, id, err = socketAt(file)
+			ok = err == nil
 		}
 		if ok && rel {
 			// Another cwd means the bind may have resolved path elsewhere

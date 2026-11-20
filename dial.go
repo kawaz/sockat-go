@@ -223,6 +223,9 @@ func (c *dialCall) linkFile() (endpoint, error) {
 		return nil, unusable("E not made")
 	}
 	ep, err := viaStd(c.o, b.real+"/"+name, false)
+	// A failure to remove E is not reported: a connect that went through is
+	// not made a failure by it, nor is a failed one's error replaced
+	// (SPEC-routes "D と E").
 	unix.Unlinkat(b.fd, name, 0)
 	return ep, err
 }

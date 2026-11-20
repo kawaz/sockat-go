@@ -4,11 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"syscall"
-
-	"golang.org/x/sys/unix"
 )
 
 // ForBind is a spelling of a path to bind by yourself, made by
@@ -102,7 +99,9 @@ func (f *ForConnect) Cleanup() error { return f.clean.cleanup() }
 // SocketFile records the socket file bound by f.Path (its real path and
 // (st_dev, st_ino), found by following f.Path now) and returns a SocketFile
 // whose Remove removes it while the path still names it, as ListenEx's does,
-// and whose Cleanup is f's.
+// and whose Cleanup is f's. A symlink at the last component of the path
+// (which bind(2) follows on macOS and NetBSD) is followed to the socket it
+// leads to: that is what Remove removes, and the symlink stays.
 //
 // Call it after the bind and before closing the socket: a replacement
 // between the bind and this call cannot be told apart. The error is an
@@ -122,25 +121,20 @@ func (f *ForBind) SocketFile() (*SocketFile, error) {
 			return nil, pathErr(errCwdChangedSinceResolve)
 		}
 	}
-	var file string
-	var err error
-	if f.Spelling.Kind == Linked && !f.Spelling.Removable {
-		// link-file: the spelling ends with E, the symlink to the file.
-		file, err = filepath.EvalSymlinks(f.Path)
-	} else {
-		file, err = realFile(f.Path)
-	}
+	// The spelling's directory is resolved to a real path and its last
+	// component followed while it is a symlink: the E of link-file, and a
+	// symlink of the caller's at the path, which bind(2) follows on some
+	// systems (SPEC "ForBind の SocketFile"), so Remove leaves the caller's
+	// symlink and removes the socket.
+	file, err := realFile(f.Path)
 	if err != nil {
 		return nil, pathErr(errnoOf(err))
 	}
-	var st unix.Stat_t
-	if err := unix.Lstat(file, &st); err != nil {
+	file, id, err := socketAt(file)
+	if err != nil {
 		return nil, pathErr(err)
 	}
-	if uint32(st.Mode)&unix.S_IFMT != unix.S_IFSOCK {
-		return nil, pathErr(syscall.ENOTSOCK)
-	}
-	return &SocketFile{file: file, id: fileID{uint64(st.Dev), uint64(st.Ino)}, clean: f.clean}, nil
+	return &SocketFile{file: file, id: id, clean: f.clean}, nil
 }
 
 // errCwdChangedSinceResolve is ForBind.SocketFile's error for a relative

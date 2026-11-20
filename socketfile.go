@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
@@ -121,11 +122,44 @@ func realFile(path string) (string, error) {
 	return filepath.Join(real, name), nil
 }
 
-// lstatID is (st_dev, st_ino) of path itself (a symlink is not followed).
-func lstatID(path string) (fileID, bool) {
-	var st unix.Stat_t
-	if err := unix.Lstat(path, &st); err != nil {
-		return fileID{}, false
+// maxFollow is how many symlinks socketAt follows before it gives up with
+// ELOOP: at least what the kernels follow in a path (40 on Linux, 32 on
+// macOS), so that a bind that went through them is followed to its end.
+const maxFollow = 40
+
+// socketAt is the socket file at file (whose directory is a real path): when
+// its last component is a symlink, followed as bind(2) follows it on the
+// systems where it does (SPEC "remove", "ForBind の SocketFile"), each target
+// taken relative to the directory of its symlink and its directory resolved
+// to a real path. It returns the real path of the socket reached and its
+// (st_dev, st_ino), or the error: the lstat's (ENOENT, ...), ENOTSOCK when
+// what is reached is not a socket, ELOOP after maxFollow symlinks.
+//
+// Only the last component is followed: the directories on the way are
+// already real paths, and each target's are resolved by realFile.
+func socketAt(file string) (string, fileID, error) {
+	for range maxFollow + 1 {
+		var st unix.Stat_t
+		if err := unix.Lstat(file, &st); err != nil {
+			return "", fileID{}, err
+		}
+		switch uint32(st.Mode) & unix.S_IFMT {
+		case unix.S_IFSOCK:
+			return file, fileID{uint64(st.Dev), uint64(st.Ino)}, nil
+		case unix.S_IFLNK:
+		default:
+			return "", fileID{}, syscall.ENOTSOCK
+		}
+		target, err := os.Readlink(file)
+		if err != nil {
+			return "", fileID{}, errnoOf(err)
+		}
+		if !isAbs(target) {
+			target = filepath.Dir(file) + "/" + target
+		}
+		if file, err = realFile(target); err != nil {
+			return "", fileID{}, errnoOf(err)
+		}
 	}
-	return fileID{uint64(st.Dev), uint64(st.Ino)}, true
+	return "", fileID{}, syscall.ELOOP
 }

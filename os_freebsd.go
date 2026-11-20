@@ -27,7 +27,7 @@ func atOp(o op, dirfd int, spelling string) (endpoint, error) {
 	copy(sa[2:], spelling)
 	return rawOp(o, func(sock int) error {
 		trap, sysName := uintptr(unix.SYS_BINDAT), "bindat"
-		if o == opDial {
+		if !o.binds() {
 			trap, sysName = unix.SYS_CONNECTAT, "connectat"
 		}
 		_, _, e := syscall.Syscall6(trap, uintptr(dirfd), uintptr(sock), uintptr(unsafe.Pointer(&sa[0])), uintptr(len(sa)), 0, 0)
@@ -61,7 +61,7 @@ func (c *dialCall) atDirect() (endpoint, error) {
 	if len(c.name) > directMax {
 		return nil, unusable("spelling too long")
 	}
-	return atOp(opDial, int(c.sdir.Fd()), c.name)
+	return atOp(c.o, int(c.sdir.Fd()), c.name)
 }
 
 // openDir opens dir O_RDONLY | O_DIRECTORY.
@@ -76,10 +76,15 @@ func openDir(dir string) (*os.File, error) {
 // procUsable: no /proc here.
 func procUsable(*os.File, string) bool { return false }
 
-// newSocket creates a stream socket set up as the net package sets up its
-// own: close-on-exec and nonblocking.
-func newSocket() (int, error) {
-	fd, err := unix.Socket(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_NONBLOCK|unix.SOCK_CLOEXEC, 0)
+// newSocket creates a socket of o's type (stream, or datagram for
+// opListenGram and opDialGram) set up as the net package sets up its own:
+// close-on-exec and nonblocking.
+func newSocket(o op) (int, error) {
+	typ := unix.SOCK_STREAM
+	if o.network() == "unixgram" {
+		typ = unix.SOCK_DGRAM
+	}
+	fd, err := unix.Socket(unix.AF_UNIX, typ|unix.SOCK_NONBLOCK|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
 		return -1, syscallError("socket", err)
 	}

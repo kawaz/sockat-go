@@ -74,7 +74,7 @@ func (c *dialCall) procDirect() (endpoint, error) {
 	if len(via) > directMax {
 		return nil, unusable("spelling too long")
 	}
-	return viaStd(opDial, via, false)
+	return viaStd(c.o, via, false)
 }
 
 // openDir opens dir O_PATH | O_DIRECTORY, which needs only search permission.

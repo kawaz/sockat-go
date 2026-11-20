@@ -42,6 +42,7 @@ type bound struct {
 // bindCall is one bind, or one resolve, of a long path.
 type bindCall struct {
 	w     *world
+	o     op     // opListen or opListenGram (a bind)
 	path  string // as the caller spelt it
 	name  string // the file name
 	real  string // the socket's directory as a real path
@@ -123,14 +124,15 @@ func (w *world) bindOrder() []bindStep {
 	return steps
 }
 
-// bindLong binds (and listens) at path, longer than directMax, by the first
-// route of the bind order that can be used (newBindCall first).
-// ENAMETOOLONG when no route can be used.
-func (w *world) bindLong(path string, opts Options, tr *trace) (endpoint, bound, error) {
+// bindLong binds (and listens, for opListen) at path, longer than
+// directMax, by the first route of the bind order that can be used
+// (newBindCall first). ENAMETOOLONG when no route can be used.
+func (w *world) bindLong(o op, path string, opts Options, tr *trace) (endpoint, bound, error) {
 	c, err := w.newBindCall(path, opts)
 	if err != nil {
 		return nil, bound{}, err
 	}
+	c.o = o
 	tr.add(routeStandard, "path too long")
 	for _, s := range w.bindOrder() {
 		ep, b, err := s.try(c)
@@ -140,7 +142,7 @@ func (w *world) bindLong(path string, opts Options, tr *trace) (endpoint, bound,
 		}
 		return ep, b, err
 	}
-	return nil, bound{}, errNameTooLong(opListen)
+	return nil, bound{}, errNameTooLong(o)
 }
 
 // base is the B for a route of this call: Options.Base's when given (its
@@ -288,7 +290,7 @@ func (c *bindCall) linkFile() (endpoint, bound, error) {
 // bind is, with ln's E kept. A failure of the bind removes E before it is
 // returned.
 func (c *bindCall) bindThrough(r route, ln linked) (endpoint, bound, error) {
-	ep, err := viaStd(opListen, ln.spelling, false)
+	ep, err := viaStd(c.o, ln.spelling, false)
 	if err != nil {
 		ln.e.remove()
 		return nil, bound{route: r}, err
@@ -337,9 +339,9 @@ func (c *bindCall) dangling() (endpoint, bound, error) {
 	spelling := e.name + "/" + c.name
 	var ep endpoint
 	if atSupported {
-		ep, err = atOp(opListen, d.fd, spelling)
+		ep, err = atOp(c.o, d.fd, spelling)
 	} else {
-		ep, err = inThreadCwd(opListen, d.fd, spelling)
+		ep, err = inThreadCwd(c.o, d.fd, spelling)
 		if errors.Is(err, errUnusable) {
 			return nil, bound{}, unusable("thread cwd refused")
 		}
@@ -355,6 +357,16 @@ func (c *bindCall) dangling() (endpoint, bound, error) {
 
 // listenEx is ListenEx on w.
 func (w *world) listenEx(path string, opts Options) (*net.UnixListener, *Bound, error) {
+	ep, b, err := w.bindReported(opListen, path, opts)
+	if err != nil {
+		return nil, nil, err
+	}
+	return ep.(*net.UnixListener), b, nil
+}
+
+// bindReported is the bind of ListenEx and ListenUnixgramEx (o): the bind
+// (bindEx), reported, with the socket file recorded for Bound.File.
+func (w *world) bindReported(o op, path string, opts Options) (endpoint, *Bound, error) {
 	tr := &trace{}
 	// An abstract name has no file to record or remove.
 	file, ferr := "", error(nil)
@@ -372,11 +384,13 @@ func (w *world) listenEx(path string, opts Options) (*net.UnixListener, *Bound, 
 		// it; the file's identity is read the moment the bind returns.
 		file, ferr = realFile(path)
 	}
-	l, b, err := bindEx(w, path, opts, tr)
+	ep, b, err := bindEx(w, o, path, opts, tr)
 	if err != nil {
 		return nil, nil, &RouteError{Route: string(b.route), Skipped: tr.skips(), Err: err}
 	}
-	l.SetUnlinkOnClose(false)
+	if l, ok := ep.(*net.UnixListener); ok {
+		l.SetUnlinkOnClose(false)
+	}
 	f := &SocketFile{clean: &cleaner{e: b.link}}
 	if !abstractName(path) {
 		var id fileID
@@ -392,22 +406,22 @@ func (w *world) listenEx(path string, opts Options) (*net.UnixListener, *Bound, 
 			ok = same && now == cwd
 		}
 		if !ok {
-			l.Close()
+			ep.Close()
 			f.Cleanup()
-			return nil, nil, &RouteError{Route: string(b.route), Skipped: tr.skips(), Err: opError(opListen, path, errNotRecorded)}
+			return nil, nil, &RouteError{Route: string(b.route), Skipped: tr.skips(), Err: opError(o, path, errNotRecorded)}
 		}
 		f.file, f.id = file, id
 	}
-	return l, &Bound{File: f, Spelling: b.spelling, Route: string(b.route), Base: b.base, Skipped: tr.skips()}, nil
+	return ep, &Bound{File: f, Spelling: b.spelling, Route: string(b.route), Base: b.base, Skipped: tr.skips()}, nil
 }
 
-// bindEx is the bind of listenEx.
+// bindEx is the bind of bindReported.
 //
-// Design rationale: a variable rather than a direct call to (*world).listen
+// Design rationale: a variable rather than a direct call to (*world).bind
 // only so that a test (TestListenExWhoseCwdChangesBeforeTheBindRecordsNothing,
 // in a child process) can change the cwd between realFile and the bind, which
-// no input of listenEx can bring about. Nothing else assigns it.
-var bindEx = (*world).listen
+// no input of bindReported can bring about. Nothing else assigns it.
+var bindEx = (*world).bind
 
 // absTarget is the caller's spelling made absolute against the cwd, for a
 // symlink to hold: the kernel then resolves the link as it resolves the

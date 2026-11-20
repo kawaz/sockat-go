@@ -10,12 +10,13 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// rawOp binds (and listens) or connects a fresh socket with call, which
+// rawOp binds (and listens, for opListen) or connects a fresh socket of o's
+// type with call, which
 // makes the bind / connect system call the standard library does not have
 // (FreeBSD's bindat / connectat), and hands the socket over to the net
 // package.
 func rawOp(o op, call func(sock int) error) (endpoint, error) {
-	sock, err := newSocket()
+	sock, err := newSocket(o)
 	if err != nil {
 		return nil, err
 	}
@@ -32,8 +33,8 @@ func rawOp(o op, call func(sock int) error) (endpoint, error) {
 	return adopt(o, f)
 }
 
-// adopt hands a bound and listening (opListen) or connected (opDial) socket
-// over to the net package, which takes a duplicate of it (close-on-exec,
+// adopt hands a bound and listening (opListen), or a bound (opListenGram) or
+// connected socket over to the net package, which takes a duplicate of it (close-on-exec,
 // nonblocking, registered with the runtime's poller). The caller still closes
 // f.
 //

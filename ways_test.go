@@ -427,3 +427,36 @@ func TestNoRouteChangesTheProcessCwd(t *testing.T) {
 		}
 	}
 }
+
+// A datagram socket is connected by the connect order of a stream socket
+// (SPEC "connect の順"): every way of the system, a socket bound at its path,
+// a datagram socket connected there the way DialUnixgram connects takes the
+// way's route, and what it sends arrives; nothing is left in the places but
+// the B link-file made.
+func TestEveryConnectRouteReachesADatagramSocket(t *testing.T) {
+	t.Parallel()
+	if !inTmpCwd(t) {
+		return
+	}
+	for _, w := range ways(t) {
+		t.Run(w.name, func(t *testing.T) {
+			if !w.usable() {
+				t.Skip("this system refuses a thread a cwd of its own")
+			}
+			s := gramAt(t, w.path)
+			wd := w.w
+			if wd == nil {
+				wd = defaultWorld
+			}
+			c, r := connectGramIn(t, wd, w.path)
+			if r != w.dial {
+				t.Fatalf("connect: %s, want %s", r, w.dial)
+			}
+			if _, err := c.Write([]byte(w.name)); err != nil {
+				t.Fatal(err)
+			}
+			recv(t, s, w.name)
+			w.checkPlaces(t)
+		})
+	}
+}

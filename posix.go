@@ -24,7 +24,7 @@ func (c *dialCall) relative() (endpoint, error) {
 	if rel == nil {
 		return nil, unusable("no relative spelling")
 	}
-	return rel.run(func(s string) (endpoint, error) { return viaStd(opDial, s, false) })
+	return rel.run(func(s string) (endpoint, error) { return viaStd(c.o, s, false) })
 }
 
 // relative is a relative spelling of an absolute socket path, checked to

@@ -11,21 +11,34 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// The order in which the ways of reaching a long socket path are tried. run is
-// the only entry point used by the public API; the per-route functions are
-// separate so the tests can force each route.
+// The order in which the ways of reaching a long socket path are tried:
+// listen / bind and dial / connect are the entry points of the public API;
+// the per-route functions are separate so the tests can force each route.
 
-// op is what to do at a path.
+// op is what to do at a path, and with which type of socket.
 type op int
 
 const (
-	opListen op = iota // bind and listen, as net.ListenUnix does
-	opDial             // connect, as net.DialUnix does
+	opListen     op = iota // bind and listen a stream socket, as net.ListenUnix does
+	opDial                 // connect a stream socket, as net.DialUnix does
+	opListenGram           // bind a datagram socket, as net.ListenUnixgram does
+	opDialGram             // connect a datagram socket, as net.DialUnix("unixgram", nil, ...) does
 )
+
+// binds reports whether o is a bind (opListen, opListenGram).
+func (o op) binds() bool { return o == opListen || o == opListenGram }
+
+// network is the net package's name of o's socket type.
+func (o op) network() string {
+	if o == opListenGram || o == opDialGram {
+		return "unixgram"
+	}
+	return "unix"
+}
 
 // sysName is the system call op comes down to, for error messages.
 func (o op) sysName() string {
-	if o == opListen {
+	if o.binds() {
 		return "bind"
 	}
 	return "connect"
@@ -33,14 +46,14 @@ func (o op) sysName() string {
 
 // netName is the operation name net.OpError uses for op.
 func (o op) netName() string {
-	if o == opListen {
+	if o.binds() {
 		return "listen"
 	}
 	return "dial"
 }
 
 // endpoint is what a route produced: a *net.UnixListener for opListen, a
-// *net.UnixConn for opDial.
+// *net.UnixConn for the others.
 type endpoint interface{ Close() error }
 
 // route names which way a bind / connect went. The public API does not show
@@ -100,8 +113,17 @@ func reasonOf(err error) string {
 // through a path relative to it.
 var errCwdChanged = errors.New("the current directory changed while binding / connecting through a path relative to it; the result was discarded")
 
-// listen binds (and listens) at path (Listen, ListenEx), recording the
-// routes found unusable in tr (nil records nothing).
+// listen is bind for a stream socket (Listen, ListenEx).
+func (w *world) listen(path string, opts Options, tr *trace) (*net.UnixListener, bound, error) {
+	ep, b, err := w.bind(opListen, path, opts, tr)
+	if err != nil {
+		return nil, b, err
+	}
+	return ep.(*net.UnixListener), b, nil
+}
+
+// bind binds (and listens, for opListen) at path, recording the routes found
+// unusable in tr (nil records nothing).
 //
 // A path the standard library accepts goes to it as is (stdSpelling), before
 // anything else is looked at (the environment and Options included), and
@@ -113,45 +135,44 @@ var errCwdChanged = errors.New("the current directory changed while binding / co
 // ending with a name). A longer path takes the bind order (bindLong). The error
 // is a *net.OpError for path; the route that bound and failed, if any, is in
 // the bound returned.
-func (w *world) listen(path string, opts Options, tr *trace) (*net.UnixListener, bound, error) {
+func (w *world) bind(o op, path string, opts Options, tr *trace) (endpoint, bound, error) {
 	if opts.Base != "" {
 		if err := givenShape(opts.Base); err != nil {
-			return nil, bound{}, opError(opListen, path, err)
+			return nil, bound{}, opError(o, path, err)
 		}
 	}
 	if abstractName(path) {
-		ep, err := viaStd(opListen, path, true)
+		ep, err := viaStd(o, path, true)
 		if err != nil {
 			return nil, bound{route: routeStandard}, err
 		}
-		return ep.(*net.UnixListener), bound{route: routeStandard, spelling: Spelling{Kind: Original}}, nil
+		return ep, bound{route: routeStandard, spelling: Spelling{Kind: Original}}, nil
 	}
 	if strings.IndexByte(path, 0) >= 0 {
-		return nil, bound{}, opError(opListen, path, fmt.Errorf("socket path must not contain a NUL byte: %w", syscall.EINVAL))
+		return nil, bound{}, opError(o, path, fmt.Errorf("socket path must not contain a NUL byte: %w", syscall.EINVAL))
 	}
 	if s := stdSpelling(path); len(s) <= directMax {
-		ep, err := viaStd(opListen, s, s == path)
+		ep, err := viaStd(o, s, s == path)
 		if err != nil {
 			if s != path {
-				err = opError(opListen, path, unwrapOpError(err))
+				err = opError(o, path, unwrapOpError(err))
 			}
 			return nil, bound{route: routeStandard}, err
 		}
-		l := ep.(*net.UnixListener)
-		if s != path {
+		if l, ok := ep.(*net.UnixListener); ok && s != path {
 			l.SetUnlinkOnClose(false)
 		}
 		kind := Original
 		if !isAbs(path) {
 			kind = CwdRelative
 		}
-		return l, bound{route: routeStandard, spelling: Spelling{Kind: kind}}, nil
+		return ep, bound{route: routeStandard, spelling: Spelling{Kind: kind}}, nil
 	}
-	ep, b, err := w.bindLong(path, opts, tr)
+	ep, b, err := w.bindLong(o, path, opts, tr)
 	if err != nil {
-		return nil, b, opError(opListen, path, err)
+		return nil, b, opError(o, path, err)
 	}
-	return ep.(*net.UnixListener), b, nil
+	return ep, b, nil
 }
 
 // abstractName reports whether path is the name of an abstract socket (a
@@ -194,18 +215,23 @@ func stdSpelling(path string) string {
 // is the bare system call error (an *os.SyscallError), for the caller to wrap
 // with the caller's path.
 func viaStd(o op, spelling string, direct bool) (endpoint, error) {
-	addr := &net.UnixAddr{Name: spelling, Net: "unix"}
+	addr := &net.UnixAddr{Name: spelling, Net: o.network()}
 	var ep endpoint
 	var err error
 	switch o {
 	case opListen:
 		var l *net.UnixListener
-		if l, err = net.ListenUnix("unix", addr); err == nil {
+		if l, err = net.ListenUnix(o.network(), addr); err == nil {
 			ep = l
 		}
-	case opDial:
+	case opListenGram:
 		var c *net.UnixConn
-		if c, err = net.DialUnix("unix", nil, addr); err == nil {
+		if c, err = net.ListenUnixgram(o.network(), addr); err == nil {
+			ep = c
+		}
+	case opDial, opDialGram:
+		var c *net.UnixConn
+		if c, err = net.DialUnix(o.network(), nil, addr); err == nil {
 			ep = c
 		}
 	}
@@ -235,7 +261,7 @@ func opError(o op, path string, err error) error {
 	if errors.As(err, &oe) {
 		return err
 	}
-	return &net.OpError{Op: o.netName(), Net: "unix", Addr: &net.UnixAddr{Name: path, Net: "unix"}, Err: err}
+	return &net.OpError{Op: o.netName(), Net: o.network(), Addr: &net.UnixAddr{Name: path, Net: o.network()}, Err: err}
 }
 
 // syscallError wraps a system call's errno as os.SyscallError does, keeping

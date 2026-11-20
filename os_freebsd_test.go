@@ -41,13 +41,16 @@ func TestAtAndAtDirectBindAndConnect(t *testing.T) {
 	}
 	d := tmpDir(t)
 	fits := d + "/" + strings.Repeat("f", directMax-11)
-	l, b, err := w.listen(fits, Options{}, nil)
+	// The binds go through a world of their own: at makes D, which the
+	// dials, checked to make none, must not find.
+	wb, _ := testWorld(t, nil)
+	l, b, err := wb.listen(fits, Options{}, nil)
 	if err != nil || b.route != routeAt || b.spelling.Kind != Dangling || !isSocket(fits) {
 		t.Fatalf("a %d-byte name: listen %s %v, %v", directMax-11, b.route, b.spelling, err)
 	}
 	t.Cleanup(func() { l.Close() })
 	over := d + "/" + strings.Repeat("o", directMax-10)
-	_, _, err = w.listen(over, Options{}, nil)
+	_, _, err = wb.listen(over, Options{}, nil)
 	wantErrno(t, "listen past at", err, syscall.ENAMETOOLONG)
 	if err := syscall.Rename(fits, over); err != nil {
 		t.Fatal(err)
@@ -96,5 +99,36 @@ func TestLinkFileIsTakenWhereAtDirectCannotBeUsed(t *testing.T) {
 		t.Fatalf("dial: %s after %v, %v", r, sks, err)
 	}
 	ping(t, l, c)
+	assertNoDOrE(t, w)
+}
+
+// A datagram socket takes FreeBSD's routes as a stream socket does: bound by
+// at (bindat(2) on D) where no link-dir spelling fits, with its own socket
+// type (a datagram arrives), and connected by at-direct (connectat(2)) with
+// a name of up to 103 bytes, by link-file past that.
+func TestAtAndAtDirectForADatagramSocket(t *testing.T) {
+	t.Parallel()
+	wb, _ := testWorld(t, nil)
+	w, _ := testWorld(t, nil)
+	d := tmpDir(t)
+	p := d + "/" + strings.Repeat("f", directMax-11)
+	s, b := bindGramIn(t, wb, p, Options{})
+	if b.Route != string(routeAt) || b.Spelling.Kind != Dangling {
+		t.Fatalf("bind: %s %+v", b.Route, b.Spelling)
+	}
+	c, r := connectGramIn(t, w, p)
+	if r != routeAtDirect {
+		t.Fatalf("connect: %s", r)
+	}
+	c.Write([]byte("at"))
+	recv(t, s, "at")
+	long := d + "/" + strings.Repeat("n", directMax+1)
+	sl := gramAt(t, long)
+	cl, r := connectGramIn(t, w, long)
+	if r != routeLinkFile {
+		t.Fatalf("connect a %d-byte name: %s", directMax+1, r)
+	}
+	cl.Write([]byte("lf"))
+	recv(t, sl, "lf")
 	assertNoDOrE(t, w)
 }

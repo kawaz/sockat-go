@@ -277,15 +277,15 @@ func TestListenExWhoseCwdChangesBeforeTheBindRecordsNothing(t *testing.T) {
 func TestChildListenExWithACwdChange(t *testing.T) {
 	asChild(t)
 	rel, to := os.Getenv("SOCKAT_REL"), os.Getenv("SOCKAT_CHDIR")
-	bindEx = func(w *world, path string, opts Options, tr *trace) (*net.UnixListener, bound, error) {
+	bindEx = func(w *world, o op, path string, opts Options, tr *trace) (endpoint, bound, error) {
 		if to != "" {
 			if err := os.Chdir(to); err != nil {
 				t.Fatal(err)
 			}
 		}
-		return w.listen(path, opts, tr)
+		return w.bind(o, path, opts, tr)
 	}
-	t.Cleanup(func() { bindEx = (*world).listen })
+	t.Cleanup(func() { bindEx = (*world).bind })
 	l, b, err := ListenEx(rel, Options{})
 	if to == "" {
 		if err != nil {
@@ -336,10 +336,10 @@ func TestChildListenExThatCannotRecordTheBoundFile(t *testing.T) {
 	path := os.Getenv("SOCKAT_PATH")
 	var bl *net.UnixListener
 	var e *link
-	bindEx = func(w *world, p string, opts Options, tr *trace) (*net.UnixListener, bound, error) {
+	bindEx = func(w *world, o op, p string, opts Options, tr *trace) (endpoint, bound, error) {
 		l, b, err := w.listen(p, opts, tr)
 		if err != nil {
-			return l, b, err
+			return nil, b, err
 		}
 		bl, e = l, b.link
 		// The file the bind made is gone before ListenEx looks at it.
@@ -348,7 +348,7 @@ func TestChildListenExThatCannotRecordTheBoundFile(t *testing.T) {
 		}
 		return l, b, nil
 	}
-	t.Cleanup(func() { bindEx = (*world).listen })
+	t.Cleanup(func() { bindEx = (*world).bind })
 	l, b, err := ListenEx(path, Options{})
 	if bl == nil {
 		t.Fatalf("the bind did not go through: %v", err)
@@ -363,7 +363,7 @@ func TestChildListenExThatCannotRecordTheBoundFile(t *testing.T) {
 	if e != nil && exists(e.path()) {
 		t.Fatalf("the E of the spelling (%s) was left", e.path())
 	}
-	bindEx = (*world).listen
+	bindEx = (*world).bind
 	l2, err := Listen(path)
 	if err != nil {
 		t.Fatalf("listen again on the same path: %v", err)

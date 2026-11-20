@@ -33,6 +33,7 @@ import (
 // dialCall is one dial of a long path.
 type dialCall struct {
 	w    *world
+	o    op     // opDial or opDialGram (a connect)
 	path string // as the caller spelt it
 	dir  string // its directory part, as the caller spelt it
 	name string // the file name
@@ -58,8 +59,17 @@ type notRouted struct{ error }
 
 func (e notRouted) Unwrap() error { return e.error }
 
-// dial connects to path (Dial, DialEx), recording the routes found unusable
-// in tr (nil records nothing).
+// dial is connect for a stream socket (Dial, DialEx).
+func (w *world) dial(path string, opts Options, tr *trace) (*net.UnixConn, route, error) {
+	ep, r, err := w.connect(opDial, path, opts, tr)
+	if err != nil {
+		return nil, r, err
+	}
+	return ep.(*net.UnixConn), r, nil
+}
+
+// connect connects to path (o: opDial, opDialGram), recording the routes
+// found unusable in tr (nil records nothing).
 //
 // An Options.Base of the wrong form (relative, or not ending with a name) is
 // EINVAL whatever the length of the path. A path the standard library accepts
@@ -69,37 +79,37 @@ func (e notRouted) Unwrap() error { return e.error }
 // names, is EINVAL, whatever the length. A longer path takes the connect
 // order (dialLong). The error is a *net.OpError for path; the route that
 // connected and failed, if any, is returned with it.
-func (w *world) dial(path string, opts Options, tr *trace) (*net.UnixConn, route, error) {
+func (w *world) connect(o op, path string, opts Options, tr *trace) (endpoint, route, error) {
 	if opts.Base != "" {
 		if err := givenShape(opts.Base); err != nil {
-			return nil, "", opError(opDial, path, err)
+			return nil, "", opError(o, path, err)
 		}
 	}
 	if abstractName(path) {
-		ep, err := viaStd(opDial, path, true)
+		ep, err := viaStd(o, path, true)
 		if err != nil {
 			return nil, routeStandard, err
 		}
-		return ep.(*net.UnixConn), routeStandard, nil
+		return ep, routeStandard, nil
 	}
 	if strings.IndexByte(path, 0) >= 0 {
-		return nil, "", opError(opDial, path, fmt.Errorf("socket path must not contain a NUL byte: %w", syscall.EINVAL))
+		return nil, "", opError(o, path, fmt.Errorf("socket path must not contain a NUL byte: %w", syscall.EINVAL))
 	}
 	if s := stdSpelling(path); len(s) <= directMax {
-		ep, err := viaStd(opDial, s, s == path)
+		ep, err := viaStd(o, s, s == path)
 		if err != nil {
 			if s != path {
-				err = opError(opDial, path, unwrapOpError(err))
+				err = opError(o, path, unwrapOpError(err))
 			}
 			return nil, routeStandard, err
 		}
-		return ep.(*net.UnixConn), routeStandard, nil
+		return ep, routeStandard, nil
 	}
-	ep, r, err := w.dialLong(path, opts, tr)
+	ep, r, err := w.dialLong(o, path, opts, tr)
 	if err != nil {
-		return nil, r, opError(opDial, path, err)
+		return nil, r, opError(o, path, err)
 	}
-	return ep.(*net.UnixConn), r, nil
+	return ep, r, nil
 }
 
 // dialLong connects to path, longer than directMax, by the first route of the
@@ -112,7 +122,7 @@ func (w *world) dial(path string, opts Options, tr *trace) (*net.UnixConn, route
 // the routes that need its fd; when it cannot be opened (no read permission
 // where directories are opened O_RDONLY), those routes cannot be used.
 // ENAMETOOLONG when no route can be used.
-func (w *world) dialLong(path string, opts Options, tr *trace) (endpoint, route, error) {
+func (w *world) dialLong(o op, path string, opts Options, tr *trace) (endpoint, route, error) {
 	dir, name, err := splitPath(path)
 	if err != nil {
 		return nil, "", err
@@ -141,7 +151,7 @@ func (w *world) dialLong(path string, opts Options, tr *trace) (endpoint, route,
 	} else {
 		defer sdir.Close()
 	}
-	c := &dialCall{w: w, path: path, dir: dir, name: name, sdir: sdir, opts: opts}
+	c := &dialCall{w: w, o: o, path: path, dir: dir, name: name, sdir: sdir, opts: opts}
 	for _, s := range dialSteps(procUsable(sdir, w.cfg.proc)) {
 		ep, err := s.try(c)
 		if errors.Is(err, errUnusable) {
@@ -154,7 +164,7 @@ func (w *world) dialLong(path string, opts Options, tr *trace) (endpoint, route,
 		}
 		return ep, s.route, err
 	}
-	return nil, "", errNameTooLong(opDial)
+	return nil, "", errNameTooLong(o)
 }
 
 // threadCwdDirect connects by the file name from a thread whose own cwd is
@@ -173,7 +183,7 @@ func (c *dialCall) threadCwdDirect() (endpoint, error) {
 	if !threadCwdPossible() {
 		return nil, unusable("seccomp filter")
 	}
-	ep, err := inThreadCwd(opDial, int(c.sdir.Fd()), c.name)
+	ep, err := inThreadCwd(c.o, int(c.sdir.Fd()), c.name)
 	if errors.Is(err, errUnusable) {
 		return nil, unusable("thread cwd refused")
 	}
@@ -212,7 +222,7 @@ func (c *dialCall) linkFile() (endpoint, error) {
 	if err != nil {
 		return nil, unusable("E not made")
 	}
-	ep, err := viaStd(opDial, b.real+"/"+name, false)
+	ep, err := viaStd(c.o, b.real+"/"+name, false)
 	unix.Unlinkat(b.fd, name, 0)
 	return ep, err
 }

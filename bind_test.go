@@ -203,6 +203,49 @@ func TestTheBOfABindIsInThePlacesInOrder(t *testing.T) {
 	}
 }
 
+// The process's B is the first place in order that can have one, whatever
+// the length of the path (hub's answer of 2026-11-21): where no spelling of
+// link-dir (nor of link-file) fits through the B of /tmp (the test's /tmp is
+// a deep directory, /proc left out), the bind does not make a B in
+// $XDG_RUNTIME_DIR or $TMPDIR, where it would fit, but goes on past those
+// routes, so neither place gets anything. A bind that gets as far as the
+// routes whose spelling is Dangling makes its D in the B of /tmp, the
+// process's B.
+func TestABindWhoseSpellingDoesNotFitTheFirstPlaceTriesNoOtherPlace(t *testing.T) {
+	t.Parallel()
+	w, ps := testWorld(t, func(c *config, ps testPlaces) {
+		c.proc = "/nonexistent/proc"
+		deep, _, _ := splitPath(nest(t, ps.tmp, 90, "x"))
+		c.tmp = deep
+	})
+	p := nest(t, tmpDir(t), 300, "s.sock")
+	l, b, err := w.listenEx(p, Options{})
+	switch {
+	case err == nil:
+		defer l.Close()
+		if b.Spelling.Kind != Dangling {
+			t.Fatalf("%s %q %+v, want a Dangling spelling", b.Route, b.Base, b.Spelling)
+		}
+		if w.auto == nil || !strings.HasPrefix(w.auto.real, mustRealDir(t, w.cfg.tmp)+"/") {
+			t.Fatalf("the B of the Dangling spelling: %v, want /tmp's", w.auto)
+		}
+	case !errors.Is(err, syscall.ENAMETOOLONG):
+		t.Fatal(err)
+	}
+	assertEmpty(t, ps.runtime)
+	assertEmpty(t, ps.tmpdir)
+}
+
+// mustRealDir is realDir(d), failing the test on an error.
+func mustRealDir(t *testing.T, d string) string {
+	t.Helper()
+	r, err := realDir(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
 // UsableCrossUID: the B must be one others can follow all the way (its place
 // and B have search permission for others) and procB is not used, so where
 // such a B is (the test place and its parent made 0711) the spelling is its

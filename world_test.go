@@ -62,6 +62,13 @@ func closeWorld(w *world) {
 // anyFits is a fitsFunc that lets every place be tried.
 func anyFits(string, string) bool { return true }
 
+// autoOf is w's B of the places 1 to 3 (cross: one others can follow) with
+// no estimate in the way, nil when there is none.
+func autoOf(w *world, cross bool) *base {
+	b, _ := w.autoBase(cross, anyFits)
+	return b
+}
+
 // uidName is sockat-<euid>, B's name in /tmp and $TMPDIR.
 func uidName() string { return "sockat-" + strconv.Itoa(os.Geteuid()) }
 
@@ -102,7 +109,7 @@ func TestBIsMadeInTheFirstPlaceAndKept(t *testing.T) {
 	w, ps := testWorld(t, nil)
 	markUntouched(t, ps.runtime)
 	markUntouched(t, ps.tmpdir)
-	b := w.autoBase(false, anyFits)
+	b := autoOf(w, false)
 	if b == nil {
 		t.Fatal("no B")
 	}
@@ -116,7 +123,7 @@ func TestBIsMadeInTheFirstPlaceAndKept(t *testing.T) {
 	if m := modeOf(t, ps.tmp+"/"+uidName()); m != 0o711 {
 		t.Fatalf("B's mode %o, want 0711", m)
 	}
-	if again := w.autoBase(false, anyFits); again != b {
+	if again := autoOf(w, false); again != b {
 		t.Fatal("the next call made another B")
 	}
 	assertUntouched(t, ps.runtime)
@@ -133,7 +140,7 @@ func TestAnExistingBOfOursIsUsedWithItsMode(t *testing.T) {
 	if err := os.Mkdir(ps.tmp+"/"+uidName(), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	b := w.autoBase(false, anyFits)
+	b := autoOf(w, false)
 	if b == nil || !strings.HasSuffix(b.real, "/"+uidName()) {
 		t.Fatalf("B %v", b)
 	}
@@ -186,7 +193,7 @@ func TestABAtTheNameThatFailsTheCheckFallsBackToARandomName(t *testing.T) {
 			if err := unix.Lstat(at, &before); err != nil {
 				t.Fatal(err)
 			}
-			b := w.autoBase(false, anyFits)
+			b := autoOf(w, false)
 			if b == nil {
 				t.Fatal("no B")
 			}
@@ -220,7 +227,7 @@ func TestABOrAPlaceOfAnotherOwnerIsNotUsed(t *testing.T) {
 		if err := os.Chown(at, 65534, 65534); err != nil {
 			t.Fatal(err)
 		}
-		b := w.autoBase(false, anyFits)
+		b := autoOf(w, false)
 		if b == nil || !regexp.MustCompile(`/`+uidName()+`\.`+randomRE+`$`).MatchString(b.real) {
 			t.Fatalf("B %v, want the fallback name", b)
 		}
@@ -230,7 +237,7 @@ func TestABOrAPlaceOfAnotherOwnerIsNotUsed(t *testing.T) {
 		if err := os.Chown(ps.tmp, 65534, 65534); err != nil {
 			t.Fatal(err)
 		}
-		b := w.autoBase(false, anyFits)
+		b := autoOf(w, false)
 		if b == nil || b.kind != kindRuntime {
 			t.Fatalf("B %v, want the next place ($XDG_RUNTIME_DIR)", b)
 		}
@@ -251,7 +258,7 @@ func TestAPlaceOthersCanWriteToOnTheWayIsPassedOver(t *testing.T) {
 			t.Fatal(err)
 		}
 		markUntouched(t, ps.tmp)
-		b := w.autoBase(false, anyFits)
+		b := autoOf(w, false)
 		if b == nil || b.kind != kindRuntime {
 			t.Fatalf("B %v, want the next place", b)
 		}
@@ -266,7 +273,7 @@ func TestAPlaceOthersCanWriteToOnTheWayIsPassedOver(t *testing.T) {
 		if err := unix.Chmod(ps.tmp, 0o1777); err != nil {
 			t.Fatal(err)
 		}
-		if b := w.autoBase(false, anyFits); b == nil || b.kind != kindTmp {
+		if b := autoOf(w, false); b == nil || b.kind != kindTmp {
 			t.Fatalf("B %v, want the sticky place", b)
 		}
 	})
@@ -285,7 +292,7 @@ func TestThePlacesAreTriedInOrder(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if b := w.autoBase(false, anyFits); b == nil || b.kind != kindTmpdir || !strings.HasSuffix(b.real, "/"+uidName()) {
+	if b := autoOf(w, false); b == nil || b.kind != kindTmpdir || !strings.HasSuffix(b.real, "/"+uidName()) {
 		t.Fatalf("B %v, want $TMPDIR/%s", b, uidName())
 	}
 
@@ -299,34 +306,58 @@ func TestThePlacesAreTriedInOrder(t *testing.T) {
 	if ps := w2.autoPlaces(); len(ps) != 1 {
 		t.Fatalf("places %v, want /tmp's only", ps)
 	}
-	if b := w2.autoBase(false, anyFits); b != nil {
+	if b := autoOf(w2, false); b != nil {
 		t.Fatalf("B %s with no place", b.real)
 	}
 	if err := os.Mkdir(ps2.tmp, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if b := w2.autoBase(false, anyFits); b == nil || b.kind != kindTmp {
+	if b := autoOf(w2, false); b == nil || b.kind != kindTmp {
 		t.Fatalf("B %v once the place is there", b)
 	}
 }
 
-// Where the spelling is known not to fit (the estimate from the place's real
-// path), no B is made in the place (SPEC-routes "実体の置き場"); the
-// estimate is given the place's kind and the real path B would have.
-func TestNoBIsMadeWhereTheSpellingCannotFit(t *testing.T) {
+// Where the spelling is known not to fit through the first place that can
+// have B (the estimate from the place's real path), no B is made there, and
+// none in a later place either even where it would fit (SPEC-routes
+// "実体の置き場", hub's answer of 2026-11-21): the process's B is the first
+// place in order whatever the length of the path, so every process of the
+// user finds it in the same place, and a route that does not fit through it
+// is unusable (errSpellingTooLong). The estimate is given the place's kind
+// and the real path B would have. Once a call that fits has made B there, a
+// held B is returned whatever the estimate (the route checks its spelling).
+func TestNoBIsMadeWhereTheSpellingCannotFitAndNoOtherPlaceIsTried(t *testing.T) {
 	t.Parallel()
 	w, ps := testWorld(t, nil)
 	var seen []string
-	none := func(kind, real string) bool { seen = append(seen, kind+" "+real); return false }
-	if b := w.autoBase(false, none); b != nil {
-		t.Fatalf("B %s", b.real)
+	firstNot := func(kind, real string) bool { seen = append(seen, kind+" "+real); return kind != kindTmp }
+	if b, err := w.autoBase(false, firstNot); b != nil || !errors.Is(err, errSpellingTooLong) {
+		t.Fatalf("B %v, %v; want none, spelling too long", b, err)
 	}
 	for _, p := range []string{ps.tmp, ps.runtime, ps.tmpdir} {
 		assertEmpty(t, p)
 	}
 	real, _ := realDir(ps.tmp)
-	if len(seen) != 3 || seen[0] != "tmp "+real+"/"+uidName() {
-		t.Fatalf("estimated %q", seen)
+	if len(seen) != 1 || seen[0] != "tmp "+real+"/"+uidName() {
+		t.Fatalf("estimated %q, want /tmp's alone", seen)
+	}
+	b := autoOf(w, false)
+	if b == nil || b.kind != kindTmp {
+		t.Fatalf("B %v once a spelling fits, want /tmp's", b)
+	}
+	if again, err := w.autoBase(false, func(string, string) bool { return false }); again != b || err != nil {
+		t.Fatalf("held B %v, %v", again, err)
+	}
+	// A place that cannot have B (missing) is passed over before the
+	// estimate: the estimate is of the place B would really be made in.
+	w2, ps2 := testWorld(t, nil)
+	os.Remove(ps2.tmp)
+	seen = nil
+	if b, err := w2.autoBase(false, firstNot); b == nil || b.kind != kindRuntime || err != nil {
+		t.Fatalf("B %v, %v; want $XDG_RUNTIME_DIR's", b, err)
+	}
+	if len(seen) != 1 || !strings.HasPrefix(seen[0], "runtime ") {
+		t.Fatalf("estimated %q, want $XDG_RUNTIME_DIR's alone", seen)
 	}
 }
 
@@ -339,11 +370,11 @@ func TestNoBIsMadeWhereTheSpellingCannotFit(t *testing.T) {
 func TestTheBOfAUsableCrossUIDBindHasSearchPermissionForOthersAllTheWay(t *testing.T) {
 	t.Parallel()
 	w, ps := testWorld(t, nil)
-	auto := w.autoBase(false, anyFits)
+	auto := autoOf(w, false)
 	if auto == nil || auto.crossUID {
 		t.Fatalf("B in a 0700 place: %v", auto)
 	}
-	if b := w.autoBase(true, anyFits); b != nil {
+	if b := autoOf(w, true); b != nil {
 		t.Fatalf("a cross-uid B %s where every place is 0700", b.real)
 	}
 	root, _, _ := splitPath(ps.tmp)
@@ -352,11 +383,11 @@ func TestTheBOfAUsableCrossUIDBindHasSearchPermissionForOthersAllTheWay(t *testi
 			t.Fatal(err)
 		}
 	}
-	cross := w.autoBase(true, anyFits)
+	cross := autoOf(w, true)
 	if cross == nil || cross.kind != kindTmpdir || !cross.crossUID {
 		t.Fatalf("cross-uid B %v, want $TMPDIR's (the 0700 B in /tmp passed over)", cross)
 	}
-	if w.autoBase(false, anyFits) != auto || w.autoBase(true, anyFits) != cross {
+	if autoOf(w, false) != auto || autoOf(w, true) != cross {
 		t.Fatal("the world's B changed")
 	}
 
@@ -367,8 +398,8 @@ func TestTheBOfAUsableCrossUIDBindHasSearchPermissionForOthersAllTheWay(t *testi
 			t.Fatal(err)
 		}
 	}
-	a := w2.autoBase(false, anyFits)
-	if c := w2.autoBase(true, anyFits); a == nil || c != a || !a.crossUID {
+	a := autoOf(w2, false)
+	if c := autoOf(w2, true); a == nil || c != a || !a.crossUID {
 		t.Fatalf("auto %v, cross %v: want one B", a, c)
 	}
 }
@@ -381,11 +412,11 @@ func TestTheBOfAUsableCrossUIDBindHasSearchPermissionForOthersAllTheWay(t *testi
 func TestTmpPathIsAboutTheDirectoriesAPrivateTmpReplaces(t *testing.T) {
 	t.Parallel()
 	w, _ := testWorld(t, nil)
-	if b := w.autoBase(false, anyFits); b == nil || !b.tmpPath {
+	if b := autoOf(w, false); b == nil || !b.tmpPath {
 		t.Fatalf("B under /tmp: %v", b)
 	}
 	w2, _ := testWorld(t, func(c *config, _ testPlaces) { c.privateTmps = []string{"/nonexistent-private-tmp"} })
-	if b := w2.autoBase(false, anyFits); b == nil || b.tmpPath {
+	if b := autoOf(w2, false); b == nil || b.tmpPath {
 		t.Fatalf("B under no private tmp: %v", b)
 	}
 	for _, c := range []struct {
@@ -530,7 +561,7 @@ func TestChildBUnderAUmask(t *testing.T) {
 	w, _ := testWorld(t, nil)
 	d := tmpDir(t)
 	syscall.Umask(0o477)
-	b := w.autoBase(false, anyFits)
+	b := autoOf(w, false)
 	var dd *procD
 	var err error
 	if b != nil {
@@ -560,7 +591,7 @@ func TestChildBUnderAUmask(t *testing.T) {
 func TestDIsMadeOnceLockedAndOf0711(t *testing.T) {
 	t.Parallel()
 	w, _ := testWorld(t, nil)
-	b := w.autoBase(false, anyFits)
+	b := autoOf(w, false)
 	d, err := b.ownD(&w.cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -605,7 +636,7 @@ func TestADTakenAwayBeforeItIsLockedIsMadeAgain(t *testing.T) {
 func TestChildDTakenAway(t *testing.T) {
 	asChild(t)
 	w, _ := testWorld(t, nil)
-	b := w.autoBase(false, anyFits)
+	b := autoOf(w, false)
 	var first string
 	lockD = func(fd, how int) error {
 		if first == "" {
@@ -649,7 +680,7 @@ func TestChildDTakenAway(t *testing.T) {
 func TestEIsACounterForResolveAndRandomForACall(t *testing.T) {
 	t.Parallel()
 	w, _ := testWorld(t, nil)
-	b := w.autoBase(false, anyFits)
+	b := autoOf(w, false)
 	d, err := b.ownD(&w.cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -695,7 +726,7 @@ func TestEIsACounterForResolveAndRandomForACall(t *testing.T) {
 func TestProcBIsUsedOnlyWhereItIsB(t *testing.T) {
 	t.Parallel()
 	w, _ := testWorld(t, nil)
-	b := w.autoBase(false, anyFits)
+	b := autoOf(w, false)
 	p, ok := w.procB(b)
 	if !hasProc {
 		if ok {
@@ -802,7 +833,7 @@ func concurrentBAndD(t *testing.T, place string) string {
 	for i := range n {
 		wg.Go(func() {
 			<-start
-			bs[i] = w.autoBase(false, anyFits)
+			bs[i] = autoOf(w, false)
 			if bs[i] != nil {
 				got[i], _ = bs[i].ownD(&w.cfg)
 			}

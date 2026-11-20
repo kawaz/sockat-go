@@ -116,26 +116,29 @@ func (w *world) bindLong(path string, opts Options, tr *trace) (*net.UnixListene
 // base is the B for a route of this bind: Options.Base's when given (its
 // error returned as it is, an Options.Base error, not a reason to pass the
 // route over); otherwise the world's B of the places 1 to 3 (cross: one
-// others can follow), and failing that, not for cross, the socket's
-// directory's. fits estimates, before a B is made, whether a spelling of the
-// route through it can fit.
+// others can follow), and, when none of them has or can make one (not for
+// cross), the socket's directory's. fits estimates, before a B is made,
+// whether a spelling of the route through it can fit: where it cannot, the
+// route is unusable, and no other place is tried for it (the process's B does
+// not depend on the length of the path).
 func (c *bindCall) base(cross bool, fits fitsFunc) (*base, error) {
 	if c.opts.Base != "" {
 		return c.w.givenBase(c.opts.Base)
 	}
-	if b := c.w.autoBase(cross, fits); b != nil {
-		return b, nil
+	b, err := c.w.autoBase(cross, fits)
+	if !errors.Is(err, errNoBase) {
+		return b, err
 	}
 	if cross {
 		return nil, unusable("no base others can follow")
 	}
 	if !fits(kindSockdir, "") {
-		return nil, unusable("spelling too long")
+		return nil, errSpellingTooLong
 	}
 	if b := c.w.sockdirBase(c.real, c.dirID); b != nil {
 		return b, nil
 	}
-	return nil, unusable("no base")
+	return nil, errNoBase
 }
 
 // linkDir binds by <B>/<D>/<E>/<name>, E a symlink to the socket's directory

@@ -77,28 +77,47 @@ func bName(kind string) string {
 // "実体の置き場": no B is made where it is known not to fit).
 type fitsFunc func(kind, real string) bool
 
-// autoBase is the world's B of the places 1 to 3 (cross: autoCross, where
-// others can follow the spelling), made in the first place where it can be
-// and fits says a spelling may fit. nil when none.
-func (w *world) autoBase(cross bool, fits fitsFunc) *base {
+// errSpellingTooLong is the B of the places 1 to 3 being one no spelling of
+// the route fits through (estimated before it is made, or once it is held).
+var errSpellingTooLong = unusable("spelling too long")
+
+// errNoBase is no B of the places 1 to 3 being there or makeable.
+var errNoBase = unusable("no base")
+
+// autoBase is the world's B of the places 1 to 3 (cross: autoCross, one
+// others can follow): the first place in order where B is or can be made
+// (with cross, the first such place that lets others search all the way),
+// whatever the length of the path, so that every process of the user finds
+// its B in the same place. A held B is returned as it is (the route checks
+// its spelling). Before B is made in that place, fits estimates the spelling
+// through it: where it cannot fit, no B is made and the error is
+// errSpellingTooLong; the next place is not tried for it (it is not the
+// process's B). errNoBase when no place has or can make one.
+func (w *world) autoBase(cross bool, fits fitsFunc) (*base, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if !cross && w.auto != nil {
-		return w.auto
+		return w.auto, nil
 	}
 	if cross {
 		if w.autoCross != nil {
-			return w.autoCross
+			return w.autoCross, nil
 		}
 		if w.auto != nil && w.auto.crossUID {
 			w.autoCross = w.auto
-			return w.auto
+			return w.auto, nil
 		}
 	}
 	for _, p := range w.autoPlaces() {
 		real, err := realDir(p.path)
-		if err != nil || !fits(p.kind, real+"/"+bName(p.kind)) {
+		if err != nil || !w.ancestorsPass(real) {
 			continue
+		}
+		if cross && !crossPlace(real, bName(p.kind)) {
+			continue
+		}
+		if !fits(p.kind, real+"/"+bName(p.kind)) {
+			return nil, errSpellingTooLong
 		}
 		b, err := w.makeBase(p, real, false)
 		if err != nil {
@@ -107,20 +126,51 @@ func (w *world) autoBase(cross bool, fits fitsFunc) *base {
 		b = w.known(b)
 		if cross {
 			if !b.crossUID {
-				// Not for this call; held only when it is auto already (an
-				// existing B of mode 0700, for example).
+				// Not for this call; held only when it is auto already.
 				if b != w.auto {
 					unix.Close(b.fd)
 				}
 				continue
 			}
 			w.autoCross = b
-			return b
+			return b, nil
 		}
 		w.auto = b
-		return b
+		return b, nil
 	}
-	return nil
+	return nil, errNoBase
+}
+
+// ancestorsPass reports whether the directories from the root down to real
+// pass checkAncestors, checked once per process (w.checked). Under w.mu.
+func (w *world) ancestorsPass(real string) bool {
+	if w.checked[real] {
+		return true
+	}
+	if checkAncestors(real, false) != nil {
+		return false
+	}
+	w.checked[real] = true
+	return true
+}
+
+// crossPlace reports whether a B named name in the place real (whose
+// ancestors passed the check) can be one others can follow, before it is
+// made: every directory down to real has search permission for others, and a
+// B of ours already there has it too (one that fails B's check is passed
+// over for a fresh B of mode 0711, which has).
+func crossPlace(real, name string) bool {
+	if checkAncestors(real, true) != nil {
+		return false
+	}
+	var st unix.Stat_t
+	if unix.Lstat(joinUnder(real, name), &st) != nil {
+		return true
+	}
+	if !isOurDir(&st) || uint32(st.Mode)&0o022 != 0 {
+		return true
+	}
+	return uint32(st.Mode)&0o001 != 0
 }
 
 // checkGiven checks Options.Base before any route is tried (SPEC-routes
@@ -259,11 +309,8 @@ func (w *world) sockdirBase(real string, id fileID) *base {
 // given makes the error of B an Options.Base error rather than a reason to
 // fall back.
 func (w *world) makeBase(p place, real string, given bool) (*base, error) {
-	if !w.checked[real] {
-		if err := checkAncestors(real, false); err != nil {
-			return nil, err
-		}
-		w.checked[real] = true
+	if !w.ancestorsPass(real) {
+		return nil, checkAncestors(real, false)
 	}
 	pfd, err := unix.Open(real, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {

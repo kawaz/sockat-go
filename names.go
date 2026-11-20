@@ -3,6 +3,7 @@ package sockat
 import (
 	"crypto/rand"
 	"errors"
+	"strings"
 
 	"golang.org/x/sys/unix"
 )
@@ -20,11 +21,13 @@ const linkAttempts = 16
 // errNoFreeName is returned when createAt ran out of names.
 var errNoFreeName = errors.New("could not find a free name for a directory or symlink")
 
-// randomChars returns linkRandomLen random letters and digits (62 kinds) from
+// alphabet is the characters of a random name: letters and digits (62 kinds).
+const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+
+// randomChars returns linkRandomLen random letters and digits (alphabet) from
 // the system's secure generator (crypto/rand): the random names of D, of the
 // E made for one call, and of the B fallen back to (SPEC-routes "D と E").
 func randomChars() (string, error) {
-	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 	var random [linkRandomLen]byte
 	if _, err := rand.Read(random[:]); err != nil {
 		return "", err
@@ -36,6 +39,20 @@ func randomChars() (string, error) {
 		name = append(name, alphabet[int(b)%len(alphabet)])
 	}
 	return string(name), nil
+}
+
+// isRandomName reports whether name has the form randomChars gives: what a
+// D's name looks like.
+func isRandomName(name string) bool {
+	if len(name) != linkRandomLen {
+		return false
+	}
+	for i := range len(name) {
+		if strings.IndexByte(alphabet, name[i]) < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // createAt calls create with names from next until one is not taken

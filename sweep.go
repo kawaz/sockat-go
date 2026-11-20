@@ -10,11 +10,13 @@ import (
 
 // Sweep removes the directories (D) that processes which have ended left in
 // this user's directories of /tmp, $XDG_RUNTIME_DIR and $TMPDIR (sockat-<euid>,
-// sockat under $XDG_RUNTIME_DIR), with the symlinks in them. A D whose
-// process is alive (it holds a lock on it) is left alone, and so is one
-// that holds anything but symlinks, and the symlinks right in those
-// directories. Nothing is made: a place with no such directory, or one that
-// fails its checks (another owner, writable by others), is passed over.
+// sockat under $XDG_RUNTIME_DIR), with the symlinks in them. Those
+// directories are for this library alone: only the entries in them named as
+// a D is (10 letters and digits) are looked at, and anything else put there
+// stays. A D whose process is alive (it holds a lock on it) is left alone,
+// and so is one that holds anything but symlinks, and the symlinks right in
+// those directories. Nothing is made: a place with no such directory, or one
+// that fails its checks (another owner, writable by others), is passed over.
 // Directories of other names (made where the default one failed its checks,
 // or in a socket's directory) are not looked at.
 //
@@ -25,8 +27,9 @@ func Sweep() error {
 }
 
 // SweepBase is Sweep for the directory base, as given to Options.Base, which
-// the application that manages it sweeps. Nothing happens when base, or the
-// directory it is in, does not exist. The error is an *os.PathError (several
+// the application that manages it sweeps (the directory is for this library
+// alone, as Sweep's are). Nothing happens when base, or the directory it is
+// in, does not exist. The error is an *os.PathError (several
 // joined with errors.Join): EINVAL for a base that is not absolute or does
 // not end with a name, ENOTDIR for one that is not a directory, EPERM for a
 // symlink, for one not of this user or writable by others, or for a
@@ -114,14 +117,19 @@ func sweepB(real, path string, given bool) error {
 }
 
 // sweepD removes the entry name of B (bfd) when it is a D whose process has
-// ended (SPEC-routes "D と E"): a directory of ours, opened without following
-// a symlink, on which an exclusive lock can be taken at once (a live
+// ended (SPEC-routes "D と E"): named as a D is (isRandomName), a directory
+// of ours, opened without following a symlink, on which an exclusive lock can be taken at once (a live
 // process holds a shared one), still named name once locked, and holding
 // nothing but symlinks. The symlinks go, then D. Anything else is left
 // alone: a symlink right in B (an E of a connect), a D that is locked, or
 // that holds anything else. The error is the system call's, for a D found
 // dead that could not be removed.
 func sweepD(bfd int, name string) error {
+	// Only a name of D's form (SPEC "sweep"): a directory of another name in
+	// B is not one this library made, whatever it holds.
+	if !isRandomName(name) {
+		return nil
+	}
 	var st unix.Stat_t
 	if unix.Fstatat(bfd, name, &st, unix.AT_SYMLINK_NOFOLLOW) != nil || !isOurDir(&st) {
 		return nil

@@ -129,37 +129,92 @@ func TestSweepLeavesWhatIsNotADeadDOfSymlinks(t *testing.T) {
 		}
 	}
 	ln(b.real + "/connectE")
-	mk(b.real + "/withFile")
-	if err := os.WriteFile(b.real+"/withFile/f", nil, 0o600); err != nil {
+	// The D below are named as a D is (10 letters and digits), so that what
+	// keeps them is what they hold, not their name.
+	mk(b.real + "/withFile00")
+	if err := os.WriteFile(b.real+"/withFile00/f", nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	mk(b.real + "/withDir")
-	mk(b.real + "/withDir/sub")
-	mk(b.real + "/dead")
-	ln(b.real + "/dead/0")
-	ln(b.real + "/dead/1")
+	mk(b.real + "/withDir000")
+	mk(b.real + "/withDir000/sub")
+	mk(b.real + "/deadD00000")
+	ln(b.real + "/deadD00000/0")
+	ln(b.real + "/deadD00000/1")
 	sd := tmpDir(t)
 	others := []string{ps.tmp + "/" + uidName() + ".AbCdEfGhIj", sd + "/.sockat.AbCdEfGhIj"}
 	for _, o := range others {
 		mk(o)
-		mk(o + "/dead")
-		ln(o + "/dead/0")
+		mk(o + "/deadD00000")
+		ln(o + "/deadD00000/0")
 	}
 	if err := w.sweep(); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"connectE", own.name, "withDir", "withFile"}
+	want := []string{"connectE", own.name, "withDir000", "withFile00"}
 	slices.Sort(want)
 	if got := entries(t, b.real); !slices.Equal(got, want) {
 		t.Fatalf("B holds %v, want %v", got, want)
 	}
 	for _, o := range others {
-		if !exists(o + "/dead/0") {
+		if !exists(o + "/deadD00000/0") {
 			t.Fatalf("sweep looked into %s", o)
 		}
 	}
 	for _, p := range []string{ps.runtime, ps.tmpdir} {
 		assertEmpty(t, p)
+	}
+}
+
+// Sweep and SweepBase only look at entries of B named as a D is (10 letters
+// and digits, as randomChars makes them): a directory of another name is not
+// one this library made, so it stays even when it is unlocked and holds only
+// symlinks (an application's links/ in its Options.Base, say) or nothing at
+// all. Names one character short or long, or with a character outside the
+// letters and digits, are not of the form either. A dead D of the form next
+// to them still goes, so the names are what keeps them.
+func TestSweepLooksAtNamesOfTheFormOfDOnly(t *testing.T) {
+	t.Parallel()
+	notD := []string{"links", "empty", "abcdefghi", "abcdefghijk", "abcde_ghij", "abcde.ghij"}
+	fill := func(b string) {
+		t.Helper()
+		for _, n := range append(slices.Clone(notD), "deadD00000") {
+			if err := os.Mkdir(b+"/"+n, 0o711); err != nil {
+				t.Fatal(err)
+			}
+			if n != "empty" {
+				if err := os.Symlink("/nonexistent", b+"/"+n+"/0"); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	want := slices.Clone(notD)
+	slices.Sort(want)
+
+	w, _ := testWorld(t, nil)
+	b := autoOf(w, false)
+	if b == nil {
+		t.Fatal("no B")
+	}
+	fill(b.real)
+	if err := w.sweep(); err != nil {
+		t.Fatal(err)
+	}
+	if got := entries(t, b.real); !slices.Equal(got, want) {
+		t.Fatalf("after sweep B holds %v, want %v", got, want)
+	}
+
+	d := tmpDir(t)
+	g := d + "/b"
+	if _, err := w.givenBase(g, anyFits); err != nil {
+		t.Fatal(err)
+	}
+	fill(g)
+	if err := SweepBase(g); err != nil {
+		t.Fatal(err)
+	}
+	if got := entries(t, g); !slices.Equal(got, want) {
+		t.Fatalf("after SweepBase the given B holds %v, want %v", got, want)
 	}
 }
 
@@ -181,7 +236,7 @@ func TestSweepBaseSweepsTheGivenB(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(g+"/dead", 0o711); err != nil {
+	if err := os.Mkdir(g+"/deadD00000", 0o711); err != nil {
 		t.Fatal(err)
 	}
 	if err := SweepBase(g); err != nil {

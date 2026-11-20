@@ -3,33 +3,22 @@ package sockat
 import (
 	"crypto/rand"
 	"errors"
-	"os"
-	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
-// linkPrefix is what the symlink name starts with, so a link left behind by a
-// process that died is recognisable as sockat's.
-const linkPrefix = "sockat."
-
-// linkRandomLen is the length of the random part of the symlink name.
+// linkRandomLen is the length of a random name: D's, an E made for one call,
+// and the random part of a B fallen back to (SPEC-routes "D と E").
 const linkRandomLen = 10
 
-// linkAttempts is how many names createLink tries before giving up. Each try
+// linkAttempts is how many names createAt tries before giving up. Each try
 // is a fresh random name from 62^10 possibilities, so exhausting this means
-// something other than bad luck (for example a base that refuses every name).
+// something other than bad luck (for example a directory that refuses every
+// name).
 const linkAttempts = 16
 
-// errNoFreeName is returned when createLink ran out of names.
-var errNoFreeName = errors.New("could not find a free name for a temporary symlink")
-
-// randomName returns "sockat." followed by randomChars.
-func randomName() (string, error) {
-	r, err := randomChars()
-	if err != nil {
-		return "", err
-	}
-	return linkPrefix + r, nil
-}
+// errNoFreeName is returned when createAt ran out of names.
+var errNoFreeName = errors.New("could not find a free name for a directory or symlink")
 
 // randomChars returns linkRandomLen random letters and digits (62 kinds) from
 // the system's secure generator (crypto/rand): the random names of D, of the
@@ -49,41 +38,23 @@ func randomChars() (string, error) {
 	return string(name), nil
 }
 
-// createLink creates a symlink under base pointing to target, named by
-// nextName (called once per try; its error ends the attempt), and returns its
-// path.
-//
-// symlink(2) fails with EEXIST instead of replacing an existing entry, which
-// is the O_EXCL of symlinks: the link that is created is always one nobody
-// else had, and a name already taken (by anyone) is skipped for the next one.
-// Any other error ends the attempt.
-func createLink(base, target string, nextName func() (string, error)) (string, error) {
+// createAt calls create with names from next until one is not taken
+// (EEXIST), linkAttempts at most, and returns the name created. mkdirat(2)
+// and symlinkat(2) fail with EEXIST rather than reuse an existing entry, so
+// what is created is always one nobody else had.
+func createAt(next func() (string, error), create func(name string) error) (string, error) {
 	for range linkAttempts {
-		name, err := nextName()
+		name, err := next()
 		if err != nil {
 			return "", err
 		}
-		link := underBase(base, name)
-		err = os.Symlink(target, link)
+		err = create(name)
 		if err == nil {
-			return link, nil
+			return name, nil
 		}
-		if !errors.Is(err, syscall.EEXIST) {
+		if !errors.Is(err, unix.EEXIST) {
 			return "", err
 		}
 	}
 	return "", errNoFreeName
-}
-
-// underBase spells the entry name of the directory base as base followed by
-// it, without cleaning base (a lexical clean would resolve ".." differently
-// from the kernel where base goes through a symlink).
-func underBase(base, name string) string {
-	for len(base) > 1 && base[len(base)-1] == '/' {
-		base = base[:len(base)-1]
-	}
-	if base == "/" {
-		return "/" + name
-	}
-	return base + "/" + name
 }

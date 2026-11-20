@@ -10,14 +10,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// dialSteps is the connect order on macOS (SPEC "connect の順"): relative,
-// widened, thread-cwd, symlink-file.
+// dialSteps is the connect order on Apple's systems (SPEC "connect の順"):
+// relative, widened (not made: skipped), thread-cwd-direct, link-file.
 func dialSteps(bool) []dialStep {
 	return []dialStep{
-		{routeRelative, (*dialer).relative},
-		{routeWidened, (*dialer).widened},
-		{routeThreadCwd, (*dialer).threadCwd},
-		{routeSymlinkFile, (*dialer).symlinkFile},
+		{routeRelative, (*dialCall).relative},
+		{routeWidened, (*dialCall).widened},
+		{routeThreadCwdDirect, (*dialCall).threadCwdDirect},
+		{routeLinkFile, (*dialCall).linkFile},
 	}
 }
 
@@ -25,7 +25,7 @@ func dialSteps(bool) []dialStep {
 const noWidenedRoute = "no widened route in sockat-go"
 
 // widened is SPEC's widened sockaddr, which sockat-go does not make: always
-// unusable, so the order goes on to thread-cwd.
+// unusable, so the order goes on to thread-cwd-direct.
 //
 // Design rationale: the kernel takes the widened form (sun_len and the
 // address length past sizeof(struct sockaddr_un), up to 253 bytes of path),
@@ -33,23 +33,19 @@ const noWidenedRoute = "no widened route in sockat-go"
 // connected that way to a peer bound that way leaves RemoteAddr() a nil
 // net.Addr, whose String() panics, where net.DialUnix would report the
 // spelling (DR-0005). What is lost is a dial that neither relative nor
-// thread-cwd can make (no thread cwd, or a file name over 92 bytes) with no
-// usable place for symlink-file's symlink, to a path of at most 253 bytes.
-func (d *dialer) widened() (endpoint, error) { return nil, unusable(noWidenedRoute) }
+// thread-cwd-direct can make (no thread cwd of its own, or a file name over
+// 103 bytes) and link-file cannot either (no B can be made), to a path of at
+// most 253 bytes.
+func (c *dialCall) widened() (endpoint, error) { return nil, unusable(noWidenedRoute) }
 
-// procFDUsableFor: no /proc here.
-func procFDUsableFor(*os.File, string) bool { return false }
+// procUsable: no /proc here.
+func procUsable(*os.File, string) bool { return false }
 
 // threadCwdPossible: __pthread_fchdir is tried (threadChdir tells when the
 // kernel lacks it).
 func threadCwdPossible() bool { return true }
 
-// dOpenFlags is how D is opened: O_SEARCH, which needs only search permission
-// (a umask of 0477 leaves 0300), and gives an fd fchmod(2) and
-// __pthread_fchdir take.
-const dOpenFlags = unix.O_SEARCH | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
-
-// openDir opens dir to serve as the cwd of the thread-cwd route: O_SEARCH,
+// openDir opens dir to serve as the cwd of thread-cwd-direct: O_SEARCH,
 // which needs only search permission on the directory, the same as a plain
 // bind / connect through the path. A kernel that does not take O_SEARCH on a
 // directory answers EISDIR (as it does for O_EXEC alone) or EINVAL; then the
@@ -93,15 +89,6 @@ func threadChdir(dirfd int) error {
 	}
 	return syscallError("fchdir", e)
 }
-
-// setPrivate sets D (fd, which passed the check) to mode 0700: fchmod(2).
-func setPrivate(_ int, _ string, fd int, _ *unix.Stat_t, _ bool, _ string) error {
-	return unix.Fchmod(fd, 0o700)
-}
-
-// dOpenFlagsRetry is how D is opened when the kernel refuses O_SEARCH on a
-// directory (EISDIR / EINVAL), as openDir does for the socket's directory.
-const dOpenFlagsRetry = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
 
 // hasProc: no /proc routes here.
 const hasProc = false

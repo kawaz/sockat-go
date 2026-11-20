@@ -10,34 +10,47 @@ import (
 )
 
 // dialSteps is the connect order on Linux (SPEC "connect の順"): with /proc,
-// proc-direct, thread-cwd, proc, proc-held, symlink-file; without it,
-// relative, thread-cwd, symlink-file.
+// proc-direct, thread-cwd-direct, link-file; without it, relative,
+// thread-cwd-direct, link-file. Which row is the call's is decided once, by
+// whether /proc can be used (procUsable), so a route of the other row is
+// never tried or skipped.
 func dialSteps(proc bool) []dialStep {
 	if proc {
 		return []dialStep{
-			{routeProcDirect, (*dialer).procDirect},
-			{routeThreadCwd, (*dialer).threadCwd},
-			{routeProc, (*dialer).proc},
-			{routeProcHeld, (*dialer).procHeld},
-			{routeSymlinkFile, (*dialer).symlinkFile},
+			{routeProcDirect, (*dialCall).procDirect},
+			{routeThreadCwdDirect, (*dialCall).threadCwdDirect},
+			{routeLinkFile, (*dialCall).linkFile},
 		}
 	}
 	return []dialStep{
-		{routeRelative, (*dialer).relative},
-		{routeThreadCwd, (*dialer).threadCwd},
-		{routeSymlinkFile, (*dialer).symlinkFile},
+		{routeRelative, (*dialCall).relative},
+		{routeThreadCwdDirect, (*dialCall).threadCwdDirect},
+		{routeLinkFile, (*dialCall).linkFile},
 	}
 }
 
-// procFDUsableFor reports whether <procSelfFD>/<fd of dir> can be looked up,
-// that is, whether /proc is there. With no dir (the socket's directory could
-// not be opened), an fd of / stands in.
-func procFDUsableFor(dir *os.File, procSelfFD string) bool {
-	if dir == nil {
-		return procFDUsable("/", procSelfFD)
+// procUsable reports whether /proc can be used (SPEC "用語"): a stat of
+// <proc>/self/fd/<fd> has the (st_dev, st_ino) of the directory the fd holds,
+// for the fd of the socket's directory (sdir), or of / opened for the check
+// when sdir could not be opened. Where the PID namespace and the /proc
+// mounted disagree, or /proc is not there, it does not.
+func procUsable(sdir *os.File, proc string) bool {
+	fd := -1
+	if sdir != nil {
+		fd = int(sdir.Fd())
+	} else {
+		var err error
+		if fd, err = unix.Open("/", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0); err != nil {
+			return false
+		}
+		defer unix.Close(fd)
 	}
-	_, err := os.Stat(procSelfFD + "/" + strconv.Itoa(int(dir.Fd())))
-	return err == nil
+	var held unix.Stat_t
+	if unix.Fstat(fd, &held) != nil {
+		return false
+	}
+	id, ok := statID(proc + "/self/fd/" + strconv.Itoa(fd))
+	return ok && id == fileID{uint64(held.Dev), uint64(held.Ino)}
 }
 
 // threadCwdPossible reports whether the thread-cwd route may be tried: not
@@ -48,51 +61,16 @@ func threadCwdPossible() bool {
 	return err == nil && mode == 0
 }
 
-// dOpenFlags is how D is opened: O_PATH, which needs no read permission (a
-// umask of 0477 leaves 0300), so D is checked (fstat) whatever its mode
-// before anything is decided about it.
-const dOpenFlags = unix.O_PATH | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
-
-// setPrivate sets D (fd, an O_PATH fd that passed the check, whose fstat is
-// held) to mode 0700. An O_PATH fd takes no fchmod(2): with /proc, chmod
-// through /proc/self/fd/<fd>, which reaches the directory the fd holds;
-// without it, open D by its name again O_RDONLY (the check having passed, the
-// owner may lack only read permission, so this can still fail), confirm it is
-// the same directory, and fchmod that.
-func setPrivate(baseFD int, name string, fd int, held *unix.Stat_t, proc bool, procSelfFD string) error {
-	if proc {
-		return unix.Chmod(procSelfFD+"/"+strconv.Itoa(fd), 0o700)
-	}
-	rfd, err := unix.Openat(baseFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return err
-	}
-	defer unix.Close(rfd)
-	var st unix.Stat_t
-	if err := unix.Fstat(rfd, &st); err != nil {
-		return err
-	}
-	if st.Dev != held.Dev || st.Ino != held.Ino {
-		return errUnusable
-	}
-	return unix.Fchmod(rfd, 0o700)
-}
-
-// procDirect connects through <procSelfFD>/<fd of the socket's
-// directory>/<name>, with no R: a connect leaves no spelling behind. Unusable
-// when the socket's directory was not opened, <procSelfFD>/<fd> cannot be
-// looked up (without this check the connect would fail with ENOENT, which
-// reads as "the directory does not exist" although it does), or the spelling
-// does not fit sun_path (a file name of about 90 bytes or more).
-func (d *dialer) procDirect() (endpoint, error) {
-	if d.sdir == nil {
+// procDirect connects through <proc>/self/fd/<fd of the socket's
+// directory>/<name>, with no E: a connect leaves no spelling behind. Unusable
+// when the socket's directory was not opened or the spelling does not fit
+// sun_path (a file name of about 90 bytes or more). Only in the row of the
+// connect order where /proc can be used (procUsable).
+func (c *dialCall) procDirect() (endpoint, error) {
+	if c.sdir == nil {
 		return nil, unusable("socket directory not opened")
 	}
-	fdDir := d.cfg.procSelfFD + "/" + strconv.Itoa(int(d.sdir.Fd()))
-	if _, err := os.Stat(fdDir); err != nil {
-		return nil, unusable("/proc unusable")
-	}
-	via := fdDir + "/" + d.name
+	via := c.w.cfg.proc + "/self/fd/" + strconv.Itoa(int(c.sdir.Fd())) + "/" + c.name
 	if len(via) > directMax {
 		return nil, unusable("spelling too long")
 	}
@@ -100,9 +78,9 @@ func (d *dialer) procDirect() (endpoint, error) {
 }
 
 // openDir opens dir O_PATH | O_DIRECTORY, which needs only search permission.
-// The fd serves both the /proc route (/proc/self/fd/<fd> names the directory)
-// and the thread-cwd route (fchdir(2) takes an O_PATH directory fd since
-// Linux 3.5).
+// The fd serves both proc-direct (/proc/self/fd/<fd> names the directory)
+// and thread-cwd-direct (fchdir(2) takes an O_PATH directory fd since Linux
+// 3.5).
 func openDir(dir string) (*os.File, error) {
 	fd, err := unix.Open(dir, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
@@ -130,52 +108,6 @@ func threadChdir(dirfd int) error {
 	}
 	return syscallError("fchdir", unix.Fchdir(dirfd))
 }
-
-// heldLinkName is the name of proc-held's symlink inside D.
-const heldLinkName = "s"
-
-// procHeld connects through <procSelfFD>/<D>/s, s a symlink in D to the socket
-// file (SPEC "proc-held"; D made with steps 1, 2 and 5 of "D と R", R not
-// needed). The kernel follows D's fd, not a name, so neither where D is nor
-// who else can write there matters, and the spelling is short whatever the
-// directory and the file name. s holds the caller's own spelling (made
-// absolute against the cwd), so the kernel resolves it as it resolves the
-// path. s is removed (through D's fd) only when it was made; D with the rest
-// of the dial. Unusable when D or s cannot be made.
-func (d *dialer) procHeld() (endpoint, error) {
-	target, ok := absTarget(d.path)
-	if !ok {
-		return nil, unusable("cwd unreadable")
-	}
-	h, err := d.theD(false)
-	if err != nil {
-		return nil, err
-	}
-	if err := unix.Symlinkat(target, h.fd, heldLinkName); err != nil {
-		return nil, unusable("s not made")
-	}
-	defer unix.Unlinkat(h.fd, heldLinkName, 0)
-	via := d.cfg.procSelfFD + "/" + strconv.Itoa(h.fd) + "/" + heldLinkName
-	if len(via) > directMax {
-		return nil, unusable("spelling too long")
-	}
-	return viaStd(opDial, via, false)
-}
-
-// procFDUsable reports whether <procSelfFD>/<fd> can be looked up for an fd
-// of dir (opened O_PATH for the check), that is, whether /proc is there.
-func procFDUsable(dir, procSelfFD string) bool {
-	fd, err := unix.Open(dir, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return false
-	}
-	defer unix.Close(fd)
-	_, err = os.Stat(procSelfFD + "/" + strconv.Itoa(fd))
-	return err == nil
-}
-
-// dOpenFlagsRetry: no second way of opening D here.
-const dOpenFlagsRetry = 0
 
 // hasProc: /proc may be there.
 const hasProc = true

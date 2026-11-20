@@ -48,24 +48,22 @@ type endpoint interface{ Close() error }
 type route string
 
 const (
-	// The names are SPEC's ("経路の名前"): the means, then what it is about.
+	// The names are SPEC's ("経路の名前"): the means, then what it is about;
+	// -direct is the form that passes the file name with no E.
 	routeStandard route = "standard" // the path itself, through the standard library
-	// The bind's routes (bind.go).
+	// The routes of a bind (bind.go), and link-file of a connect.
 	routeLinkDir  route = "link-dir"  // <B>/<D>/<E>/<name>, E a symlink to the socket's directory
-	routeLinkFile route = "link-file" // <B>/<D>/<E>, E a symlink to the socket file
+	routeLinkFile route = "link-file" // <B>/<D>/<E> (a bind), <B>/<E> (a connect), E a symlink to the socket file
 	// <E>/<name> relative to D, E removed right after: thread-cwd from a
-	// thread whose own cwd is D (Linux, macOS), at by bindat(2) (FreeBSD). A
-	// dial's thread-cwd and at go through D and R (central.go).
+	// thread whose own cwd is D (Linux, macOS), at by bindat(2) (FreeBSD).
 	routeThreadCwd route = "thread-cwd"
 	routeAt        route = "at"
-	// The routes of a dial only (the connect order).
-	routeProc        route = "proc"         // /proc/self/fd/<D>/R/<name> (Linux)
-	routeSymlinkFile route = "symlink-file" // a symlink <place>/sockat.XXXXXXXXXX to the socket file
-	routeProcDirect  route = "proc-direct"  // /proc/self/fd/<dirfd>/<name> (Linux)
-	routeProcHeld    route = "proc-held"    // /proc/self/fd/<D>/s, s a symlink to the file (Linux)
-	routeRelative    route = "relative"     // the path relative to the cwd
-	routeWidened     route = "widened"      // SPEC's; sockat-go does not make it (named in skipped, macOS)
-	routeAtDirect    route = "at-direct"    // connectat(2) on the socket's directory (FreeBSD)
+	// The routes of a connect only (dial.go).
+	routeProcDirect      route = "proc-direct"       // /proc/self/fd/<dirfd>/<name> (Linux)
+	routeRelative        route = "relative"          // the path relative to the cwd
+	routeWidened         route = "widened"           // SPEC's; sockat-go does not make it (named in skipped, macOS)
+	routeAtDirect        route = "at-direct"         // connectat(2) on the socket's directory (FreeBSD)
+	routeThreadCwdDirect route = "thread-cwd-direct" // <name> from a thread whose own cwd is the socket's directory
 )
 
 // directMax is the longest path the standard library accepts: sun_path less
@@ -77,7 +75,7 @@ const (
 const directMax = len(unix.RawSockaddrUnix{}.Path) - 1
 
 // errUnusable means that a route cannot be used at all (too long, no /proc,
-// no safe place for a symlink, no thread cwd of its own), as
+// no B, D or E, no thread cwd of its own), as
 // opposed to a real failure of the bind / connect it made. It never leaves the
 // package: it only makes the order move on to the next route.
 var errUnusable = errors.New("sockat: route unusable")
@@ -154,55 +152,6 @@ func (w *world) listen(path string, opts Options, tr *trace) (*net.UnixListener,
 		return nil, b, opError(opListen, path, err)
 	}
 	return l, b, nil
-}
-
-// runDial connects to path (Dial, DialEx), trying the connect order.
-//
-// A path the standard library accepts goes to it as is (stdSpelling), before
-// anything else is looked at (the environment included). So does an abstract
-// socket name (Linux, Android). A NUL anywhere else, a leading one too where
-// the kernel has no abstract names, is EINVAL, whatever the length.
-func runDial(path string) (endpoint, route, error) {
-	return runDialTraced(path, nil, nil)
-}
-
-// runDialWith is runDial with the environment's inputs given as cfg (the tests
-// pass their own); nil reads them from the environment, and only for a long
-// path.
-func runDialWith(path string, cfg *config) (endpoint, route, error) {
-	return runDialTraced(path, cfg, nil)
-}
-
-// runDialTraced is runDialWith recording the routes found unusable in tr
-// (DialEx), in place of cfg's own trace, unless tr is nil.
-func runDialTraced(path string, cfg *config, tr *trace) (endpoint, route, error) {
-	if abstractName(path) {
-		ep, err := viaStd(opDial, path, true)
-		return ep, routeStandard, err
-	}
-	if strings.IndexByte(path, 0) >= 0 {
-		return nil, "", opError(opDial, path, fmt.Errorf("socket path must not contain a NUL byte: %w", syscall.EINVAL))
-	}
-	if s := stdSpelling(path); len(s) <= directMax {
-		ep, err := viaStd(opDial, s, s == path)
-		if err != nil && s != path {
-			err = opError(opDial, path, unwrapOpError(err))
-		}
-		return ep, routeStandard, err
-	}
-	if cfg == nil {
-		cfg = configFromEnv()
-	}
-	if tr != nil {
-		c := *cfg
-		c.trace = tr
-		cfg = &c
-	}
-	ep, r, err := runDialLong(path, cfg)
-	if err != nil {
-		return nil, r, opError(opDial, path, err)
-	}
-	return ep, r, nil
 }
 
 // abstractName reports whether path is the name of an abstract socket (a
@@ -303,4 +252,21 @@ func syscallError(name string, err error) error {
 // sun_path.
 func errNameTooLong(o op) error {
 	return syscallError(o.sysName(), syscall.ENAMETOOLONG)
+}
+
+// trace records the routes tried and found unusable, in order, for the
+// Skipped of ListenEx and DialEx (diagnostics only). A nil trace records
+// nothing.
+type trace struct{ skipped []skipped }
+
+// skipped is a route found unusable and why.
+type skipped struct {
+	name   route
+	reason string
+}
+
+func (t *trace) add(r route, reason string) {
+	if t != nil {
+		t.skipped = append(t.skipped, skipped{r, reason})
+	}
 }

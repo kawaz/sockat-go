@@ -64,8 +64,7 @@ func TestAPathTheNetPackageAcceptsGoesToItAndOneByteMoreDoesNot(t *testing.T) {
 	if r != routeStandard {
 		t.Fatalf("%d bytes: %s, want %s", directMax, r, routeStandard)
 	}
-	ep, r, err := runDial(at)
-	cc := must{t}.conn(ep, err)
+	cc, r := dialIn(t, defaultWorld, at)
 	if r != routeStandard {
 		t.Fatalf("%d bytes: %s, want %s", directMax, r, routeStandard)
 	}
@@ -79,8 +78,7 @@ func TestAPathTheNetPackageAcceptsGoesToItAndOneByteMoreDoesNot(t *testing.T) {
 	if !isSocket(over) {
 		t.Fatalf("no socket at %s (route %s)", over, r)
 	}
-	ep, r, err = runDial(over)
-	cc = must{t}.conn(ep, err)
+	cc, r = dialIn(t, defaultWorld, over)
 	if r == routeStandard {
 		t.Fatalf("%d bytes went to the net package", directMax+1)
 	}
@@ -205,11 +203,11 @@ func TestAMissingDirectoryIsENOENTEvenWhenTheNameFitsNoSockaddr(t *testing.T) {
 //     Where a bind follows a symlink (macOS, NetBSD), link-file is spelled
 //     without the file name and binds it at the path; Linux does not try
 //     it.
-//   - Dial (except FreeBSD, whose connectat takes the name as bindat does): the
-//     symlink to the socket file is spelled without the file name, so the
-//     name's length does not matter. With nothing there the error is the
-//     kernel's ENOENT, not ENAMETOOLONG; a socket bound under a short name and
-//     renamed to the long one is reached and talks.
+//   - Dial: link-file, last in every system's connect order, is spelled
+//     <B>/<E> without the file name, so the name's length does not matter.
+//     With nothing there the error is the kernel's ENOENT, not ENAMETOOLONG;
+//     a socket bound under a short name and renamed to the long one is
+//     reached and talks.
 func TestAFileNameOf254BytesIsListenedOnOnlyThroughLinkFileAndDialed(t *testing.T) {
 	t.Parallel()
 	d := tmpDir(t)
@@ -226,11 +224,6 @@ func TestAFileNameOf254BytesIsListenedOnOnlyThroughLinkFileAndDialed(t *testing.
 		if exists(p) {
 			t.Fatal("something was created at the path")
 		}
-	}
-	if runtime.GOOS == "freebsd" {
-		_, err = Dial(p)
-		wantOpError(t, "dial", opDial, p, err, syscall.ENAMETOOLONG)
-		return
 	}
 	_, err = Dial(p)
 	wantOpError(t, "dial with nothing there", opDial, p, err, syscall.ENOENT)
@@ -296,8 +289,8 @@ func TestPathsWithoutAFileNameOrWithANULAreEINVALAndCreateNothing(t *testing.T) 
 }
 
 // The addresses the kernel reports for a long path (getsockname /
-// getpeername) are the spelling it was given (R/<name>, a /proc/self/fd path,
-// a symlink that is gone, a relative path), not the caller's path, which the
+// getpeername) are the spelling it was given (B/D/E/<name>, E/<name> with E
+// gone, a /proc/self/fd path, a relative path), not the caller's path, which the
 // caller keeps. Reading them must not fail or panic,
 // for the listener, the dialed connection and the accepted one, at lengths
 // that take each system's routes.
@@ -440,9 +433,7 @@ func TestALeadingAtIsAPathWhereThereAreNoAbstractNames(t *testing.T) {
 	}
 	edge := "@" + strings.Repeat("e", directMax-1)
 	le := listenAt(t, filepath.Join(wd, edge))
-	ep, r, err := runDialWith(edge, nil)
-	ce := must{t}.conn(ep, err)
-	defer ce.Close()
+	ce, r := dialIn(t, defaultWorld, edge)
 	ping(t, le, ce)
 	if stdReadsAtAsAbstract && r == routeStandard {
 		t.Fatalf("%d bytes from '@': went through standard, whose spelling \"./\" + path does not fit", len(edge))
@@ -454,36 +445,32 @@ func TestALeadingAtIsAPathWhereThereAreNoAbstractNames(t *testing.T) {
 
 // A long path whose directory part is a file, not a directory, is ENOTDIR,
 // decided by looking the directory up first: not ENAMETOOLONG (which a failure
-// later in the order would give), and nothing is made in the places for D.
+// later in the order would give), and nothing is made in the places.
 // (The other early error, a directory whose real path cannot be resolved
-// although stat finds it, cannot be set up in a test.)
+// although stat finds it, is TestADirectoryWhoseRealPathCannotBeResolvedIsThatError.)
 func TestADirectoryPartThatIsAFileIsENOTDIR(t *testing.T) {
 	t.Parallel()
-	base := tmpDir(t)
 	f := nest(t, tmpDir(t), 300, "f")
 	if err := os.WriteFile(f, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	p := f + "/s.sock"
-	cfg := configFromTmpdir(base)
-	cfg.dBases = []string{base}
-	markUntouched(t, base)
-	if _, _, err := runDialLong(p, cfg); !errors.Is(err, syscall.ENOTDIR) {
+	w, ps := testWorld(t, nil)
+	markUntouched(t, ps.tmp)
+	if _, _, err := w.dial(p, Options{}, nil); !errors.Is(err, syscall.ENOTDIR) {
 		t.Fatalf("dial: %v, want ENOTDIR", err)
 	}
-	w, ps := testWorld(t, nil)
 	if _, _, err := w.listen(p, Options{}, nil); !errors.Is(err, syscall.ENOTDIR) {
 		t.Fatalf("listen: %v, want ENOTDIR", err)
 	}
-	assertEmpty(t, ps.tmp)
-	assertUntouched(t, base)
+	assertUntouched(t, ps.tmp)
 }
 
 // The socket's directory of a long relative path ("./" + a long file name)
 // may be a cwd that was removed: the process still has it, but it has no path
 // any more. The lookup of the directory comes before anything else (SPEC
 // "長いパスの経路と試す順番"), so the listen and the dial fail with the
-// lookup's error, not ENAMETOOLONG, and nothing is made in the place for D.
+// lookup's error, not ENAMETOOLONG, and nothing is made in the places.
 // Which step fails depends on the system: stat(".") still finds the removed
 // cwd on Linux, macOS, FreeBSD and NetBSD, and then its real path cannot be
 // resolved (ENOENT); on OpenBSD stat(".") itself fails (ENOENT), and then
@@ -493,14 +480,11 @@ func TestADirectoryPartThatIsAFileIsENOTDIR(t *testing.T) {
 // another process (a grandchild whose cwd is /), the same on every system.
 func TestADirectoryWhoseRealPathCannotBeResolvedIsThatError(t *testing.T) {
 	t.Parallel()
-	base := tmpDir(t)
 	cwd := tmpDir(t) + "/gone"
 	if err := os.Mkdir(cwd, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	markUntouched(t, base)
-	runChild(t, "TestChildRealPathOfARemovedCwd", cwd, "SOCKAT_BASE="+base)
-	assertUntouched(t, base)
+	runChild(t, "TestChildRealPathOfARemovedCwd", cwd)
 }
 
 func TestChildRealPathOfARemovedCwd(t *testing.T) {
@@ -521,14 +505,12 @@ func TestChildRealPathOfARemovedCwd(t *testing.T) {
 		}
 		t.Logf("stat of the removed cwd fails here (%v): that is the error to come", err)
 	}
-	cfg := configFromTmpdir(os.Getenv("SOCKAT_BASE"))
-	cfg.dBases = []string{os.Getenv("SOCKAT_BASE")}
 	p := "./" + strings.Repeat("n", directMax)
-	_, _, err = runDialLong(p, cfg)
+	w, ps := testWorld(t, nil)
+	_, _, err = w.dial(p, Options{}, nil)
 	if !errors.Is(err, want) || errors.Is(err, syscall.ENAMETOOLONG) {
 		t.Fatalf("dial: %v, want %v", err, want)
 	}
-	w, ps := testWorld(t, nil)
 	_, _, err = w.listen(p, Options{}, nil)
 	if !errors.Is(err, want) || errors.Is(err, syscall.ENAMETOOLONG) {
 		t.Fatalf("listen: %v, want %v", err, want)

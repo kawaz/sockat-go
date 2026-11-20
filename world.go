@@ -32,22 +32,10 @@ type config struct {
 	// randomChars outside the tests.
 	random func() (string, error)
 
-	// dBases is where D may go for a dial, in the order tried:
-	// ${TMPDIR:-/tmp} (a relative one too), then /tmp. The socket's directory
-	// comes after them.
-	dBases []string
-	// tmpBases is where the temporary symlink of symlink-file (a dial's, and
-	// a listen's where bind(2) follows it) may go, in the order tried: TMPDIR
-	// when it is set to an absolute path, then /tmp.
-	tmpBases []string
-	// procSelfFD is where the kernel lists the fds of the process (Linux).
-	// The tests point it elsewhere to stand in for a system without /proc.
-	procSelfFD string
-	// trace, when set (ListenEx, DialEx), records the routes found unusable.
-	trace *trace
-	// threadCwd is whether to try the thread-cwd route. Always true outside
-	// the tests, which turn it off to stand in for a system that refuses it
-	// (a seccomp filter on unshare(2), for example).
+	// threadCwd is whether to try the routes through a thread's own cwd
+	// (thread-cwd, thread-cwd-direct). Always true outside the tests, which
+	// turn it off to stand in for a system that refuses it (a seccomp filter
+	// on unshare(2), for example).
 	threadCwd bool
 }
 
@@ -78,31 +66,6 @@ func envConfig() config {
 		random:      randomChars,
 		threadCwd:   true,
 	}
-}
-
-func configFromEnv() *config {
-	tmpdir, _ := os.LookupEnv("TMPDIR")
-	return configFromTmpdir(tmpdir)
-}
-
-// configFromTmpdir is the configuration for a TMPDIR of tmpdir: TMPDIR, then
-// /tmp. An unset or empty TMPDIR leaves /tmp alone; a relative one is left out
-// (the link's place would depend on the cwd); one that is /tmp itself is tried
-// once.
-func configFromTmpdir(tmpdir string) *config {
-	var bases []string
-	if isAbs(tmpdir) && !sameComponents(tmpdir, "/tmp") {
-		bases = append(bases, tmpdir)
-	}
-	bases = append(bases, "/tmp")
-	dBases := []string{"/tmp"}
-	if tmpdir != "" && !sameComponents(tmpdir, "/tmp") {
-		dBases = []string{tmpdir, "/tmp"}
-	}
-	c := envConfig()
-	c.dBases, c.tmpBases = dBases, bases
-	c.procSelfFD = "/proc/self/fd"
-	return &c
 }
 
 // sameComponents reports whether a and b are the same spelling component by

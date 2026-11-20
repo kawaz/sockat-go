@@ -470,45 +470,28 @@ func openTestDir(t *testing.T, dir string) *os.File {
 	return f
 }
 
-// dialFrom dials p by the system's connect order started at from (the routes
-// before it left out, so that a later route can be forced where an earlier
-// one would take p), as runDialLong does but with the socket's directory given as
-// sdir (nil: as if it could not be opened). errUnusable when no route from
-// there can be used.
-func dialFrom(t *testing.T, p string, sdir *os.File, cfg *config, from route) (endpoint, route, error) {
+// dialTraced dials p through w (w.dial) with opts and returns what it
+// returned and the routes it recorded as tried and found unusable, in order.
+// A connection is closed at the end of the test.
+func dialTraced(t *testing.T, w *world, p string, opts Options) (*net.UnixConn, route, []skipped, error) {
 	t.Helper()
-	dir, name, err := splitPath(p)
-	if err != nil {
-		t.Fatal(err)
+	tr := &trace{}
+	c, r, err := w.dial(p, opts, tr)
+	if c != nil {
+		t.Cleanup(func() { c.Close() })
 	}
-	real, err := realDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	d := newDialer(p, dir, real, name, sdir, cfg)
-	defer d.close()
-	steps := dialSteps(d.procUsable)
-	for i, s := range steps {
-		if s.route == from {
-			return d.run(steps[i:])
-		}
-	}
-	t.Fatalf("%s is not in the connect order here", from)
-	return nil, "", nil
+	return c, r, tr.skipped, err
 }
 
-// dialTraced dials p through runDialLong with cfg (a copy of it, given a
-// trace) and returns what it returned and the routes it recorded as tried and
-// found unusable, in order. A connection is closed at the end of the test.
-func dialTraced(t *testing.T, p string, cfg *config) (endpoint, route, []skipped, error) {
+// dialIn is w.dial(p) with no Options, failing the test on an error; the
+// connection is closed at the end of the test.
+func dialIn(t *testing.T, w *world, p string) (*net.UnixConn, route) {
 	t.Helper()
-	c := *cfg
-	c.trace = &trace{}
-	ep, r, err := runDialLong(p, &c)
-	if ep != nil {
-		t.Cleanup(func() { ep.Close() })
+	c, r, _, err := dialTraced(t, w, p, Options{})
+	if err != nil {
+		t.Fatalf("dial %d bytes: %v", len(p), err)
 	}
-	return ep, r, c.trace.skipped, err
+	return c, r
 }
 
 // namesOf are the names of the routes in sks, in order. Each must come with
@@ -532,6 +515,18 @@ func stepNames(steps []dialStep) []route {
 		rs = append(rs, s.route)
 	}
 	return rs
+}
+
+// assertNoDOrE checks that no B w holds has a D or anything in it: what a
+// dial leaves (it makes no D, and unlinks the E it made right in B).
+func assertNoDOrE(t *testing.T, w *world) {
+	t.Helper()
+	for _, b := range w.bases() {
+		if b.d != nil {
+			t.Fatalf("a D was made in %s", b.real)
+		}
+		assertEmpty(t, b.real)
+	}
 }
 
 // listenAt makes a listener whose socket file is at p, however long p is and
@@ -578,42 +573,32 @@ func listenRoute(t *testing.T, p string) (*net.UnixListener, route) {
 }
 
 // threadName is a file name thread-cwd carries on Linux and macOS alike
-// (E/<name> and R/<name> are 103 bytes, macOS's directMax) and proc-direct
-// and link-dir do not (/proc/self/fd/<n>/<name> is at least 108 bytes, past
-// Linux's 107).
+// (E/<name> is 103 bytes, macOS's directMax) and link-dir does not.
 var threadName = strings.Repeat("t", 92)
 
-// assertNoSockatEntry checks that dir holds nothing of sockat's (sockat.* or
-// .sockat.*): no D or R left behind.
-func assertNoSockatEntry(t *testing.T, dir string) {
-	t.Helper()
-	es, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, e := range es {
-		if strings.HasPrefix(e.Name(), linkPrefix) || strings.HasPrefix(e.Name(), "."+linkPrefix) {
-			t.Fatalf("left behind in %s: %s", dir, e.Name())
-		}
-	}
-}
+// directName is a file name thread-cwd-direct and link-file carry on Linux
+// and macOS alike (at most 103 bytes) and proc-direct does not
+// (/proc/self/fd/<n>/<name> is past Linux's 107).
+var directName = strings.Repeat("n", 100)
 
-// assertTouched checks that something was created in or removed from dir
-// since markUntouched: D was made there (and removed again).
-func assertTouched(t *testing.T, dir string) {
+// mkdirMode creates the directory p with exactly mode (set after creating it,
+// so the umask does not interfere) and gives it back 0700 at the end of the
+// test so it can be removed.
+func mkdirMode(t *testing.T, p string, mode os.FileMode) string {
 	t.Helper()
-	fi, err := os.Stat(dir)
-	if err != nil {
+	if err := os.Mkdir(p, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if fi.ModTime().Equal(untouched) {
-		t.Fatalf("nothing was made in %s", dir)
+	if err := os.Chmod(p, mode); err != nil {
+		t.Fatal(err)
 	}
+	t.Cleanup(func() { os.Chmod(p, 0o700) })
+	return p
 }
 
 // bindFollowsSymlink reports whether this kernel's bind(2) follows a symlink
 // in the last component to a path where nothing is yet, making the socket
-// there: SPEC's premise for symlink-file in a bind (macOS and NetBSD do;
+// there: SPEC's premise for link-file in a bind (macOS and NetBSD do;
 // Linux, FreeBSD, OpenBSD and illumos do not). Found out once, with a raw socket
 // bound at a symlink in a fresh directory under /tmp, independently of the
 // code under test.

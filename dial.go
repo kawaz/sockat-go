@@ -2,151 +2,220 @@ package sockat
 
 import (
 	"errors"
+	"fmt"
+	"net"
 	"os"
-	"strconv"
+	"strings"
+	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
-// The connect order of a dial (SPEC "connect の順"): the routes that need no
-// writing (D, R, a symlink) and no thread first, the routes that make D or
-// start a thread after them. The order is the system's (dialSteps, in the
-// os_*.go files):
+// The connect order of a long path (SPEC "connect の順"): the routes that need
+// no writing and no thread first, then thread-cwd-direct, which starts a
+// thread, then link-file, which writes an E in B. The order is the system's
+// (dialSteps, in the os_*.go files):
 //
-//	| system                 | order                                                           |
-//	|------------------------|-----------------------------------------------------------------|
-//	| Linux with /proc       | proc-direct, thread-cwd, proc, proc-held, symlink-file          |
-//	| Linux without /proc    | relative, thread-cwd, symlink-file                              |
-//	| macOS                  | relative, widened (not made, DR-0005), thread-cwd, symlink-file |
-//	| FreeBSD                | at-direct, at                                                   |
-//	| NetBSD, OpenBSD, other | relative, symlink-file                                          |
+//	| system                  | order                                                   |
+//	|-------------------------|---------------------------------------------------------|
+//	| Linux with /proc        | proc-direct, thread-cwd-direct, link-file               |
+//	| Linux without /proc     | relative, thread-cwd-direct, link-file                  |
+//	| macOS                   | relative, widened (not made), thread-cwd-direct, link-file |
+//	| FreeBSD                 | at-direct, link-file                                    |
+//	| NetBSD, OpenBSD, other  | relative, link-file                                     |
 //
-// DialEx with its last resort adds fork-cwd-direct, which Go cannot make
-// (named in skipped). A connect leaves no spelling behind with the peer (the
-// connecting socket is not bound), so the routes that do without R
-// (proc-direct, relative, at-direct, proc-held, symlink-file) are safe for a
-// dial; a listen never takes them but symlink-file, whose spelling names
-// nothing but an entry of the place once the bind follows it.
+// A connect leaves no spelling with the peer (the connecting socket is not
+// bound), so no route of a connect makes D or keeps an E: link-file's E, in B
+// itself, is unlinked right after the connect. A route that cannot be used is
+// passed over (recorded in the trace); the first route that connects decides,
+// its failure included.
+
+// dialCall is one dial of a long path.
+type dialCall struct {
+	w    *world
+	path string // as the caller spelt it
+	dir  string // its directory part, as the caller spelt it
+	name string // the file name
+	// sdir is the socket's directory, opened for the routes that need its fd
+	// (proc-direct, at-direct, thread-cwd-direct); nil when it could not be
+	// opened.
+	sdir *os.File
+	opts Options
+}
 
 // dialStep is one route of the connect order: its name and how it is tried.
 // try returns an unusable error when the route cannot be used here, and
 // otherwise the outcome of the connect it made.
 type dialStep struct {
 	route route
-	try   func(*dialer) (endpoint, error)
+	try   func(*dialCall) (endpoint, error)
 }
 
-// dialer is one dial of a long path through the connect order.
-type dialer struct {
-	path, dir, name string
-	real            string   // the socket's directory as a real path, for R
-	sdir            *os.File // the socket's directory, nil when it could not be opened
-	cfg             *config
-	// procUsable is whether /proc can be used (Linux): it picks the order,
-	// and how D is opened.
-	procUsable bool
-	// nextD and nextR name D and R (randomPart outside the tests).
-	nextD, nextR func() (string, error)
-	// D, made at most once by the first route that uses it (dTried), and
-	// shared by the later ones; nil when it could be made nowhere.
-	dTried bool
-	dh     *held
+// notRouted is an error of a route that is not the route's failure but the
+// call's (Options.Base's B could not be made): it is returned with no route
+// (SPEC-routes "B の作り方").
+type notRouted struct{ error }
+
+func (e notRouted) Unwrap() error { return e.error }
+
+// dial connects to path (Dial, DialEx), recording the routes found unusable
+// in tr (nil records nothing).
+//
+// An Options.Base of the wrong form (relative, or not ending with a name) is
+// EINVAL whatever the length of the path. A path the standard library accepts
+// goes to it as is (stdSpelling), before anything else is looked at (the
+// environment included). So does an abstract socket name (Linux, Android). A
+// NUL anywhere else, a leading one too where the kernel has no abstract
+// names, is EINVAL, whatever the length. A longer path takes the connect
+// order (dialLong). The error is a *net.OpError for path; the route that
+// connected and failed, if any, is returned with it.
+func (w *world) dial(path string, opts Options, tr *trace) (*net.UnixConn, route, error) {
+	if opts.Base != "" {
+		if err := givenShape(opts.Base); err != nil {
+			return nil, "", opError(opDial, path, err)
+		}
+	}
+	if abstractName(path) {
+		ep, err := viaStd(opDial, path, true)
+		if err != nil {
+			return nil, routeStandard, err
+		}
+		return ep.(*net.UnixConn), routeStandard, nil
+	}
+	if strings.IndexByte(path, 0) >= 0 {
+		return nil, "", opError(opDial, path, fmt.Errorf("socket path must not contain a NUL byte: %w", syscall.EINVAL))
+	}
+	if s := stdSpelling(path); len(s) <= directMax {
+		ep, err := viaStd(opDial, s, s == path)
+		if err != nil {
+			if s != path {
+				err = opError(opDial, path, unwrapOpError(err))
+			}
+			return nil, routeStandard, err
+		}
+		return ep.(*net.UnixConn), routeStandard, nil
+	}
+	ep, r, err := w.dialLong(path, opts, tr)
+	if err != nil {
+		return nil, r, opError(opDial, path, err)
+	}
+	return ep.(*net.UnixConn), r, nil
 }
 
-func newDialer(path, dir, real, name string, sdir *os.File, cfg *config) *dialer {
-	return &dialer{path: path, dir: dir, name: name, real: real, sdir: sdir, cfg: cfg,
-		procUsable: procFDUsableFor(sdir, cfg.procSelfFD), nextD: randomPart, nextR: randomPart}
-}
-
-// run tries steps in order. A route that cannot be used is recorded in the
-// trace and the next one tried; the first route that connects decides, its
-// failure included (the next routes are not tried). errUnusable when no
-// route can be used.
-func (d *dialer) run(steps []dialStep) (endpoint, route, error) {
-	for _, s := range steps {
-		ep, err := s.try(d)
+// dialLong connects to path, longer than directMax, by the first route of the
+// connect order that can be used.
+//
+// The socket's directory is looked up first (stat, then its real path), so a
+// missing one is ENOENT, one that is not a directory ENOTDIR, and a failure to
+// resolve it its own error, before anything else is decided or made; then
+// Options.Base is checked, making nothing. The directory is then opened for
+// the routes that need its fd; when it cannot be opened (no read permission
+// where directories are opened O_RDONLY), those routes cannot be used.
+// ENAMETOOLONG when no route can be used.
+func (w *world) dialLong(path string, opts Options, tr *trace) (endpoint, route, error) {
+	dir, name, err := splitPath(path)
+	if err != nil {
+		return nil, "", err
+	}
+	var st unix.Stat_t
+	if err := unix.Stat(dir, &st); err != nil {
+		return nil, "", syscallError("stat", err)
+	}
+	if uint32(st.Mode)&unix.S_IFMT != unix.S_IFDIR {
+		return nil, "", syscallError("stat", unix.ENOTDIR)
+	}
+	// Its real path is looked up now too: an error there is returned as it
+	// is, rather than coming out as ENAMETOOLONG once no route could be used.
+	if _, err := realDir(dir); err != nil {
+		return nil, "", err
+	}
+	if opts.Base != "" {
+		if err := checkGiven(opts.Base, false); err != nil {
+			return nil, "", err
+		}
+	}
+	tr.add(routeStandard, "path too long")
+	sdir, err := openDir(dir)
+	if err != nil {
+		sdir = nil
+	} else {
+		defer sdir.Close()
+	}
+	c := &dialCall{w: w, path: path, dir: dir, name: name, sdir: sdir, opts: opts}
+	for _, s := range dialSteps(procUsable(sdir, w.cfg.proc)) {
+		ep, err := s.try(c)
 		if errors.Is(err, errUnusable) {
-			d.cfg.trace.add(s.route, reasonOf(err))
+			tr.add(s.route, reasonOf(err))
 			continue
+		}
+		var nr notRouted
+		if errors.As(err, &nr) {
+			return nil, "", nr.error
 		}
 		return ep, s.route, err
 	}
-	return nil, "", errUnusable
+	return nil, "", errNameTooLong(opDial)
 }
 
-// close removes D (and R) when they were made. Best effort.
-func (d *dialer) close() {
-	if d.dh != nil {
-		d.dh.cleanup()
-	}
-}
-
-// theD is D for the routes that use it (thread-cwd, proc, at, proc-held),
-// with R in it when withR (proc-held needs none). D is made once, by the first
-// of them that gets this far; when it could be made nowhere, every later one
-// is unusable too and D is not tried again (SPEC "D と R").
-func (d *dialer) theD(withR bool) (*held, error) {
-	if !d.dTried {
-		d.dTried = true
-		nextR := d.nextR
-		if !withR {
-			nextR = nil
-		}
-		if h, err := makeD(d.cfg.dBases, d.sdir, d.real, d.procUsable, d.cfg.procSelfFD, d.nextD, nextR); err == nil {
-			d.dh = h
-		}
-	}
-	if d.dh == nil {
-		return nil, unusable("no place for D")
-	}
-	if withR && d.dh.r == "" {
-		// D was made without R (by proc-held); R is made in it now.
-		if err := d.dh.makeR(d.real, d.nextR); err != nil {
-			return nil, unusable("R not made")
-		}
-	}
-	return d.dh, nil
-}
-
-// spellingFits reports whether R/<name> fits the sockaddr.
-func (d *dialer) spellingFits() bool { return rNameLen+1+len(d.name) <= directMax }
-
-// threadCwd connects through R/<name> from a thread whose own cwd is D
-// (inThreadCwd: Linux, macOS).
-func (d *dialer) threadCwd() (endpoint, error) {
-	if !d.spellingFits() {
+// threadCwdDirect connects by the file name from a thread whose own cwd is
+// the socket's directory (inThreadCwd: Linux, macOS), with no D and no E: the
+// spelling stays with nobody.
+func (c *dialCall) threadCwdDirect() (endpoint, error) {
+	if len(c.name) > directMax {
 		return nil, unusable("spelling too long")
 	}
-	if !d.cfg.threadCwd {
+	if c.sdir == nil {
+		return nil, unusable("socket directory not opened")
+	}
+	if !c.w.cfg.threadCwd {
 		return nil, unusable("thread cwd off")
 	}
 	if !threadCwdPossible() {
 		return nil, unusable("seccomp filter")
 	}
-	h, err := d.theD(true)
-	if err != nil {
-		return nil, err
-	}
-	ep, err := inThreadCwd(opDial, h.fd, h.r+"/"+d.name)
+	ep, err := inThreadCwd(opDial, int(c.sdir.Fd()), c.name)
 	if errors.Is(err, errUnusable) {
 		return nil, unusable("thread cwd refused")
 	}
 	return ep, err
 }
 
-// proc connects through /proc/self/fd/<D>/R/<name> (Linux with /proc). Its
-// length depends on D's fd: estimated with a one-digit fd before D is made,
-// checked again once D is open.
-func (d *dialer) proc() (endpoint, error) {
-	spellingLen := rNameLen + 1 + len(d.name)
-	if len(d.cfg.procSelfFD)+len("/0/")+spellingLen > directMax {
-		return nil, unusable("spelling too long")
+// linkFile connects by <B>/<E>, E a symlink of a random name right in B to
+// the socket file (the path, made absolute against the cwd), B spelt by its
+// real path (SPEC-routes "link-file", the default connect's), and unlinks E
+// right after, whatever the outcome. No D is made. B is Options.Base's when
+// given (made here when it is not there yet; an error making it is the
+// call's), otherwise the process's B of the places 1 to 3 (made here when the
+// process has none yet, and kept): the socket's directory, whose real-path
+// spelling is longer than the path, is no place for it.
+func (c *dialCall) linkFile() (endpoint, error) {
+	target, ok := absTarget(c.path)
+	if !ok {
+		return nil, unusable("cwd unreadable")
 	}
-	h, err := d.theD(true)
-	if err != nil {
+	var b *base
+	var err error
+	if c.opts.Base != "" {
+		if b, err = c.w.givenBase(c.opts.Base); err != nil {
+			return nil, notRouted{err}
+		}
+	} else if b, err = c.w.autoBase(false, func(_, breal string) bool { return linkConnectLen(breal) <= directMax }); err != nil {
 		return nil, err
 	}
-	via := d.cfg.procSelfFD + "/" + strconv.Itoa(h.fd) + "/" + h.r + "/" + d.name
-	if len(via) > directMax {
-		return nil, unusable("spelling too long")
+	if linkConnectLen(b.real) > directMax {
+		return nil, errSpellingTooLong
 	}
-	return viaStd(opDial, via, false)
+	name, err := createAt(c.w.cfg.random, func(n string) error { return symlinkat(target, b.fd, b.real, n) })
+	if err != nil {
+		return nil, unusable("E not made")
+	}
+	ep, err := viaStd(opDial, b.real+"/"+name, false)
+	unix.Unlinkat(b.fd, name, 0)
+	return ep, err
+}
+
+// linkConnectLen is the length of the default connect's link-file spelling
+// <B's real path>/<E>.
+func linkConnectLen(breal string) int {
+	return len(breal) + 1 + linkRandomLen
 }

@@ -1,8 +1,8 @@
 package sockat
 
-// macOS: O_SEARCH for the thread-cwd route's directory, why the widened
-// sockaddr is not used (and how the connect order records it), and the macOS
-// list of ways.
+// macOS: O_SEARCH for the socket's directory of thread-cwd-direct, why the
+// widened sockaddr is not used (and how the connect order records it), and
+// the macOS list of ways.
 
 import (
 	"errors"
@@ -18,23 +18,25 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// ways are the macOS routes, each with its own socket path and the route
-// order's inputs that force it. Every spelling goes in the plain sockaddr.
+// ways are the macOS connect routes, each with its own socket path and the
+// test world that forces it. Every spelling goes in the plain sockaddr.
 //
-//	| way          | path                          | inputs                  | listen       | dial         |
-//	|--------------|-------------------------------|-------------------------|--------------|--------------|
-//	| standard     | directMax bytes               | (the public order)      | standard     | standard     |
-//	| thread-cwd   | 600 bytes under /tmp          | D in a place of its own | (listenAt)   | thread-cwd   |
-//	| relative     | directMax bytes below the cwd | no means, no place      | (listenAt)   | relative     |
-//	| symlink-file | 600 bytes under /tmp          | no means, a place       | (listenAt)   | symlink-file |
+//	| way               | path                          | world          | dial              |
+//	|-------------------|-------------------------------|----------------|-------------------|
+//	| standard          | directMax bytes               | (public)       | standard          |
+//	| relative          | directMax bytes below the cwd | as is          | relative          |
+//	| thread-cwd-direct | 600 bytes, directName         | as is          | thread-cwd-direct |
+//	| link-file         | 600 bytes, directName         | thread cwd off | link-file         |
 func ways(t *testing.T) []way {
 	t.Helper()
-	d, dbase, short := tmpDir(t), tmpDir(t), tmpDir(t)
+	d := tmpDir(t)
+	asIs, psAsIs := testWorld(t, nil)
+	threadOff, psOff := testWorld(t, func(c *config, _ testPlaces) { c.threadCwd = false })
 	return []way{
-		{"standard", nest(t, d+"/direct", directMax, "s.sock"), nil, routeStandard, routeStandard},
-		{"thread-cwd", nest(t, d+"/thread", 600, "s.sock"), centralCfg(dbase), "", routeThreadCwd},
-		{"relative", belowCwdPath(t, directMax, "s.sock"), fallbackCfg(), "", routeRelative},
-		{"symlink-file", nest(t, d+"/symlink", 600, "s.sock"), fallbackCfg(short), "", routeSymlinkFile},
+		{"standard", nest(t, d+"/direct", directMax, "s.sock"), nil, testPlaces{}, routeStandard, routeStandard},
+		{"relative", belowCwdPath(t, directMax, "s.sock"), asIs, psAsIs, "", routeRelative},
+		{"thread-cwd-direct", nest(t, d+"/thread", 600, directName), asIs, psAsIs, "", routeThreadCwdDirect},
+		{"link-file", nest(t, d+"/link", 600, directName), threadOff, psOff, "", routeLinkFile},
 	}
 }
 
@@ -137,22 +139,28 @@ func TestWhyTheWidenedSockaddrIsNotUsed(t *testing.T) {
 
 // Widened, second in the connect order on macOS, is not made in sockat-go
 // (TestWhyTheWidenedSockaddrIsNotUsed): a dial that passes over relative
-// records widened as unusable with that reason, makes nothing for it, and
-// goes on to thread-cwd. The rest of the order is pinned by
-// TestTheConnectOrderWithoutProc.
+// records widened as unusable with that reason, makes nothing for it (the
+// places stay untouched), and goes on to thread-cwd-direct. The order is
+// relative, widened, thread-cwd-direct, link-file.
 func TestWidenedIsRecordedAsNotMadeAndPassedOver(t *testing.T) {
 	t.Parallel()
+	if got, want := stepNames(dialSteps(false)), []route{routeRelative, routeWidened, routeThreadCwdDirect, routeLinkFile}; !slices.Equal(got, want) {
+		t.Fatalf("the connect order: %v, want %v", got, want)
+	}
 	p := nest(t, tmpDir(t), 200, "s.sock")
 	l := listenAt(t, p)
-	ep, r, sks, err := dialTraced(t, p, centralCfg(tmpDir(t)))
-	if err != nil || r != routeThreadCwd {
-		t.Fatalf("dial: %s, %v, want %s", r, err, routeThreadCwd)
+	w, ps := testWorld(t, nil)
+	markUntouched(t, ps.tmp)
+	c, r, sks, err := dialTraced(t, w, p, Options{})
+	if err != nil || r != routeThreadCwdDirect {
+		t.Fatalf("dial: %s, %v, want %s", r, err, routeThreadCwdDirect)
 	}
-	ping(t, l, ep.(*net.UnixConn))
+	ping(t, l, c)
 	want := []route{routeStandard, routeRelative, routeWidened}
 	if got := namesOf(t, sks); !slices.Equal(got, want) || sks[2].reason != noWidenedRoute {
 		t.Fatalf("skipped %v, want %v with widened for %q", sks, want, noWidenedRoute)
 	}
+	assertUntouched(t, ps.tmp)
 }
 
 // unreadable makes dir mode 0300 (write and search, no read) and checks the
@@ -170,27 +178,22 @@ func unreadable(t *testing.T, dir string) {
 
 // The socket's directory is opened O_SEARCH, which needs only search
 // permission, as a bind / connect by the path itself does: in a directory of
-// mode 0300 the routes through D listen and dials (with no other place for D,
-// D is made in that directory, which write and search permission allow).
-// Opening it O_RDONLY would make the long path fail where a short one in the
-// same directory works.
+// mode 0300 a bind takes link-dir and a dial thread-cwd-direct, which uses
+// the directory's fd as its thread's cwd. Opening it O_RDONLY would make the
+// long path fail where a short one in the same directory works.
 //
 // A kernel that does not take O_SEARCH on a directory answers EISDIR or EINVAL;
 // the directory is then opened O_RDONLY rather than given up on. The running
 // kernel takes O_SEARCH, so its refusal is stood in for by handing that answer
 // to searchOrReadOnly:
 //
-//   - EISDIR and EINVAL give an fd that serves as the socket's directory: D is
-//     made in it and thread-cwd listens and dials through D;
+//   - EISDIR and EINVAL give an fd that serves as the socket's directory: a
+//     thread whose cwd is that fd listens and dials by the file name;
 //   - that fd really comes from O_RDONLY: for the 0300 directory it is now
 //     EACCES (and that is the error returned);
 //   - any other answer is the real outcome and is returned without trying
 //     O_RDONLY: an EACCES stays EACCES even for a readable directory (falling
 //     back would hide a real permission failure).
-//
-// The same fallback for D itself (opened O_SEARCH, then O_RDONLY on EISDIR /
-// EINVAL: dOpenFlagsRetry in makeDIn) has no stand-in: the open is made inside
-// makeDIn. Only its usual way (O_SEARCH) is exercised, by every test here.
 func TestTheSocketsDirectoryIsOpenedForSearchOnly(t *testing.T) {
 	t.Parallel()
 	d := tmpDir(t)
@@ -204,8 +207,8 @@ func TestTheSocketsDirectoryIsOpenedForSearchOnly(t *testing.T) {
 		t.Fatalf("listen in a directory without read permission: %s, %v", b.route, err)
 	}
 	t.Cleanup(func() { l.Close() })
-	c, r := dialLong(t, p, centralCfg())
-	if r != routeThreadCwd {
+	c, r := dialIn(t, w, p)
+	if r != routeThreadCwdDirect {
 		t.Fatalf("dial: %s", r)
 	}
 	ping(t, l, c)
@@ -217,19 +220,13 @@ func TestTheSocketsDirectoryIsOpenedForSearchOnly(t *testing.T) {
 			t.Fatalf("%v: %v", e, err)
 		}
 		name := fmt.Sprintf("e%d.sock", int(e))
-		h, err := makeD(nil, f, readable, false, "", randomPart, randomPart)
-		if err != nil {
-			t.Fatalf("%v: D in the directory: %v", e, err)
-		}
-		l := must{t}.listener(inThreadCwd(opListen, h.fd, h.r+"/"+name))
+		l := must{t}.listener(inThreadCwd(opListen, int(f.Fd()), name))
 		if !isSocket(readable + "/" + name) {
 			t.Fatalf("%v: no socket in the directory", e)
 		}
-		c := must{t}.conn(inThreadCwd(opDial, h.fd, h.r+"/"+name))
+		c := must{t}.conn(inThreadCwd(opDial, int(f.Fd()), name))
 		ping(t, l, c)
-		h.cleanup()
 		f.Close()
-		assertNoSockatEntry(t, readable)
 
 		_, err = searchOrReadOnly(filepath.Dir(p), -1, e)
 		wantErrno(t, e.Error()+" for a directory without read permission", err, syscall.EACCES)

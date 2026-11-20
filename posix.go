@@ -8,29 +8,23 @@ import (
 	"syscall"
 )
 
-// The routes of a dial that spell the path in the plain sockaddr without D
-// (every system but FreeBSD): relative, and symlink-file. A connect leaves no
-// spelling behind with the peer (the connecting socket is not bound), so these
-// spellings need no random part; a listen never takes relative.
+// relative, the route of a dial that spells the path relative to the cwd
+// (every system but FreeBSD). A connect leaves no spelling behind with the
+// peer (the connecting socket is not bound); a listen never takes it (the
+// spelling would name another place once the cwd changed).
 
 // relative connects through the path spelled relative to the cwd
 // (newRelative), then confirms the cwd did not change meanwhile (relative.run).
 // Unusable when the path is not absolute or no relative spelling fits.
-func (d *dialer) relative() (endpoint, error) {
-	if !isAbs(d.path) {
+func (c *dialCall) relative() (endpoint, error) {
+	if !isAbs(c.path) {
 		return nil, unusable("path not absolute")
 	}
-	rel := newRelative(d.path, d.dir)
+	rel := newRelative(c.path, c.dir)
 	if rel == nil {
 		return nil, unusable("no relative spelling")
 	}
 	return rel.run(func(s string) (endpoint, error) { return viaStd(opDial, s, false) })
-}
-
-// symlinkFile connects through a symlink to the socket file in the first of
-// cfg.tmpBases where it can be used (symlinkFile).
-func (d *dialer) symlinkFile() (endpoint, error) {
-	return symlinkFile(d.path, d.cfg.tmpBases)
 }
 
 // relative is a relative spelling of an absolute socket path, checked to

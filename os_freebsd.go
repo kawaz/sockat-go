@@ -10,8 +10,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// atSupported: the central route binds / connects with bindat(2) /
-// connectat(2) on D.
+// atSupported: at binds with bindat(2) on D, at-direct connects with
+// connectat(2) on the socket's directory.
 const atSupported = true
 
 // atOp binds (and listens) or connects a fresh socket through spelling
@@ -38,38 +38,30 @@ func atOp(o op, dirfd int, spelling string) (endpoint, error) {
 	})
 }
 
-// dialSteps is the connect order on FreeBSD (SPEC "connect の順"): at-direct,
-// at.
+// dialSteps is the connect order on FreeBSD (SPEC "connect の順"):
+// at-direct, link-file.
+//
+// Design rationale: link-file of a connect on FreeBSD is SPEC's "未確定"; it
+// is made because a connect follows a symlink in the last component
+// (SPEC-routes "link-file"), to be checked on FreeBSD's VM in CI.
 func dialSteps(bool) []dialStep {
 	return []dialStep{
-		{routeAtDirect, (*dialer).atDirect},
-		{routeAt, (*dialer).at},
+		{routeAtDirect, (*dialCall).atDirect},
+		{routeLinkFile, (*dialCall).linkFile},
 	}
 }
 
 // atDirect connects with connectat(2) on the socket's directory and the file
-// name, with no D: a connect leaves no spelling behind. Unusable when the
+// name, with no E: a connect leaves no spelling behind. Unusable when the
 // socket's directory was not opened or the name does not fit the sockaddr.
-func (d *dialer) atDirect() (endpoint, error) {
-	if d.sdir == nil {
+func (c *dialCall) atDirect() (endpoint, error) {
+	if c.sdir == nil {
 		return nil, unusable("socket directory not opened")
 	}
-	if len(d.name) > directMax {
+	if len(c.name) > directMax {
 		return nil, unusable("spelling too long")
 	}
-	return atOp(opDial, int(d.sdir.Fd()), d.name)
-}
-
-// at connects with connectat(2) on D and R/<name>.
-func (d *dialer) at() (endpoint, error) {
-	if !d.spellingFits() {
-		return nil, unusable("spelling too long")
-	}
-	h, err := d.theD(true)
-	if err != nil {
-		return nil, err
-	}
-	return atOp(opDial, h.fd, h.r+"/"+d.name)
+	return atOp(opDial, int(c.sdir.Fd()), c.name)
 }
 
 // openDir opens dir O_RDONLY | O_DIRECTORY.
@@ -81,11 +73,8 @@ func openDir(dir string) (*os.File, error) {
 	return os.NewFile(uintptr(fd), dir), nil
 }
 
-// procFDUsableFor: no /proc route here.
-func procFDUsableFor(*os.File, string) bool { return false }
-
-// dOpenFlags is how D is opened.
-const dOpenFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+// procUsable: no /proc here.
+func procUsable(*os.File, string) bool { return false }
 
 // newSocket creates a stream socket set up as the net package sets up its
 // own: close-on-exec and nonblocking.
@@ -99,14 +88,6 @@ func newSocket() (int, error) {
 
 // listenBacklog is the backlog the net package passes to listen(2) here.
 func listenBacklog() int { return somaxconn("kern.ipc.soacceptqueue") }
-
-// setPrivate sets D (fd, which passed the check) to mode 0700: fchmod(2).
-func setPrivate(_ int, _ string, fd int, _ *unix.Stat_t, _ bool, _ string) error {
-	return unix.Fchmod(fd, 0o700)
-}
-
-// dOpenFlagsRetry: no second way of opening D here.
-const dOpenFlagsRetry = 0
 
 // hasProc: no /proc routes here.
 const hasProc = false

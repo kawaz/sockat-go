@@ -40,11 +40,8 @@ func Listen(path string) (*net.UnixListener, error) {
 // ENAMETOOLONG when no route reaches path, EINVAL for a path that contains a
 // NUL byte or for a long path that does not end with a file name.
 func Dial(path string) (*net.UnixConn, error) {
-	ep, _, err := runDial(path)
-	if err != nil {
-		return nil, err
-	}
-	return ep.(*net.UnixConn), nil
+	c, _, err := defaultWorld.dial(path, Options{}, nil)
+	return c, err
 }
 
 // ListenEx is Listen with Options, reporting what the spelling the kernel
@@ -73,9 +70,9 @@ func ListenEx(path string, opts Options) (*net.UnixListener, *Bound, error) {
 // The error is a *RouteError.
 func DialEx(path string, opts Options) (*net.UnixConn, Report, error) {
 	tr := &trace{}
-	ep, r, err := runDialTraced(path, nil, tr)
+	c, r, err := defaultWorld.dial(path, opts, tr)
 	if err != nil {
 		return nil, Report{}, &RouteError{Route: string(r), Skipped: tr.skips(), Err: err}
 	}
-	return ep.(*net.UnixConn), Report{Route: string(r), Skipped: tr.skips()}, nil
+	return c, Report{Route: string(r), Skipped: tr.skips()}, nil
 }

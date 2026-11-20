@@ -10,23 +10,17 @@ import (
 )
 
 // dialSteps is the connect order on the Unix systems without a
-// dirfd-relative primitive or per-thread working directories (NetBSD,
-// OpenBSD, illumos, ...; SPEC "connect の順"): relative, symlink-file. The
-// routes through D have no means here, so a listen of a long path has only
-// symlink-file, where bind(2) follows the symlink, and is ENAMETOOLONG
-// otherwise (Go has no fork route).
+// dirfd-relative connect or per-thread working directories (NetBSD, OpenBSD,
+// illumos, ...; SPEC "connect の順"): relative, link-file.
 func dialSteps(bool) []dialStep {
 	return []dialStep{
-		{routeRelative, (*dialer).relative},
-		{routeSymlinkFile, (*dialer).symlinkFile},
+		{routeRelative, (*dialCall).relative},
+		{routeLinkFile, (*dialCall).linkFile},
 	}
 }
 
-// procFDUsableFor: no /proc route here.
-func procFDUsableFor(*os.File, string) bool { return false }
-
-// dOpenFlags is how D is opened.
-const dOpenFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+// procUsable: no /proc here.
+func procUsable(*os.File, string) bool { return false }
 
 // openDir opens dir O_RDONLY | O_DIRECTORY.
 func openDir(dir string) (*os.File, error) {
@@ -36,14 +30,6 @@ func openDir(dir string) (*os.File, error) {
 	}
 	return os.NewFile(uintptr(fd), dir), nil
 }
-
-// setPrivate sets D (fd, which passed the check) to mode 0700: fchmod(2).
-func setPrivate(_ int, _ string, fd int, _ *unix.Stat_t, _ bool, _ string) error {
-	return unix.Fchmod(fd, 0o700)
-}
-
-// dOpenFlagsRetry: no second way of opening D here.
-const dOpenFlagsRetry = 0
 
 // hasProc: no /proc routes here.
 const hasProc = false

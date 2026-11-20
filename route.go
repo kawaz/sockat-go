@@ -147,11 +147,11 @@ func (w *world) listen(path string, opts Options, tr *trace) (*net.UnixListener,
 		}
 		return l, bound{route: routeStandard, spelling: Spelling{Kind: kind}}, nil
 	}
-	l, b, err := w.bindLong(path, opts, tr)
+	ep, b, err := w.bindLong(path, opts, tr)
 	if err != nil {
 		return nil, b, opError(opListen, path, err)
 	}
-	return l, b, nil
+	return ep.(*net.UnixListener), b, nil
 }
 
 // abstractName reports whether path is the name of an abstract socket (a

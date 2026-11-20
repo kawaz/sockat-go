@@ -26,7 +26,8 @@ import (
 // A route that cannot be used is passed over (recorded in the trace); the
 // first route that binds decides, its failure included (DR-0011), except
 // link-file's failure where nothing is at the path (bind(2) did not follow
-// the symlink).
+// the symlink). The spellings of link-dir and link-file are made as
+// ResolveForBind makes them (linkDirSpelling, linkFileSpelling).
 
 // bound is what a bind produced besides the listener: the route, what its
 // spelling is good for, the diagnostics' base, and the E kept for the
@@ -38,7 +39,7 @@ type bound struct {
 	link     *link
 }
 
-// bindCall is one bind of a long path.
+// bindCall is one bind, or one resolve, of a long path.
 type bindCall struct {
 	w     *world
 	path  string // as the caller spelt it
@@ -50,6 +51,36 @@ type bindCall struct {
 	// routes of the call do not try to make it there again (SPEC-routes
 	// "実体の置き場"), and do not look for another B either.
 	noD map[*base]bool
+}
+
+// newBindCall looks up the socket's directory of path, longer than
+// directMax, first (stat, then its real path), so a missing one is ENOENT
+// and one that is not a directory ENOTDIR, before anything else is decided
+// or made; then Options.Base is checked (with UsableCrossUID as opts has
+// it), making nothing.
+func (w *world) newBindCall(path string, opts Options) (*bindCall, error) {
+	dir, name, err := splitPath(path)
+	if err != nil {
+		return nil, err
+	}
+	var st unix.Stat_t
+	if err := unix.Stat(dir, &st); err != nil {
+		return nil, syscallError("stat", err)
+	}
+	if uint32(st.Mode)&unix.S_IFMT != unix.S_IFDIR {
+		return nil, syscallError("stat", unix.ENOTDIR)
+	}
+	real, err := realDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	if opts.Base != "" {
+		if err := w.checkGiven(opts.Base, opts.UsableCrossUID); err != nil {
+			return nil, err
+		}
+	}
+	return &bindCall{w: w, path: path, name: name, real: real,
+		dirID: fileID{uint64(st.Dev), uint64(st.Ino)}, opts: opts}, nil
 }
 
 // ownD is b's D for a route of this call: errUnusable when it could not be
@@ -72,7 +103,7 @@ func (c *bindCall) ownD(b *base) (*procD, error) {
 // bindStep is one route of the bind order.
 type bindStep struct {
 	route route
-	try   func(*bindCall) (*net.UnixListener, bound, error)
+	try   func(*bindCall) (endpoint, bound, error)
 }
 
 // bindOrder is the system's bind order after standard: link-dir; link-file
@@ -93,55 +124,34 @@ func (w *world) bindOrder() []bindStep {
 }
 
 // bindLong binds (and listens) at path, longer than directMax, by the first
-// route of the bind order that can be used.
-//
-// The socket's directory is looked up first (stat, then its real path), so a
-// missing one is ENOENT and one that is not a directory ENOTDIR, before
-// anything else is decided or made; then Options.Base is checked, making
-// nothing. ENAMETOOLONG when no route can be used.
-func (w *world) bindLong(path string, opts Options, tr *trace) (*net.UnixListener, bound, error) {
-	dir, name, err := splitPath(path)
+// route of the bind order that can be used (newBindCall first).
+// ENAMETOOLONG when no route can be used.
+func (w *world) bindLong(path string, opts Options, tr *trace) (endpoint, bound, error) {
+	c, err := w.newBindCall(path, opts)
 	if err != nil {
 		return nil, bound{}, err
-	}
-	var st unix.Stat_t
-	if err := unix.Stat(dir, &st); err != nil {
-		return nil, bound{}, syscallError("stat", err)
-	}
-	if uint32(st.Mode)&unix.S_IFMT != unix.S_IFDIR {
-		return nil, bound{}, syscallError("stat", unix.ENOTDIR)
-	}
-	real, err := realDir(dir)
-	if err != nil {
-		return nil, bound{}, err
-	}
-	if opts.Base != "" {
-		if err := w.checkGiven(opts.Base, opts.UsableCrossUID); err != nil {
-			return nil, bound{}, err
-		}
 	}
 	tr.add(routeStandard, "path too long")
-	c := &bindCall{w: w, path: path, name: name, real: real,
-		dirID: fileID{uint64(st.Dev), uint64(st.Ino)}, opts: opts}
 	for _, s := range w.bindOrder() {
-		l, b, err := s.try(c)
+		ep, b, err := s.try(c)
 		if errors.Is(err, errUnusable) {
 			tr.add(s.route, reasonOf(err))
 			continue
 		}
-		return l, b, err
+		return ep, b, err
 	}
 	return nil, bound{}, errNameTooLong(opListen)
 }
 
-// base is the B for a route of this bind: Options.Base's when given (its
+// base is the B for a route of this call: Options.Base's when given (its
 // error returned as it is, an Options.Base error, not a reason to pass the
-// route over, but for a spelling estimated not to fit); otherwise the world's B of the places 1 to 3 (cross: one
-// others can follow), and, when none of them has or can make one (not for
-// cross), the socket's directory's. fits estimates, before a B is made,
-// whether a spelling of the route through it can fit: where it cannot, the
-// route is unusable, and no other place is tried for it (the process's B does
-// not depend on the length of the path).
+// route over, except for a spelling estimated not to fit); otherwise the
+// world's B of the places 1 to 3 (cross: one others can follow), and, when
+// none of them has or can make one (not for cross), the socket's
+// directory's. fits estimates, before a B is made, whether a spelling of the
+// route through it can fit: where it cannot, the route is unusable, and no
+// other place is tried for it (the process's B does not depend on the length
+// of the path).
 func (c *bindCall) base(cross bool, fits fitsFunc) (*base, error) {
 	if c.opts.Base != "" {
 		return c.w.givenBase(c.opts.Base, fits)
@@ -162,94 +172,128 @@ func (c *bindCall) base(cross bool, fits fitsFunc) (*base, error) {
 	return nil, errNoBase
 }
 
-// linkDir binds by <B>/<D>/<E>/<name>, E a symlink to the socket's directory
-// (its real path), B spelt by procB (Linux with /proc, not for
-// UsableCrossUID) or its real path (not for a B in the socket's directory,
-// whose real path is longer than the path), the first that fits. E stays for
-// SocketFile's Cleanup; a failure of the bind removes it.
-func (c *bindCall) linkDir() (*net.UnixListener, bound, error) {
-	w := c.w
+// linked is a spelling through a resolve E, made for a bind or a resolve:
+// the spelling, the E it goes through, what it is good for and the
+// diagnostics' base.
+type linked struct {
+	spelling string
+	e        *link
+	sp       Spelling
+	base     string
+}
+
+// linkDirSpelling makes link-dir's spelling <B>/<D>/<E>/<name>, E a symlink
+// to the socket's directory (its real path), B spelt by procB (Linux with
+// /proc, not for UsableCrossUID) or its real path (not for a B in the
+// socket's directory, whose real path is longer than the path), the first
+// that fits.
+func (c *bindCall) linkDirSpelling() (linked, error) {
 	useProc := hasProc && !c.opts.UsableCrossUID
+	return c.throughB(useProc, c.real, "/"+c.name, true, func(bspell, e string) int { return linkDirLen(bspell, e, c.name) })
+}
+
+// linkFileSpelling makes link-file's spelling <B>/<D>/<E>, E a symlink to
+// target (the socket file), B spelt by procB when useProc (a connect's
+// resolve: a bind never follows a symlink where /proc is) or its real path,
+// the first that fits.
+func (c *bindCall) linkFileSpelling(target string, useProc bool) (linked, error) {
+	return c.throughB(useProc, target, "", false, linkFileLen)
+}
+
+// throughB makes the spelling <B>/<D>/<E><rest> of length size(<B>, <E>), E
+// a resolve E in the process's D of the call's B pointing to target. B is
+// spelt by procB when useProc and it fits, otherwise by its real path when
+// B is not in the socket's directory and it fits; the route is unusable
+// when neither does (estimated before B is made, with the shortest procB and
+// E). removable is what unlinking the spelling does (link-dir's E is
+// followed, link-file's is not).
+func (c *bindCall) throughB(useProc bool, target, rest string, removable bool, size func(bspell, e string) int) (linked, error) {
+	w := c.w
 	fits := func(kind, breal string) bool {
-		if useProc && linkDirLen(w.procBShortest(), "0", c.name) <= directMax {
+		if p := w.procBShortest(); useProc && p != "" && size(p, "0") <= directMax {
 			return true
 		}
-		return kind != kindSockdir && linkDirLen(breal, "0", c.name) <= directMax
+		return kind != kindSockdir && size(breal, "0") <= directMax
 	}
 	b, err := c.base(c.opts.UsableCrossUID, fits)
 	if err != nil {
-		return nil, bound{}, err
+		return linked{}, err
 	}
 	e := b.nextEName()
 	spell, viaProc := "", false
 	if useProc {
-		if p, ok := w.procB(b); ok && linkDirLen(p, e, c.name) <= directMax {
+		if p, ok := w.procB(b); ok && size(p, e) <= directMax {
 			spell, viaProc = p, true
 		}
 	}
-	if spell == "" && b.kind != kindSockdir && linkDirLen(b.real, e, c.name) <= directMax {
+	if spell == "" && b.kind != kindSockdir && size(b.real, e) <= directMax {
 		spell = b.real
 	}
 	if spell == "" {
-		return nil, bound{}, unusable("spelling too long")
+		return linked{}, unusable("spelling too long")
 	}
-	return c.throughE(b, spell, c.real, "/"+c.name, routeLinkDir, linkedSpelling(b, viaProc, true), baseValue(b, viaProc))
+	d, err := c.ownD(b)
+	if err != nil {
+		return linked{}, err
+	}
+	l, err := b.resolveE(d, target)
+	if err != nil {
+		return linked{}, unusable("E not made")
+	}
+	spelling := spell + "/" + d.name + "/" + l.name + rest
+	if len(spelling) > directMax {
+		// Another call took the E name estimated, and a longer one came.
+		l.remove()
+		return linked{}, unusable("spelling too long")
+	}
+	return linked{spelling: spelling, e: l, sp: linkedSpelling(b, viaProc, removable), base: baseValue(b, viaProc)}, nil
 }
 
-// linkFile binds by <B>/<D>/<E>, E a symlink to the socket file (the path,
-// made absolute against the cwd), B spelt by its real path. Where bind(2)
-// does not follow a symlink in the last component it fails; then, with
-// nothing at the path, the route is unusable (SPEC-routes "link-file"); with
-// something there, the failure is real (EADDRINUSE). E is removed either way.
-func (c *bindCall) linkFile() (*net.UnixListener, bound, error) {
-	fits := func(kind, breal string) bool {
-		return kind != kindSockdir && linkFileLen(breal, "0") <= directMax
-	}
-	b, err := c.base(c.opts.UsableCrossUID, fits)
+// linkDir binds by link-dir's spelling (linkDirSpelling). E stays for
+// SocketFile's Cleanup; a failure of the bind removes it.
+func (c *bindCall) linkDir() (endpoint, bound, error) {
+	ln, err := c.linkDirSpelling()
 	if err != nil {
 		return nil, bound{}, err
 	}
-	if b.kind == kindSockdir || linkFileLen(b.real, b.nextEName()) > directMax {
-		return nil, bound{}, unusable("spelling too long")
-	}
+	return c.bindThrough(routeLinkDir, ln)
+}
+
+// linkFile binds by link-file's spelling through B's real path
+// (linkFileSpelling), E pointing to the socket file (the path, made absolute
+// against the cwd). Where bind(2) does not follow a symlink in the last
+// component it fails; then, with nothing at the path, the route is unusable
+// (SPEC-routes "link-file"); with something there, the failure is real
+// (EADDRINUSE). E is removed either way.
+func (c *bindCall) linkFile() (endpoint, bound, error) {
 	target, ok := absTarget(c.path)
 	if !ok {
 		return nil, bound{}, unusable("cwd unreadable")
 	}
-	l, bd, err := c.throughE(b, b.real, target, "", routeLinkFile, linkedSpelling(b, false, false), baseValue(b, false))
-	if err != nil && !errors.Is(err, errUnusable) {
+	ln, err := c.linkFileSpelling(target, false)
+	if err != nil {
+		return nil, bound{}, err
+	}
+	ep, bd, err := c.bindThrough(routeLinkFile, ln)
+	if err != nil {
 		var st unix.Stat_t
 		if unix.Lstat(target, &st) != nil {
 			return nil, bound{}, unusable("bind did not follow the symlink")
 		}
 	}
-	return l, bd, err
+	return ep, bd, err
 }
 
-// throughE binds by <spell>/<D>/<E><rest>, E a resolve E in b's D pointing to
-// target, and returns what the bind is (route, sp, baseVal) with E kept. A
-// failure of the bind removes E before it is returned.
-func (c *bindCall) throughE(b *base, spell, target, rest string, r route, sp Spelling, baseVal string) (*net.UnixListener, bound, error) {
-	d, err := c.ownD(b)
+// bindThrough binds by ln's spelling for the route r and returns what the
+// bind is, with ln's E kept. A failure of the bind removes E before it is
+// returned.
+func (c *bindCall) bindThrough(r route, ln linked) (endpoint, bound, error) {
+	ep, err := viaStd(opListen, ln.spelling, false)
 	if err != nil {
-		return nil, bound{}, err
-	}
-	e, err := b.resolveE(d, target)
-	if err != nil {
-		return nil, bound{}, unusable("E not made")
-	}
-	spelling := spell + "/" + d.name + "/" + e.name + rest
-	if len(spelling) > directMax {
-		// Another call took the E name estimated, and a longer one came.
-		e.remove()
-		return nil, bound{}, unusable("spelling too long")
-	}
-	ep, err := viaStd(opListen, spelling, false)
-	if err != nil {
-		e.remove()
+		ln.e.remove()
 		return nil, bound{route: r}, err
 	}
-	return ep.(*net.UnixListener), bound{route: r, spelling: sp, base: baseVal, link: e}, nil
+	return ep, bound{route: r, spelling: ln.sp, base: ln.base, link: ln.e}, nil
 }
 
 // dangling binds by <E>/<name> relative to D (SPEC "thread-cwd と at の手順"):
@@ -260,7 +304,7 @@ func (c *bindCall) throughE(b *base, spell, target, rest string, r route, sp Spe
 // B of the places 1 to 4 that does not look at UsableCrossUID (the spelling
 // names nothing, for anyone). The listener does not remove its spelling on
 // Close.
-func (c *bindCall) dangling() (*net.UnixListener, bound, error) {
+func (c *bindCall) dangling() (endpoint, bound, error) {
 	w := c.w
 	r := routeThreadCwd
 	if atSupported {
@@ -303,9 +347,10 @@ func (c *bindCall) dangling() (*net.UnixListener, bound, error) {
 	if err != nil {
 		return nil, bound{route: r}, err
 	}
-	l := ep.(*net.UnixListener)
-	l.SetUnlinkOnClose(false)
-	return l, bound{route: r, spelling: Spelling{Kind: Dangling}}, nil
+	if l, ok := ep.(*net.UnixListener); ok {
+		l.SetUnlinkOnClose(false)
+	}
+	return ep, bound{route: r, spelling: Spelling{Kind: Dangling}}, nil
 }
 
 // listenEx is ListenEx on w.
@@ -332,7 +377,7 @@ func (w *world) listenEx(path string, opts Options) (*net.UnixListener, *Bound, 
 		return nil, nil, &RouteError{Route: string(b.route), Skipped: tr.skips(), Err: err}
 	}
 	l.SetUnlinkOnClose(false)
-	f := &SocketFile{e: b.link}
+	f := &SocketFile{clean: &cleaner{e: b.link}}
 	if !abstractName(path) {
 		var id fileID
 		ok := ferr == nil && cwdOK

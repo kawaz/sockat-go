@@ -29,9 +29,13 @@ func (w *world) procFD() string {
 }
 
 // procBShortest is the shortest procB can be (a one-digit fd), for the
-// estimate before B is opened. "" where there is no /proc.
+// estimate before B is opened. "" where there is no /proc, or no
+// /proc/<pid>/fd to look up (procB then cannot be used whatever B is).
 func (w *world) procBShortest() string {
 	if !hasProc {
+		return ""
+	}
+	if _, ok := statID(w.procFD()); !ok {
 		return ""
 	}
 	return w.procFD() + "/0"

@@ -15,11 +15,31 @@ import (
 type SocketFile struct {
 	file     string // the socket file's real path; "" for none (an abstract name)
 	id       fileID
-	e        *link // the spelling's E (link-dir, link-file); nil for none
+	clean    *cleaner // the spelling's E (link-dir, link-file)
 	removeMu sync.Once
 	removed  error
-	cleanMu  sync.Once
-	cleaned  error
+}
+
+// cleaner cleans up the E of a spelling (nil for none) once, for every
+// holder of it: the SocketFile of ListenEx, and the ForBind (and the
+// SocketFiles it gives) or ForConnect of a resolve.
+type cleaner struct {
+	e    *link
+	once sync.Once
+	err  error
+}
+
+// cleanup removes E the first time it is called and returns that outcome
+// every time: an *os.PathError, or nil (no E, or one already gone).
+func (c *cleaner) cleanup() error {
+	c.once.Do(func() {
+		if c.e != nil {
+			if err := c.e.remove(); err != nil {
+				c.err = &os.PathError{Op: "unlink", Path: c.e.path(), Err: err}
+			}
+		}
+	})
+	return c.err
 }
 
 // Remove removes the socket file, once, and then does what Cleanup does.
@@ -49,16 +69,11 @@ func (f *SocketFile) Remove() error {
 // Cleanup removes the E the spelling goes through, once: the spelling then
 // names nothing (do not use it afterwards). B and D stay. It does nothing for
 // a spelling that goes through no E. The error is an *os.PathError. Calling it
-// again does nothing.
+// again does nothing. For a SocketFile from ForBind.SocketFile it is the
+// same cleanup as the ForBind's: the E is removed once by whichever comes
+// first.
 func (f *SocketFile) Cleanup() error {
-	f.cleanMu.Do(func() {
-		if f.e != nil {
-			if err := f.e.remove(); err != nil {
-				f.cleaned = &os.PathError{Op: "unlink", Path: f.e.path(), Err: err}
-			}
-		}
-	})
-	return f.cleaned
+	return f.clean.cleanup()
 }
 
 // removeFile removes the recorded file while its path names it.

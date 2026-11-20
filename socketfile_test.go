@@ -638,3 +638,86 @@ func TestChildListenExThroughASymlinkToANonSocket(t *testing.T) {
 		t.Fatalf("the E of the spelling (%s) was left", e.path())
 	}
 }
+
+// The cleanups inside a call keep a failure to remove E to themselves (the
+// call's outcome is the bind's or the connect's), but a Cleanup the caller
+// calls reports it (SPEC "remove と cleanup"): with D made read-only, so that
+// E cannot be unlinked (EACCES), Cleanup of ListenEx's SocketFile, of a
+// ForBind and of a ForConnect returns an *os.PathError of Op "unlink" for E,
+// and the same error when called again (it runs once). Remove reports the
+// cleanup's error too, after removing the socket file, which it can (its
+// directory is not D). Root ignores the permission, so as root it runs in a
+// child that has dropped to nobody (unprivileged).
+func TestCleanupReportsAFailureToRemoveE(t *testing.T) {
+	t.Parallel()
+	if !unprivileged(t) {
+		return
+	}
+	w, _ := testWorld(t, nil)
+	// readOnly makes the directory of e read-only until the returned
+	// function gives it back its mode.
+	readOnly := func(e *link) func() {
+		t.Helper()
+		d := filepath.Dir(e.path())
+		fi, err := os.Stat(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(d, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		back := func() { os.Chmod(d, fi.Mode().Perm()) }
+		t.Cleanup(back)
+		return back
+	}
+	wantUnlinkErr := func(what string, e *link, cleanup func() error) {
+		t.Helper()
+		for range 2 {
+			err := cleanup()
+			var pe *os.PathError
+			if !errors.Is(err, syscall.EACCES) || !errors.As(err, &pe) || pe.Op != "unlink" || pe.Path != e.path() {
+				t.Fatalf("%s: Cleanup: %v, want EACCES unlinking %s", what, err, e.path())
+			}
+		}
+		if !exists(e.path()) {
+			t.Fatalf("%s: E is gone", what)
+		}
+	}
+
+	p := nest(t, tmpDir(t), 600, "s.sock")
+	_, b := listenExIn(t, w, p, Options{})
+	e := b.File.clean.e
+	if e == nil {
+		t.Fatalf("ListenEx of %d bytes made no E (%s)", len(p), b.Route)
+	}
+	back := readOnly(e)
+	wantUnlinkErr("ListenEx", e, b.File.Cleanup)
+	back()
+
+	p = nest(t, tmpDir(t), 600, "s.sock")
+	_, b = listenExIn(t, w, p, Options{})
+	e = b.File.clean.e
+	back = readOnly(e)
+	if err := b.File.Remove(); !errors.Is(err, syscall.EACCES) || exists(p) {
+		t.Fatalf("Remove: %v, socket file there %v; want EACCES and the file removed", err, exists(p))
+	}
+	back()
+
+	p = nest(t, tmpDir(t), 600, "s.sock")
+	fb := resolveBindIn(t, w, p, Options{})
+	if fb.clean.e == nil {
+		t.Fatalf("ResolveForBind made no E (%s)", fb.Route)
+	}
+	back = readOnly(fb.clean.e)
+	wantUnlinkErr("ForBind", fb.clean.e, fb.Cleanup)
+	back()
+
+	l := listenAt(t, p)
+	defer l.Close()
+	fc := resolveConnectIn(t, w, p, Options{})
+	if fc.clean.e == nil {
+		t.Fatalf("ResolveForConnect made no E (%s)", fc.Route)
+	}
+	readOnly(fc.clean.e)
+	wantUnlinkErr("ForConnect", fc.clean.e, fc.Cleanup)
+}

@@ -5,7 +5,7 @@ import "strconv"
 // Spelling is what the spelling of a bind is good for afterwards: the
 // spelling the kernel keeps for the socket (the listener's Addr(), and the
 // peer's RemoteAddr()), which code may later unlink or look up (SPEC
-// "綴りの性質 Spelling"). Branch on it rather than on the diagnostics.
+// "Spelling properties"). Branch on it rather than on the diagnostics.
 //
 // It compares with ==. The fields other than Kind mean something only for
 // Kind == Linked, and are false or zero otherwise.

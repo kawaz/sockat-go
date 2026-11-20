@@ -236,7 +236,29 @@ func TestListenUnixgramAndDialUnixgram(t *testing.T) {
 	}
 	gone.Close()
 	_, err = DialUnixgram(stale)
-	wantGramOpError(t, "connect to a socket file nobody holds", "dial", stale, err, syscall.ECONNREFUSED)
+	wantGramOpError(t, "connect to a socket file nobody holds", "dial", stale, err, staleGramErrno(t))
+}
+
+// staleGramErrno is the errno this kernel gives the net package for a connect
+// of a datagram socket to a socket file nobody holds, at a short path that
+// goes to the net package as it is: ECONNREFUSED on Linux and macOS,
+// EDESTADDRREQ on illumos. A long path is to fail with the same errno, since
+// sockat hands the kernel's error back as it is (SPEC "エラー"); the errno is
+// the kernel's, not sockat's choice, so it is read here rather than fixed.
+func staleGramErrno(t *testing.T) syscall.Errno {
+	t.Helper()
+	short := tmpDir(t) + "/g"
+	c, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: short, Net: "unixgram"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Close()
+	_, err = net.DialUnix("unixgram", nil, &net.UnixAddr{Name: short, Net: "unixgram"})
+	var errno syscall.Errno
+	if !errors.As(err, &errno) {
+		t.Fatalf("the net package's connect to a stale short path: %v, want an errno", err)
+	}
+	return errno
 }
 
 // wantGramOpError checks that err is what the net package returns for a

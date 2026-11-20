@@ -1,6 +1,6 @@
 # DR-0007: 長いパスの listener は Close でソケットファイルを消さない
 
-- Status: Accepted
+- Status: Superseded by DR-0017
 - Date: 2026-11-18
 
 ## Context
@@ -17,7 +17,7 @@ Go の標準の listener は Close でソケットファイルを消す (`SetUnl
 ## 理由
 
 - 綴りを後で unlink すると、その時の fd 番号や cwd で解決され、別のファイルを消しうる
-- 短いパスは標準にそのまま渡すのが第一原則 ([DR-0002](DR-0002-standard-handles-paths-it-accepts.md))
+- 短いパスは標準にそのまま渡すのが第一原則 ([DR-0002](../DR-0002-standard-handles-paths-it-accepts.md))
 
 ## 却下した案
 

@@ -9,11 +9,12 @@ Go の標準 (`syscall.SockaddrUnix`) は、macOS / BSD で 103 バイト、Linu
 
 ## Decision
 
-- 標準が受け付ける長さ (`len(unix.RawSockaddrUnix{}.Path) - 1`) 以内は `net.ListenUnix` / `net.DialUnix` をそのまま呼ぶ。何も足さない (環境変数も読まない)
+- 標準が受け付ける長さ (`len(unix.RawSockaddrUnix{}.Path) - 1`) 以内は `net.ListenUnix` / `net.ListenUnixgram` / `net.DialUnix` をそのまま呼ぶ。何も足さない (環境変数も読まない)
 - Linux / Android で abstract socket の名前 (先頭が NUL、または Go の記法の `@`) は、長さによらず標準にそのまま渡す。NUL の検査もしない
 - abstract namespace の無い OS では、先頭が NUL のパスも長さによらず `EINVAL`。`@` で始まるパスは普通の相対パス
 - illumos / Solaris では、`@` で始まるパスを `./` を前に付けて標準に渡す。`./` を付けて標準が受け付ける長さを超える時は、長いパスとして経路に回す
-- 経路が作る綴り (相対パス、ファイル名だけ) が `@` で始まる時は `./` を前に付ける
+- 経路が作る綴り (relative の相対パス、thread-cwd-direct のファイル名) が `@` で始まる時は `./` を前に付ける
+- `ListenEx` 等と resolve の `Spelling` は、abstract の名前では `Original`、illumos の `./@...` では `CwdRelative`
 - それ以外で NUL を含むパスは、長さによらず何も作らずに `EINVAL`
 
 ## 理由
@@ -27,9 +28,9 @@ Go の標準 (`syscall.SockaddrUnix`) は、macOS / BSD で 103 バイト、Linu
 
 illumos で `./` を付けると、SPEC の「標準にそのまま渡す。何も足さない」と次の点が違う。どれも、そのまま渡すと bind / connect 自体が通らないことと引き換え:
 
-- カーネルが覚える綴りと listener の `Addr()` が `./@...` になる。同じ cwd の同じファイルを指すので、失うものは他の相対パスと同じ `cwd-relative`
-- 106・107 バイトの `@...` は `./` を付けると標準に入らず、経路に回る。illumos の Listen には経路が無いので `ENAMETOOLONG`、Dial は経路 (symlink-file 等) で届く
-- listener の Close は `./@...` のファイルを消さない (`SetUnlinkOnClose(false)`)。他の OS の Go の標準が `@` で始まるアドレスのファイルを Close で消さない (`net/unixsock_posix.go` の `ln.path[0] != '@'`) のとそろえ、相対の綴りで消して間に変わった cwd の別のファイルを消す危険を sockat が足さないため (ハブの統括の判断 2026-11-19)
+- カーネルが覚える綴りと listener の `Addr()` が `./@...` になる。同じ cwd の同じファイルを指すので、`Spelling` は他の相対パスと同じ `CwdRelative`
+- 106・107 バイトの `@...` は `./` を付けると標準に入らず、経路に回る (Listen は link-dir、Dial は relative → link-file、[DR-0018](DR-0018-route-orders-per-os.md))
+- listener の Close は `./@...` のファイルを消さない (`SetUnlinkOnClose(false)`、[DR-0017](DR-0017-listener-close-by-spelling.md))。他の OS の Go の標準が `@` で始まるアドレスのファイルを Close で消さない (`net/unixsock_posix.go` の `ln.path[0] != '@'`) のとそろえ、相対の綴りで消して間に変わった cwd の別のファイルを消す危険を sockat が足さないため (ハブの統括の判断 2026-11-19)
 
 ## 却下した案
 

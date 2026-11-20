@@ -1,11 +1,11 @@
 # DR-0001: 公開 API は Listen / Dial と、後始末・診断つきの ListenEx / DialEx で、標準の具体型を返す
 
-- Status: Accepted
+- Status: Superseded by DR-0016
 - Date: 2026-11-18
 
 ## Context
 
-[ハブの SPEC](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md) は公開する操作 (bind、connect、connect_nonblocking と、それぞれの後始末・診断つきの `_ex`) を決め、名前は言語の慣習に合わせてよいとしている。Go の標準は `net.ListenUnix` / `net.DialUnix` で、Dial は元から待たない (backlog が満杯なら Linux は即 `EAGAIN`、macOS は `ECONNREFUSED`。実測)。Go に fork の経路は無い ([DR-0004](DR-0004-thread-cwd-route.md))。
+[ハブの SPEC](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md) は公開する操作 (bind、connect、connect_nonblocking と、それぞれの後始末・診断つきの `_ex`) を決め、名前は言語の慣習に合わせてよいとしている。Go の標準は `net.ListenUnix` / `net.DialUnix` で、Dial は元から待たない (backlog が満杯なら Linux は即 `EAGAIN`、macOS は `ECONNREFUSED`。実測)。Go に fork の経路は無い ([DR-0004](../DR-0004-thread-cwd-route.md))。
 
 ## Decision
 

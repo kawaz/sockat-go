@@ -1,13 +1,13 @@
 # DR-0013: Dial は「connect の順」で試し、D は 1 回の呼び出しで 1 度だけ作る
 
-- Status: Accepted
+- Status: Superseded by DR-0018
 - Date: 2026-11-19
 
 ## Context
 
 ハブの [DR-0012](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0012-own-directory-and-thread-cwd.md) と [SPEC の「connect の順」](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#connect-の順)が、長いパスの connect を OS ごとの 1 つの列で試すと決めた。書き込み (D・R・symlink を作る) もスレッドも要らない経路を先に、D を作る経路とスレッドを立てる経路をその後にする。connect した側のソケットは bind されないので、connect の綴りは相手に残らず、R を挟まない経路も使える。D ([DR-0011](DR-0011-central-route.md)) は 1 回の呼び出しで 1 度だけ作り、D を使う経路で共有する。
 
-Go に fork は無い ([DR-0004](DR-0004-thread-cwd-route.md)) ので、SPEC の fork-cwd-direct (最終手段を使う `connect_ex` の最後) は作れない ([DR-0014](DR-0014-ex-last-resort-and-diagnostics.md))。macOS の widened は作らない ([DR-0005](DR-0005-no-widened-sockaddr.md))。
+Go に fork は無い ([DR-0004](../DR-0004-thread-cwd-route.md)) ので、SPEC の fork-cwd-direct (最終手段を使う `connect_ex` の最後) は作れない ([DR-0014](DR-0014-ex-last-resort-and-diagnostics.md))。macOS の widened は作らない ([DR-0005](../DR-0005-no-widened-sockaddr.md))。
 
 ## Decision
 
@@ -30,7 +30,7 @@ Go に fork は無い ([DR-0004](DR-0004-thread-cwd-route.md)) ので、SPEC の
 | proc-direct | `/proc/self/fd/<ソケットのディレクトリの fd>/<ファイル名>` | ソケットのディレクトリを開けない<br>`/proc/self/fd/<fd>` を引けない<br>綴りが sockaddr に入らない |
 | relative | cwd からの相対パス (文字列を書き直すだけで `chdir` しない) | 元のパスが絶対パスでない<br>相対パスが sockaddr に入らない<br>作った綴りのディレクトリが元と `(st_dev, st_ino)` で一致しない<br>cwd が既に変わっている |
 | widened | 作らない | いつも (`no widened route in sockat-go`) |
-| thread-cwd | 使い捨てのスレッドの cwd を D に移し、`R/<ファイル名>` ([DR-0004](DR-0004-thread-cwd-route.md)) | 綴りが sockaddr に入らない<br>スレッド cwd が使えない (seccomp の filter、`unshare` / `__pthread_fchdir` が断られた)<br>D をどこにも作れない |
+| thread-cwd | 使い捨てのスレッドの cwd を D に移し、`R/<ファイル名>` ([DR-0004](../DR-0004-thread-cwd-route.md)) | 綴りが sockaddr に入らない<br>スレッド cwd が使えない (seccomp の filter、`unshare` / `__pthread_fchdir` が断られた)<br>D をどこにも作れない |
 | proc | `/proc/self/fd/<Dfd>/R/<ファイル名>` | 綴りが sockaddr に入らない (D を作る前は 1 桁の fd で見積もり、開いた後に確かめ直す)<br>D をどこにも作れない |
 | proc-held | D の中にソケットのファイルを指す `s` を `symlinkat` で作り、`/proc/self/fd/<Dfd>/s` | D をどこにも作れない<br>`s` を作れない |
 | at-direct | `connectat(<ソケットのディレクトリの fd>, <ファイル名>)` | ソケットのディレクトリを開けない<br>ファイル名が sockaddr に入らない |
@@ -54,8 +54,8 @@ Go に fork は無い ([DR-0004](DR-0004-thread-cwd-route.md)) ので、SPEC の
 
 - Linux (`/proc` あり) の Dial は、D をどこかに作れればファイル名によらず届く (proc-held)
 - proc の綴りは proc-direct よりおよそ 11 バイト長い (fd の桁で変わる) ので、proc-direct が収まらないファイル名では proc もまず収まらない。Dial が proc を通るのは、実際にはソケットのディレクトリを開けない時 (Linux は `O_PATH` で開くので、ほぼ無い) くらい
-- macOS で失うのは widened だけが届く connect ([DR-0005](DR-0005-no-widened-sockaddr.md))
-- 試験は、connect の順を途中の経路から始めて (`dialFrom`) 後の経路を強制し、順そのものは試した経路の記録で確かめる ([DR-0009](DR-0009-routes-not-exposed.md))
+- macOS で失うのは widened だけが届く connect ([DR-0005](../DR-0005-no-widened-sockaddr.md))
+- 試験は、connect の順を途中の経路から始めて (`dialFrom`) 後の経路を強制し、順そのものは試した経路の記録で確かめる ([DR-0009](../DR-0009-routes-not-exposed.md))
 
 ## 判断の出所
 

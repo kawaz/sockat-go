@@ -10,83 +10,113 @@
 // kernel a short spelling that names the same place.
 //
 // Use [Listen] and [Dial] where you would use net.ListenUnix / net.DialUnix
-// (or net.Listen("unix", ...) / net.Dial("unix", ...)). They take a path of
-// any length and return the net package's own *net.UnixListener and
-// *net.UnixConn. A path the net package accepts (103 bytes on macOS and the
-// BSDs, 107 on Linux and illumos) is handed to it unchanged, so it behaves
-// exactly as with the net package. For a longer path the socket file is still
-// created at (or looked up at) the path given.
+// (or net.Listen("unix", ...) / net.Dial("unix", ...)), and [ListenUnixgram]
+// and [DialUnixgram] for datagram sockets. They take a path of any length and
+// return the net package's own *net.UnixListener and *net.UnixConn. A path the
+// net package accepts (103 bytes on macOS and the BSDs, 107 on Linux and
+// illumos) is handed to it unchanged, so it behaves exactly as with the net
+// package. For a longer path the socket file is still created at (or looked
+// up at) the path given.
 //
 //	l, err := sockat.Listen("/a/very/long/directory/.../server.sock")
 //	c, err := sockat.Dial("/a/very/long/directory/.../server.sock")
 //
-// [ListenEx] and [DialEx] do the same and also report what the route taken
-// gave up ([Result]: Losses, and the route and the routes skipped, for
-// diagnostics); ListenEx also returns a discard function that removes the
-// socket file later. Their second argument says whether they may take the
-// last resort, a route that reaches the path where every other one is
-// unusable, at a cost listed in Losses. Pass the constants:
+// [ListenEx], [DialEx], [ListenUnixgramEx] and [DialUnixgramEx] do the same
+// with [Options], and also report the route taken and the routes skipped, for
+// diagnostics; the binds ([Bound]) also report what the spelling the kernel
+// keeps is good for ([Spelling]) and give a [SocketFile] that removes the
+// socket file. Their error is a [*RouteError]:
 //
-//	l, discard, res, err := sockat.ListenEx(path, sockat.UseLastResort)
-//	c, res, err := sockat.DialEx(path, sockat.NoLastResort)
+//	l, b, err := sockat.ListenEx(path, sockat.Options{})
+//	defer l.Close()
+//	defer b.File.Remove() // before l.Close
+//
+// [ResolveForBind] and [ResolveForConnect] spell a long path for you to hand
+// to the net package yourself. [Sweep] and [SweepBase] remove what processes
+// that have ended left in the places.
+//
+// The language-independent specification is at
+// https://github.com/kawaz/sockat/blob/main/docs/SPEC.md.
+//
+// # The places B, D and E
+//
+// The spelling of a long path goes through B, a directory of this user's
+// processes shared across them: the first of /tmp/sockat-<uid>,
+// $XDG_RUNTIME_DIR/sockat, $TMPDIR/sockat-<uid> and .sockat.<random> in the
+// socket's directory that can be made, or [Options].Base. Every directory on
+// the way to the place must be owned by root or the user and not writable by
+// others (or sticky); a B already there that fails its checks is passed over
+// for sockat-<uid>.<random> in the same place. In B, each process makes one
+// directory D of a random name and holds it, with a shared lock, for as long
+// as it lives; in D go the symlinks E the spellings go through. B and D are
+// not removed by sockat: a dead process's D goes with the system's cleaning
+// of its temporary directories, or with [Sweep] (and [SweepBase] for
+// Options.Base's B), which removes only directories named as D is (10
+// alphanumeric characters) and only when no live process holds them. B in the
+// socket's directory and a B fallen back to are removed by neither. B,
+// Options.Base's included, is sockat's alone: put nothing else in it.
+//
+// The SocketFile of ListenEx (and of ForBind.SocketFile) records the socket
+// file the path leads to: where its last component is a symlink already
+// there (bind follows it on macOS and NetBSD), the file at its end, which
+// Remove removes, leaving the symlink.
 //
 // # How a long path is reached
 //
-// The routes are tried in this order, the first one that can be used taking
-// the call (the names are the specification's):
+// The socket's directory is looked up first (ENOENT, ENOTDIR). Then the
+// routes are tried in this order, the first one that can be used taking the
+// call (the names are the specification's); a route that binds or connects
+// and fails returns that error, and no later route tries again:
 //
-//	| System              | Listen                    | Dial                                                        |
-//	|---------------------|---------------------------|-------------------------------------------------------------|
-//	| Linux with /proc    | thread-cwd, proc          | proc-direct, thread-cwd, proc, proc-held, symlink-file      |
-//	| Linux without /proc | thread-cwd                | relative, thread-cwd, symlink-file                          |
-//	| macOS               | symlink-file, thread-cwd  | relative, widened (not made here), thread-cwd, symlink-file |
-//	| FreeBSD             | at (bindat)               | at-direct, at (connectat)                                   |
-//	| NetBSD, other       | symlink-file only         | relative, symlink-file                                      |
-//	| OpenBSD, illumos    | none                      | relative, symlink-file                                      |
+//	| System              | Bind                                      |
+//	|---------------------|-------------------------------------------|
+//	| Linux, Android      | link-dir (via /proc, then B), thread-cwd  |
+//	| Apple's systems     | link-dir, link-file, thread-cwd           |
+//	| FreeBSD             | link-dir, at                              |
+//	| NetBSD              | link-dir, link-file                       |
+//	| OpenBSD, illumos    | link-dir                                  |
+//	| other Unix          | link-dir, link-file (told at run time)    |
 //
-// A listen goes first through symlink-file where bind(2) follows a symlink in
-// the last component (macOS and NetBSD do; Linux, FreeBSD, OpenBSD and
-// illumos do not, and do not try it; on other systems it is told at run time:
-// a failed bind with nothing at the path moves on to the next route): a
-// symlink <place>/sockat.XXXXXXXXXX to the socket file, made in $TMPDIR or
-// /tmp where no other user can replace it, bound by and removed right after.
-// Its spelling holds no file name, so there a listen reaches a file name of
-// any length.
+//	| System              | Connect                                                    |
+//	|---------------------|------------------------------------------------------------|
+//	| Linux with /proc    | proc-direct, thread-cwd-direct, link-file                  |
+//	| Linux without /proc | relative, thread-cwd-direct, link-file                     |
+//	| Apple's systems     | relative, widened (not made), thread-cwd-direct, link-file |
+//	| FreeBSD             | at-direct, link-file                                       |
+//	| NetBSD, OpenBSD,    | relative, link-file                                        |
+//	| illumos, other Unix |                                                            |
 //
-// Then a listen goes through a directory D of sockat's own, held by its fd,
-// with a symlink R of a random name in it pointing to the socket's directory:
-// the kernel is given R/<name> relative to D. R and D are removed afterwards,
-// so the spelling the kernel keeps (Addr and the like) names nothing wherever
-// it is resolved later. D goes in $TMPDIR (or /tmp), failing that /tmp,
-// failing that the socket's directory (as .sockat.XXXXXXXXXX); it is made at
-// most once per call. Thread-cwd is a throwaway goroutine locked to its own OS
-// thread that moves that thread's working directory (and no other's) into D;
-// the goroutine ends without unlocking, so the thread is discarded. Linux uses
-// unshare(CLONE_FS), but not under a seccomp filter (such as Docker's default
-// profile); macOS uses __pthread_fchdir. Proc passes
-// /proc/self/fd/<D>/R/<name>, at passes D's fd to bindat / connectat.
+// A bind leaves its spelling, so whatever later unlinks or looks up the
+// address the kernel keeps reaches the path while the spelling lives.
+// Link-dir binds by B/D/E/<name>, E a symlink to the socket's directory, B
+// spelt /proc/<pid>/fd/<B's fd> (Linux, not with UsableCrossUID) or by its
+// real path; unlinking that spelling removes the socket file. Link-file binds
+// by B/D/E, E a symlink to the socket file, where bind(2) follows a symlink
+// in the last component (macOS and NetBSD do; Linux, FreeBSD, OpenBSD and
+// illumos do not and do not try it; elsewhere a failed bind with nothing at
+// the path moves on); it reaches a file name of any length, and unlinking the
+// spelling removes E, not the file. For a file name no spelling through B
+// fits, thread-cwd binds by E/<name> from a throwaway goroutine locked to its
+// own OS thread whose cwd (and no other's) is D, through an E removed right
+// after (Linux: unshare(CLONE_FS), not under a seccomp filter such as
+// Docker's default; macOS: __pthread_fchdir), and at hands the same spelling
+// to bindat(2) with D's fd (FreeBSD). The goroutine ends without unlocking,
+// so the thread is thrown away.
 //
-// A dial has its own order: a connect leaves no spelling behind (the
-// connecting socket is not bound), so the routes that need no writing and no
-// thread come first. Proc-direct passes /proc/self/fd/<dirfd>/<name>, relative
-// the path relative to the cwd, at-direct the socket's directory fd to
-// connectat. Only after them come the routes that make D and R (thread-cwd,
-// proc, at) or D alone (proc-held, which passes /proc/self/fd/<D>/s, s a
-// symlink in D to the socket file), and last symlink-file, as a listen makes
-// it.
+// A connect leaves no spelling with the peer, so the routes that need no
+// writing and no thread come first: proc-direct passes
+// /proc/self/fd/<dirfd>/<name>, relative the path relative to the cwd,
+// at-direct the socket's directory fd to connectat(2). Thread-cwd-direct
+// passes the file name from a throwaway thread whose cwd is the socket's
+// directory. Link-file makes an E right in B, connects by its real path B/E,
+// and removes E right after; a connect makes no D.
 //
-// Go cannot fork, so the specification's fork routes are not made: they are
-// listed in the routes skipped. The specification's widened sockaddr (macOS)
-// is not used either. A listen that no route reaches is ENAMETOOLONG; with
-// UseLastResort, ListenEx then binds through symlink-dir, a symlink to the
-// socket's directory in $XDG_RUNTIME_DIR, $TMPDIR or /tmp (places only the
-// user can write to first; a shared one costs RecreatableSpelling). DialEx's
-// last resort is a fork, so it reaches what Dial reaches.
-//
-// None of these changes the working directory of the process or of the
-// calling thread, and all of them can be used from any goroutine. When no
-// route reaches the path, the error is ENAMETOOLONG. The language-independent
-// specification is at https://github.com/kawaz/sockat/blob/main/docs/SPEC.md.
+// sockat does not fork. The specification's widened sockaddr (Apple's
+// systems) is not made: handed to the net package, a socket connected that
+// way to a peer bound that way has a nil RemoteAddr. None of the routes
+// changes the working directory of the process or of the calling thread, and
+// all of them can be used from any goroutine. When no route can be used, the
+// error is ENAMETOOLONG.
 //
 // # What differs from the net package
 //
@@ -102,27 +132,26 @@
 //     the file (as the net package elsewhere leaves a path that starts with
 //     '@'), and a path of 106 or 107 bytes, which no longer fits, is treated
 //     as a long path.
-//   - The listener of a long path does not remove the socket file on Close.
-//     Its address is the spelling handed to the kernel, so do not call
-//     SetUnlinkOnClose(true) on it; use [ListenEx]'s discard.
-//   - A listener of a long path reports in Addr (and its accepted connections
-//     in LocalAddr) the spelling its bind handed to the kernel, not the path
-//     you passed: R/<name>, /proc/self/fd/<fd>/R/<name>, or a symlink
-//     <place>/sockat.XXXXXXXXXX that is gone. So does RemoteAddr on a
-//     connection to such a listener, whichever way the dial went (the kernel
-//     reports what the peer bound, not what the dial was given). It usually
-//     names nothing, but other users can see it (Linux's /proc/net/unix) and,
-//     where they can write (a shared place, a cwd others can write to), make
-//     the name again: do not stat or unlink that spelling, nor hand it to
-//     another process. Keep the path you passed.
+//   - For a long path, the listener's Addr (and its accepted connections'
+//     LocalAddr, and the peer's RemoteAddr) is the spelling the bind handed to
+//     the kernel, not the path you passed. [Spelling] tells what it is good
+//     for: do not unlink or stat it without looking.
+//   - Closing [Listen]'s listener of a long path unlinks that spelling, as the
+//     net package does: through link-dir's the socket file is removed,
+//     through link-file's the symlink E is removed and the file stays, and
+//     through a Dangling one (thread-cwd, at) nothing is. The listener of
+//     [ListenEx] removes nothing on Close, short paths included: use
+//     Bound.File's Remove, before closing the listener.
 //   - A long path that does not end with a file name ("dir/", "dir/.",
 //     "dir/..") is EINVAL, and nothing is created.
-//   - The directory is looked up first (resolved to a real path for R); a
+//   - The directory is looked up first (resolved to a real path for E); a
 //     rename or a symlink repointed in between is not seen.
 //   - Dial's relative route is exposed to another goroutine's os.Chdir: when
-//     the cwd changed during the call, the result is discarded and an error is
+//     the cwd changed during the call, the result is dropped and an error is
 //     returned.
-//   - If the process dies before removing them, sockat.XXXXXXXXXX (D, a
-//     symlink) can be left in $TMPDIR or /tmp, and .sockat.XXXXXXXXXX (D) in
-//     the socket's directory.
+//   - B, D and E stay outside the application's places. A live D may be
+//     removed where systemd is older than v242 and in macOS's $TMPDIR; its
+//     spellings then name nothing. A peer with a private /tmp (systemd's
+//     PrivateTmp) cannot follow a spelling through /tmp:
+//     Spelling.UsableWithPrivateTmp tells.
 package sockat

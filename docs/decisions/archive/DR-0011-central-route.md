@@ -1,11 +1,11 @@
 # DR-0011: 長いパスは自分専用のディレクトリ D と乱数の symlink R を通す
 
-- Status: Accepted
+- Status: Superseded by DR-0018, DR-0019
 - Date: 2026-11-19
 
 ## Context
 
-ハブの [DR-0012](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0012-own-directory-and-thread-cwd.md) が経路を作り直した。カーネルは bind の綴りを覚えて `getsockname` / `getpeername` で返し、上のライブラリや利用者はその綴りで unlink / stat する。`/proc/self/fd/<n>/<名前>`・ファイル名だけ・相対パスの綴りは、後で解決すると無関係なファイルに当たる。Go に fork は無い ([DR-0004](DR-0004-thread-cwd-route.md))。
+ハブの [DR-0012](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0012-own-directory-and-thread-cwd.md) が経路を作り直した。カーネルは bind の綴りを覚えて `getsockname` / `getpeername` で返し、上のライブラリや利用者はその綴りで unlink / stat する。`/proc/self/fd/<n>/<名前>`・ファイル名だけ・相対パスの綴りは、後で解決すると無関係なファイルに当たる。Go に fork は無い ([DR-0004](../DR-0004-thread-cwd-route.md))。
 
 ## Decision
 

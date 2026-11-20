@@ -6,37 +6,50 @@ sockat-go は、`sun_path` の上限を超えるパスでも Unix domain socket 
 
 ## 必読
 
-- [docs/decisions/](docs/decisions/INDEX.md) — Go 版の設計 (公開 API と `ListenEx` / `DialEx`、D を通す経路と Listen の順、Listen の symlink-file、Dial の connect の順、スレッド cwd、macOS の広げた sockaddr を使わない理由、長いパスの listener)。経路に手を入れる前に読む
-- [README-ja.md](README-ja.md) — 利用者に約束している振る舞い (標準と違う点、どこから届かなくなるか)
+- [docs/decisions/](docs/decisions/INDEX.md) — Go 版の設計 (公開 API の形、listener の Close、OS ごとの経路の列、置き場の B・D の持ち方、スレッド cwd、広げた sockaddr を使わない理由、試験の置き場)。経路に手を入れる前に読む
+- [README-ja.md](README-ja.md) — 利用者に約束している振る舞い (Spelling、片付け、置き場に残る物、標準と違う点、どこから届かなくなるか)
+- ハブの [DR-0017](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0017-resolve-through-persistent-base.md)・[SPEC](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md)・[SPEC-routes](https://github.com/kawaz/sockat/blob/main/docs/SPEC-routes-ja.md) — 置き場と経路の作り方の正本
 
 ## 構成
 
 | パス | 中身 |
 |---|---|
-| `doc.go` / `sockat.go` | package doc と公開 API の `Listen` / `Dial` |
-| `ex.go` | 公開 API の `ListenEx` / `DialEx` (`LastResort`、`Result`、`RouteError`、discard、最終手段の symlink-dir と fork-cwd-direct の記録) |
-| `route.go` | `run` (短いパスの判定、NUL、abstract)、`viaStd`、エラーの形、`config` |
-| `central.go` | 長いパスの入口 (`runLong`)、D と R (作り方、片付け)、Listen の経路 (symlink-file、D を通す経路、D 無しの形) |
-| `dial.go` | Dial の connect の順を回す `dialer` (D を 1 度だけ作って共有、使えない経路の記録)、thread-cwd と proc |
-| `symlink.go` | 置き場の symlink の経路 (symlink-file の bind / connect、symlink-dir) と置き場の安全の判定 |
-| `posix.go` | Dial の relative と symlink-file (FreeBSD 以外) |
-| `os_*.go` | OS ごとの connect の順 (`dialSteps`) とその OS だけの経路 (proc-direct・proc-held、widened、at-direct・at)、Listen が symlink-file を試すか、ディレクトリと D の開き方、スレッド cwd の `threadChdir`、bindat / connectat |
-| `threadcwd*.go` | スレッドだけ cwd を D に移す手段 (使い捨ての goroutine) |
-| `raw.go` | 自前のソケットを `net.FileListener` / `FileConn` に渡す (FreeBSD の bindat) |
-| `path.go` | パスの分割・相対パスの計算 (ファイルシステムに触らない) |
-| `internal/cmd/sockat-conform` | 適合試験の CLI (ハブの conformance.md。`ListenEx` / `DialEx` を最終手段なしで呼ぶ) |
-| `*_test.go` | 経路を強制するパッケージ内の試験 (`public_test.go` と `example_test.go` は公開 API だけを使う外の試験) |
+| `doc.go` / `sockat.go` | package doc と公開 API の `Listen` / `Dial` / `ListenEx` / `DialEx` |
+| `datagram.go` | 公開 API の `ListenUnixgram` / `DialUnixgram` と各 `Ex` |
+| `resolve.go` | 公開 API の `ResolveForBind` / `ResolveForConnect` と `ForBind` (`SocketFile`、`Cleanup`) / `ForConnect` |
+| `sweep.go` | 公開 API の `Sweep` / `SweepBase` (B の中の死んだ D を消す) |
+| `options.go` / `spelling.go` | `Options`・`Bound`・`Report`・`Skip`・`RouteError` と `Spelling`・`SpellingKind`・`Until` |
+| `socketfile.go` | `SocketFile` (bind した直後に覚える、`Remove`・`Cleanup`) と E の片付けの共有 |
+| `route.go` | 入口 (`bind`・`connect`: 短いパス、NUL、abstract、illumos の `@`)、`viaStd`、エラーの形、経路の名前、試した経路の記録 |
+| `world.go` | `config` (環境の読み方) と `world` (プロセスが持つ B)、`defaultWorld` |
+| `base.go` | B (置き場の順、途中の確かめ、作る・確かめる、`UsableCrossUID` の B、`Options.Base`、消された B の作り直し) |
+| `dir.go` | D (作る・flock・作り直す) と E (resolve の E、呼び出しごとの E) |
+| `link.go` | B を通る綴り (procB と実パス、長さの見積もり)、`Spelling` と診断の `Base` の値 |
+| `bind.go` | bind の列 (link-dir・link-file・thread-cwd / at) と `ListenEx` の覚え方 |
+| `dial.go` | connect の列を回す `dialCall`、thread-cwd-direct と既定の connect の link-file |
+| `posix.go` | connect の relative (FreeBSD 以外) |
+| `os_*.go` | OS ごとの connect の列 (`dialSteps`) とその OS だけの経路 (proc-direct、widened、at-direct)、`/proc` を使えるか、ディレクトリの開き方、スレッド cwd の `threadChdir`、bindat / connectat、bind が symlink を辿るかの表 |
+| `threadcwd*.go` | スレッドだけ cwd を移す手段 (使い捨ての goroutine) |
+| `raw.go` | 自前のソケットを `net.FileListener` / `FileConn` に渡す (FreeBSD の bindat / connectat、stream と DGRAM) |
+| `path.go` / `fileid.go` / `names.go` | パスの分割・相対パスの計算、`(st_dev, st_ino)` と realpath、乱数の名前 |
+| `abstract_*.go` / `stdat_*.go` / `at_none.go` / `symlinkat*.go` | build tag ごとの定数と関数 (abstract の名前、標準が `@` を読むか、at の有無、illumos の `Symlinkat` の代わり) |
+| `internal/cmd/sockat-conform` | 適合試験の CLI (ハブの conformance.md。`ListenEx` / `DialEx` に `Options` を渡す) |
+| `*_test.go` | 経路を強制するパッケージ内の試験 (`main_test.go` の `TestMain` が試験専用の置き場を用意する)。`example_long_test.go` は公開 API だけを使う外の試験で、README の推奨コードを動かす |
 
 ## 守ること
 
 - **振る舞いを変える時は、先にハブの SPEC を直す。** sockat-go の docs と実装はその後に追従させる
-- **標準が受け付けるパスには何も足さない。** `net.ListenUnix` / `net.DialUnix` をそのまま呼ぶ (DR-0002。例外は NUL の `EINVAL`)
-- **経路の本当の失敗は次の経路でやり直さない。** 次へ進むのは経路自体が使えない時だけ (DR-0011)
-- **bind は symlink-file (bind が symlink を辿らないと実測した Linux / Android・FreeBSD・OpenBSD・illumos 以外) と D を通す経路 (と D 無しの形)、`ListenEx` の最終手段の symlink-dir だけ。** 綴りが後で無関係なファイルに当たる経路 (/proc の D を通さない形、相対パス、ファイル名だけ) を bind に使わない (DR-0011、DR-0015)。symlink-file の bind が失敗したら元のパスを lstat し、物があればそのエラーを返す
-- **Dial は OS ごとの connect の順の 1 つの列で試し、D は 1 回の呼び出しで 1 度だけ作る。** 作れなければ D を使う経路を全部飛ばし、作り直さない (DR-0013)
+- **標準が受け付けるパスには何も足さない。** `net.ListenUnix` / `net.ListenUnixgram` / `net.DialUnix` をそのまま呼ぶ (DR-0002。例外は NUL の `EINVAL` と illumos の `@`)
+- **経路の本当の失敗は次の経路でやり直さない。** 次へ進むのは経路自体が使えない時だけ。失敗した時はその呼び出しで作った E を消してから返す (DR-0018)
+- **bind は link-dir・link-file・thread-cwd / at だけ。** 綴りが後で無関係なファイルに当たる経路 (proc-direct、relative、at-direct) と widened を bind に使わない。link-file は bind が symlink を辿らないと実測した OS では試さない (DR-0018)
+- **`Skipped` にはその呼び出しの列に並ぶ経路だけを入れる。** Linux の connect の行は `/proc` を使えるかで呼び出しの初めに 1 度だけ選ぶ (DR-0018)
+- **既定の connect は D を作らず、E を残さない。** B の直下の E は connect の後すぐ消す (DR-0018)
+- **B と D の fd は `int` で持ち、閉じない。** 消されて外した B・D の fd も閉じない (DR-0019)
+- **綴りが収まらないと見積もった時は B を作らず、次の置き場にも移らない。** プロセスの B はパスの長さで変わらない (DR-0019)
 - **スレッド cwd の goroutine は `UnlockOSThread` しない。** cwd が変わったスレッドは goroutine と一緒に捨てる (DR-0004)
-- **長いパスの listener は `SetUnlinkOnClose(false)`。** 覚えているアドレスは綴りなので (DR-0007)
-- **経路は公開 API に出さない。** 試験はパッケージ内で各経路の関数を呼ぶ (DR-0009)
+- **既定の `Listen` は `SetUnlinkOnClose` を触らず、`Dangling` と illumos の `./@` だけ `false`。`ListenEx` 系はどれも `false`** (DR-0017)
+- **経路は公開 API に出さない。** 試験はパッケージ内で `config` を差し替えた `world` で各経路を強制する (DR-0009)
+- **試験は本物の `/tmp/sockat-<uid>` を使わない。** 公開 API の試験も `TestMain` が向けた試験専用の置き場を使う (DR-0009)
 - 公開 API・doc・エラーの文言は英語。DR と日本語の docs は日本語
 
 ## 試験

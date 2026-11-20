@@ -1,11 +1,11 @@
 # DR-0014: ListenEx / DialEx は最終手段を使うかを LastResort で受け取り、失ったもの・通った経路・飛ばした経路を返す
 
-- Status: Accepted
+- Status: Superseded by DR-0016
 - Date: 2026-11-19
 
 ## Context
 
-ハブの [DR-0015](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0015-ex-with-last-resort-and-diagnostics.md) が、何かを失ってでも届く操作を別の関数・別のパッケージに置かず、既定の操作ごとに後始末・診断つきの `_ex` を 1 つずつ置くと決めた。`_ex` の引数で選べるのは「最終手段を使うか」の 1 つだけで、既定は使わない。最終手段は bind が symlink-dir (置き場のソケットのディレクトリを指す symlink)、connect が fork-cwd-direct (fork した子がファイル名で connect)。`_ex` は標準の型と一緒に失ったもの (`losses`)・通った経路 (`route`)・飛ばした経路 (`skipped`) を返し、失敗した時もエラーに `route` と `skipped` を付ける。型・項目・引数の形は各言語の慣習で決める。Go には fork が無い ([DR-0004](DR-0004-thread-cwd-route.md))。
+ハブの [DR-0015](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0015-ex-with-last-resort-and-diagnostics.md) が、何かを失ってでも届く操作を別の関数・別のパッケージに置かず、既定の操作ごとに後始末・診断つきの `_ex` を 1 つずつ置くと決めた。`_ex` の引数で選べるのは「最終手段を使うか」の 1 つだけで、既定は使わない。最終手段は bind が symlink-dir (置き場のソケットのディレクトリを指す symlink)、connect が fork-cwd-direct (fork した子がファイル名で connect)。`_ex` は標準の型と一緒に失ったもの (`losses`)・通った経路 (`route`)・飛ばした経路 (`skipped`) を返し、失敗した時もエラーに `route` と `skipped` を付ける。型・項目・引数の形は各言語の慣習で決める。Go には fork が無い ([DR-0004](../DR-0004-thread-cwd-route.md))。
 
 ## Decision
 
@@ -46,7 +46,7 @@ func DialEx(path string, lr LastResort) (*net.UnixConn, Result, error)
 | 既定の操作 | `Listen` / `Dial` は変えない (最終手段を使わず、診断も返さない) |
 
 - 最終手段を使わない `ListenEx` / `DialEx` は `Listen` / `Dial` と同じ経路を同じ順に試す
-- 経路は package の中の関数のままで、`_ex` は経路を試した記録 (飛ばした経路と理由) を `Result` / `RouteError` に写す ([DR-0009](DR-0009-routes-not-exposed.md))
+- 経路は package の中の関数のままで、`_ex` は経路を試した記録 (飛ばした経路と理由) を `Result` / `RouteError` に写す ([DR-0009](../DR-0009-routes-not-exposed.md))
 - 適合試験の CLI (`internal/cmd/sockat-conform`) は `ListenEx` / `DialEx` に `NoLastResort` を渡して試す (公開 API で作れるので、経路を渡す内部の口は置かない)
 
 ## 理由

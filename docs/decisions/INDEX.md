@@ -14,18 +14,16 @@ Status は各 DR ファイルの `Status:` 行が正本。
 
 | DR | 状態 | 説明 |
 |---|---|---|
-| [DR-0001](DR-0001-public-api.md) | ✅ 実装済 | 公開 API は `Listen` / `Dial` と `ListenEx` / `DialEx` で、標準の具体型を返す (`ListenEx` は discard 関数も) |
-| [DR-0002](DR-0002-standard-handles-paths-it-accepts.md) | ✅ 実装済 | 標準が受け付けるパスと Linux / Android の abstract の名前は標準にそのまま渡す (illumos の `@` は `./` を付けて普通のパスに)。それ以外の NUL は長さによらず `EINVAL` |
-| [DR-0004](DR-0004-thread-cwd-route.md) | ✅ 実装済 | fork の代わりに、スレッドだけ cwd を移す経路 (thread-cwd) を使う |
-| [DR-0005](DR-0005-no-widened-sockaddr.md) | ✅ 実装済 | macOS の広げた sockaddr の経路 (widened) は作らず、connect の順では使えない経路として次へ進む (標準の型に渡すとアドレスの取得で落ちる) |
-| [DR-0006](DR-0006-own-socket-into-net.md) | ✅ 実装済 | 自前のソケット (FreeBSD の bindat) は標準と同じ設定で作り、`net.FileListener` / `FileConn` で渡す |
-| [DR-0007](DR-0007-long-path-listener-keeps-socket-file.md) | ✅ 実装済 | 長いパスの listener は Close でソケットファイルを消さない |
+| [DR-0002](DR-0002-standard-handles-paths-it-accepts.md) | ✅ 実装済 | 標準が受け付けるパスと Linux / Android の abstract の名前は標準にそのまま渡す (illumos の `@` は `./` を付けて普通のパスに、経路の綴りの先頭の `@` にも `./`)。それ以外の NUL は長さによらず `EINVAL` |
+| [DR-0004](DR-0004-thread-cwd-route.md) | ✅ 実装済 | スレッドだけ cwd を移す経路 (thread-cwd・thread-cwd-direct) は、Unlock しない使い捨ての goroutine で作る |
+| [DR-0005](DR-0005-no-widened-sockaddr.md) | ✅ 実装済 | Apple の OS の広げた sockaddr の経路 (widened) は作らず、connect の列では使えない経路として次へ進む (標準の型に渡すとアドレスの取得で落ちる) |
+| [DR-0006](DR-0006-own-socket-into-net.md) | ✅ 実装済 | 自前のソケット (FreeBSD の bindat / connectat、stream と DGRAM) は標準と同じ設定で作り、`net.FileListener` / `FileConn` で渡す |
 | [DR-0008](DR-0008-dependency-and-go-version.md) | ✅ 実装済 | 依存は `golang.org/x/sys` だけ、Go は支援中の 2 版 |
-| [DR-0009](DR-0009-routes-not-exposed.md) | ✅ 実装済 | 経路は公開せず、試験はパッケージ内から `config` を差し替えて強制する |
-| [DR-0011](DR-0011-central-route.md) | ✅ 実装済 | 長いパスは自分専用のディレクトリ D と乱数の symlink R を通す。Listen は symlink-file の次に D を通す経路 (と D 無しの形)。D は 1 回の呼び出しで 1 度だけ作る |
-| [DR-0013](DR-0013-connect-order.md) | ✅ 実装済 | Dial は OS ごとの「connect の順」(書き込みもスレッドも要らない経路を先に) で試し、D を使う経路は D を共有する。proc-held は D に置く |
-| [DR-0014](DR-0014-ex-last-resort-and-diagnostics.md) | ✅ 実装済 | `ListenEx` / `DialEx` は最終手段を使うかを `LastResort` で受け取り、失ったもの・通った経路・飛ばした経路を `Result` で、失敗は `*RouteError` で返す。Listen の最終手段は symlink-dir、Dial の最終手段 (fork-cwd-direct) は作れず飛ばす |
-| [DR-0015](DR-0015-listen-through-file-symlink.md) | ✅ 実装済 | Listen は bind が symlink を辿る OS (macOS・NetBSD・実測していない OS) で standard の次に symlink-file を試す (bind が失敗して元のパスに物が無ければ次へ) |
+| [DR-0009](DR-0009-routes-not-exposed.md) | ✅ 実装済 | 経路は公開せず、試験はパッケージ内から `config` を差し替えた `world` で強制する。公開 API の試験は試験専用の置き場を使う |
+| [DR-0016](DR-0016-public-api-go-shape.md) | ✅ 実装済 | 公開 API は SPEC の関数を Go の net の形に写す (stream・DGRAM・resolve・Sweep)。`Ex` は標準の型・`*Bound` / `Report`・error の 3 値、消す口は `*SocketFile` の `Remove` / `Cleanup`、綴りの性質は `Spelling` |
+| [DR-0017](DR-0017-listener-close-by-spelling.md) | ✅ 実装済 | 既定の `Listen` の listener は Close で標準のまま綴りを unlink し、`Dangling` (と illumos の `./@`) だけ消さない。`ListenEx` の listener はどの綴りでも消さない |
+| [DR-0018](DR-0018-route-orders-per-os.md) | ✅ 実装済 | 長いパスの経路は OS ごとの 1 つの列 (bind・connect・resolve) で試し、列に並ぶ経路だけを `Skipped` に入れる。bind が symlink を辿るかは OS の表と実行時の見分け、FreeBSD の connect の link-file は作って CI で確かめる |
+| [DR-0019](DR-0019-places-held-by-world.md) | ✅ 実装済 | 置き場の B と D はプロセスの `world` が fd (`int`) で持ち続け、閉じない。綴りの長さは B を作る前に見積もり、procB は `(st_dev, st_ino)` を確かめて使う。`Sweep` は D の形の名前だけを消す |
 
 言語によらない振る舞いの正本は [ハブの SPEC](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md)。
 

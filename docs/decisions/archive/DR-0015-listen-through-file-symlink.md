@@ -1,6 +1,6 @@
 # DR-0015: Listen は bind が symlink を辿る OS で standard の次に symlink-file を試す
 
-- Status: Accepted
+- Status: Superseded by DR-0018
 - Date: 2026-11-19
 
 ## Context

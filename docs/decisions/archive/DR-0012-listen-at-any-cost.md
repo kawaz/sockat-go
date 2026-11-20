@@ -5,7 +5,7 @@
 
 ## Context
 
-ハブの [DR-0013](https://github.com/kawaz/sockat/blob/main/docs/decisions/archive/DR-0013-any-means-reach-at-any-cost.md) が any 系を決めた: 既定の経路が全部使えない時に何かを失ってでも届かせる opt-in で、既定の API に出さず、通った経路で失ったものの名前の並び (「失うもの」) を返す。`bind_any` は既定の bind が `ENAMETOOLONG` になる所で、最後に置き場の symlink を試す。Go に fork は無い ([DR-0004](../DR-0004-thread-cwd-route.md)) ので、Go の既定の Listen が `ENAMETOOLONG` になる所は他の言語より広い ([DR-0011](../DR-0011-central-route.md))。
+ハブの [DR-0013](https://github.com/kawaz/sockat/blob/main/docs/decisions/archive/DR-0013-any-means-reach-at-any-cost.md) が any 系を決めた: 既定の経路が全部使えない時に何かを失ってでも届かせる opt-in で、既定の API に出さず、通った経路で失ったものの名前の並び (「失うもの」) を返す。`bind_any` は既定の bind が `ENAMETOOLONG` になる所で、最後に置き場の symlink を試す。Go に fork は無い ([DR-0004](../DR-0004-thread-cwd-route.md)) ので、Go の既定の Listen が `ENAMETOOLONG` になる所は他の言語より広い ([DR-0011](DR-0011-central-route.md))。
 
 ## Decision
 

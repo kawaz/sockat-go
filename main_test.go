@@ -24,7 +24,7 @@ const placeEnv = "SOCKAT_TEST_PLACE"
 func TestMain(m *testing.M) {
 	place, own := os.Getenv(placeEnv), false
 	if place == "" {
-		d, err := os.MkdirTemp("/tmp", "sockat-t")
+		d, err := os.MkdirTemp("/tmp", "sgt-t")
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)

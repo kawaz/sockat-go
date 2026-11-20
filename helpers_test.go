@@ -40,7 +40,7 @@ import (
 // of the test.
 func tmpDir(t *testing.T) string {
 	t.Helper()
-	d, err := os.MkdirTemp("/tmp", "sockat-")
+	d, err := os.MkdirTemp("/tmp", "sgt-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -603,7 +603,7 @@ func mkdirMode(t *testing.T, p string, mode os.FileMode) string {
 // bound at a symlink in a fresh directory under /tmp, independently of the
 // code under test.
 var bindFollowsSymlink = sync.OnceValue(func() bool {
-	d, err := os.MkdirTemp("/tmp", "sockat-")
+	d, err := os.MkdirTemp("/tmp", "sgt-")
 	if err != nil {
 		panic(err)
 	}

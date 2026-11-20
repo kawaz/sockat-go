@@ -16,7 +16,7 @@ import (
 // longDir makes a directory whose path is too long for sun_path, inside a
 // temporary directory that the caller removes.
 func longDir() (tmp, long string) {
-	tmp, err := os.MkdirTemp("", "sockat-example")
+	tmp, err := os.MkdirTemp("", "sgt-example")
 	if err != nil {
 		log.Fatal(err)
 	}

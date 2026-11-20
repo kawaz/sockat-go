@@ -15,14 +15,17 @@ import (
 type procD struct {
 	fd   int    // D (never closed)
 	name string // D's name in B
+	id   fileID // D's (st_dev, st_ino)
 }
 
 // dirAttempts is how many times D is made again when the D just made was
 // taken away (by another process's sweep) before it was locked.
 const dirAttempts = 16
 
-// ownD is the process's D in b, made the first time (under b.mu). A failure
-// is not remembered: the next call tries again.
+// ownD is the process's D in b, made the first time (under b.mu), and made
+// again when the D held was removed (SPEC-routes "実体の置き場"; its fd is
+// left open, as dropGoneAuto leaves a B's). A failure is not remembered: the
+// next call tries again.
 func (b *base) ownD(cfg *config) (*procD, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -31,7 +34,13 @@ func (b *base) ownD(cfg *config) (*procD, error) {
 
 func (b *base) ownDLocked(cfg *config) (*procD, error) {
 	if b.d != nil {
-		return b.d, nil
+		d := b.d
+		if !dirGone(d.fd, d.id, func(st *unix.Stat_t) error {
+			return unix.Fstatat(b.fd, d.name, st, unix.AT_SYMLINK_NOFOLLOW)
+		}) {
+			return d, nil
+		}
+		b.d = nil
 	}
 	for range dirAttempts {
 		d, err := makeOwnD(b.fd, cfg.random)
@@ -79,7 +88,7 @@ func makeOwnD(bfd int, random func() (string, error)) (*procD, error) {
 		unix.Close(fd)
 		return nil, errDTakenAway
 	}
-	return &procD{fd: fd, name: name}, nil
+	return &procD{fd: fd, name: name, id: fileID{uint64(held.Dev), uint64(held.Ino)}}, nil
 }
 
 // lockD is flock(2) for D (SPEC-routes "D と E" step 3).

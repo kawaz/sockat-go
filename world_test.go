@@ -583,6 +583,70 @@ func TestChildBUnderAUmask(t *testing.T) {
 	}
 }
 
+// A B or D the world holds that was removed (an old systemd-tmpfiles, macOS's
+// cleaning of $TMPDIR, a hand) is dropped at the next call and made again
+// (SPEC-routes "実体の置き場", hub 13cb9201), whether it is gone (st_nlink
+// 0) or its name now names another directory (removed and made again by
+// someone): a D removed is made again in the same B; a B removed (with its
+// D) is made again, and so is its D; a B whose name was given to another
+// directory is passed over for that directory. The B of the socket's
+// directory and Options.Base's are made again the same way. The new B and D
+// are on disk where the names say.
+func TestARemovedBOrDIsMadeAgain(t *testing.T) {
+	t.Parallel()
+	w, ps := testWorld(t, nil)
+	b := autoOf(w, false)
+	d, err := b.ownD(&w.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Rmdir(b.real + "/" + d.name); err != nil {
+		t.Fatal(err)
+	}
+	d2, err := b.ownD(&w.cfg)
+	if err != nil || d2 == d || !exists(b.real+"/"+d2.name) {
+		t.Fatalf("D after its removal: %+v, %v", d2, err)
+	}
+	if err := os.RemoveAll(ps.tmp + "/" + uidName()); err != nil {
+		t.Fatal(err)
+	}
+	b2 := autoOf(w, false)
+	if b2 == nil || b2 == b || b2.kind != kindTmp || !exists(ps.tmp+"/"+uidName()) {
+		t.Fatalf("B after its removal: %+v", b2)
+	}
+	if d3, err := b2.ownD(&w.cfg); err != nil || !exists(b2.real+"/"+d3.name) {
+		t.Fatalf("D in the B made again: %+v, %v", d3, err)
+	}
+	if err := os.Rename(ps.tmp+"/"+uidName(), ps.tmp+"/moved"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(ps.tmp+"/"+uidName(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	b3 := autoOf(w, false)
+	if b3 == nil || b3 == b2 || b3.id != mustStatID(t, ps.tmp+"/"+uidName()) {
+		t.Fatalf("B whose name names another directory: %+v", b3)
+	}
+
+	sd := tmpDir(t)
+	real, _ := realDir(sd)
+	id, _ := statID(sd)
+	s := w.sockdirBase(real, id)
+	os.RemoveAll(s.real)
+	if s2 := w.sockdirBase(real, id); s2 == nil || s2 == s || !exists(s2.real) {
+		t.Fatalf("the socket's directory's B after its removal: %+v", s2)
+	}
+	g := tmpDir(t) + "/b"
+	gb, err := w.givenBase(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(g)
+	if gb2, err := w.givenBase(g); err != nil || gb2 == gb || !exists(g) {
+		t.Fatalf("Options.Base's B after its removal: %+v, %v", gb2, err)
+	}
+}
+
 // D is made in B once per (process, B), named by 10 random letters or
 // digits, mode 0711 (so a real-path spelling through a 0711 B can be
 // followed by another uid), and held with a shared lock: another open of it

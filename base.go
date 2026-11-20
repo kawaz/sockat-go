@@ -96,6 +96,7 @@ var errNoBase = unusable("no base")
 func (w *world) autoBase(cross bool, fits fitsFunc) (*base, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.dropGoneAuto()
 	if !cross && w.auto != nil {
 		return w.auto, nil
 	}
@@ -139,6 +140,48 @@ func (w *world) autoBase(cross bool, fits fitsFunc) (*base, error) {
 		return b, nil
 	}
 	return nil, errNoBase
+}
+
+// dropGoneAuto forgets the B of the places 1 to 3 the world holds when it
+// was removed (gone), so this call makes B again (SPEC-routes "実体の置き場":
+// an old systemd-tmpfiles, macOS's cleaning of $TMPDIR, or a hand may remove
+// it). Under w.mu.
+//
+// Design rationale: the fds of a B (and its D) forgotten are left open, not
+// closed: an E handed out through it (SocketFile's Cleanup) still unlinks by
+// D's fd, which a closed and reused fd number would point elsewhere. They
+// are a few fds for the life of the process, as every B's are.
+func (w *world) dropGoneAuto() {
+	if w.auto != nil && w.auto.gone() {
+		if w.autoCross == w.auto {
+			w.autoCross = nil
+		}
+		w.auto = nil
+	}
+	if w.autoCross != nil && w.autoCross.gone() {
+		w.autoCross = nil
+	}
+}
+
+// gone reports whether B was removed since it was opened: its fd's st_nlink
+// is 0, or its real path no longer names it (missing, or another (st_dev,
+// st_ino)).
+func (b *base) gone() bool {
+	return dirGone(b.fd, b.id, func(st *unix.Stat_t) error { return unix.Lstat(b.real, st) })
+}
+
+// dirGone reports whether the directory fd, of (st_dev, st_ino) id, was
+// removed: st_nlink 0, or its name (looked up by lookup, not following a
+// symlink) gone or naming something else.
+func dirGone(fd int, id fileID, lookup func(*unix.Stat_t) error) bool {
+	var st unix.Stat_t
+	if unix.Fstat(fd, &st) != nil || st.Nlink == 0 {
+		return true
+	}
+	if lookup(&st) != nil {
+		return true
+	}
+	return (fileID{uint64(st.Dev), uint64(st.Ino)}) != id
 }
 
 // ancestorsPass reports whether the directories from the root down to real
@@ -256,7 +299,10 @@ func (w *world) givenBase(b string) (*base, error) {
 	defer w.mu.Unlock()
 	if id, ok := statID(b); ok {
 		if k := w.given[id]; k != nil {
-			return k, nil
+			if !k.gone() {
+				return k, nil
+			}
+			delete(w.given, id)
 		}
 	}
 	nb, err := w.makeBase(place{kindGiven, b}, real, true)
@@ -289,7 +335,10 @@ func (w *world) sockdirBase(real string, id fileID) *base {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if b := w.sockdir[id]; b != nil {
-		return b
+		if !b.gone() {
+			return b
+		}
+		delete(w.sockdir, id)
 	}
 	b, err := w.makeBase(place{kindSockdir, real}, real, false)
 	if err != nil {

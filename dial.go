@@ -16,13 +16,13 @@ import (
 // thread, then link-file, which writes an E in B. The order is the system's
 // (dialSteps, in the os_*.go files):
 //
-//	| system                  | order                                                   |
-//	|-------------------------|---------------------------------------------------------|
-//	| Linux with /proc        | proc-direct, thread-cwd-direct, link-file               |
-//	| Linux without /proc     | relative, thread-cwd-direct, link-file                  |
-//	| macOS                   | relative, widened (not made), thread-cwd-direct, link-file |
-//	| FreeBSD                 | at-direct, link-file                                    |
-//	| NetBSD, OpenBSD, other  | relative, link-file                                     |
+//	| system                 | order                                                      |
+//	|------------------------|------------------------------------------------------------|
+//	| Linux with /proc       | proc-direct, thread-cwd-direct, link-file                  |
+//	| Linux without /proc    | relative, thread-cwd-direct, link-file                     |
+//	| macOS                  | relative, widened (not made), thread-cwd-direct, link-file |
+//	| FreeBSD                | at-direct, link-file                                       |
+//	| NetBSD, OpenBSD, other | relative, link-file                                        |
 //
 // A connect leaves no spelling with the peer (the connecting socket is not
 // bound), so no route of a connect makes D or keeps an E: link-file's E, in B

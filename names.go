@@ -22,15 +22,25 @@ const linkAttempts = 16
 // errNoFreeName is returned when createLink ran out of names.
 var errNoFreeName = errors.New("could not find a free name for a temporary symlink")
 
-// randomName returns "sockat." followed by linkRandomLen random letters and
-// digits from the system's secure generator (crypto/rand).
+// randomName returns "sockat." followed by randomChars.
 func randomName() (string, error) {
+	r, err := randomChars()
+	if err != nil {
+		return "", err
+	}
+	return linkPrefix + r, nil
+}
+
+// randomChars returns linkRandomLen random letters and digits (62 kinds) from
+// the system's secure generator (crypto/rand): the random names of D, of the
+// E made for one call, and of the B fallen back to (SPEC-routes "D と E").
+func randomChars() (string, error) {
 	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 	var random [linkRandomLen]byte
 	if _, err := rand.Read(random[:]); err != nil {
 		return "", err
 	}
-	name := []byte(linkPrefix)
+	name := make([]byte, 0, linkRandomLen)
 	// 256 is not a multiple of 62, so this is slightly biased; the name only
 	// has to be hard to collide with, not uniform.
 	for _, b := range random {

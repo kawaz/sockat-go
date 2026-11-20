@@ -109,3 +109,7 @@ const hasProc = false
 // listenTriesSymlinkFile: a bind here follows a symlink in the last
 // component, so a listen tries symlink-file after standard.
 const listenTriesSymlinkFile = true
+
+// bindFollowsHere: bind(2) here follows a symlink in the last component
+// (measured, SPEC "bind の順").
+const bindFollowsHere = followsYes

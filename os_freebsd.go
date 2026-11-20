@@ -115,3 +115,7 @@ const hasProc = false
 // component (measured, SPEC "試す順番"), so a listen never tries
 // symlink-file.
 const listenTriesSymlinkFile = false
+
+// bindFollowsHere: bind(2) here does not follow a symlink in the last
+// component (measured, SPEC "bind の順").
+const bindFollowsHere = followsNo

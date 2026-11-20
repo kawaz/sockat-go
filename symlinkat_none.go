@@ -1,9 +1,17 @@
-//go:build !(linux || android || darwin || ios || freebsd)
+//go:build illumos || solaris
 
 package sockat
 
-import "syscall"
+import "golang.org/x/sys/unix"
 
-// symlinkat is not needed here: the central route has no means on these
-// systems, so D and R are never made.
-func symlinkat(string, int, string) error { return syscall.ENOSYS }
+// symlinkat makes a symlink name in the directory dirfd, whose real path is
+// dirPath, pointing to target.
+//
+// Design rationale: golang.org/x/sys/unix has no Symlinkat here, so the
+// symlink is made by the directory's real path (dirPath/name). D, whose path
+// that is, is this process's and locked, and B and D are 0711 directories of
+// ours under ancestors others cannot replace, so the path names the
+// directory dirfd holds.
+func symlinkat(target string, _ int, dirPath, name string) error {
+	return unix.Symlink(target, dirPath+"/"+name)
+}

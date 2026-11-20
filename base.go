@@ -1,0 +1,443 @@
+package sockat
+
+import (
+	"errors"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+
+	"golang.org/x/sys/unix"
+)
+
+// B, the directory in a place that a user's processes share (SPEC-routes
+// "B の作り方", "実体の置き場", "別の uid と PrivateTmp").
+
+// The kinds of B, which are also the diagnostics' base values for a
+// real-path spelling (SPEC-routes "綴りの形").
+const (
+	kindTmp     = "tmp"     // in /tmp
+	kindRuntime = "runtime" // in $XDG_RUNTIME_DIR
+	kindTmpdir  = "tmpdir"  // in $TMPDIR
+	kindSockdir = "sockdir" // in the socket's directory
+	kindGiven   = "given"   // Options.Base
+)
+
+// base is a B the world holds.
+type base struct {
+	fd   int    // B, opened O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC (never closed)
+	id   fileID // B's (st_dev, st_ino)
+	real string // B's real path
+	kind string
+	// crossUID: B and every directory on the way to it have search
+	// permission for others (mode & 0o001), so a real-path spelling through
+	// B can be followed by another uid.
+	crossUID bool
+	// tmpPath: the place before its real path was resolved, or B's real path,
+	// goes through a directory a private /tmp replaces.
+	tmpPath bool
+
+	mu    sync.Mutex
+	d     *procD // this process's D in B, made at most once (ownD)
+	nextE uint64 // the name of the next resolve E (base 36)
+}
+
+// place is somewhere B may be made: its kind and its path as configured
+// (before its real path is resolved).
+type place struct {
+	kind string
+	path string
+}
+
+// autoPlaces are the places 1 to 3 in order: /tmp, $XDG_RUNTIME_DIR and
+// $TMPDIR, the last two only when set to an absolute path.
+func (w *world) autoPlaces() []place {
+	ps := []place{{kindTmp, w.cfg.tmp}}
+	if v := w.cfg.getenv("XDG_RUNTIME_DIR"); isAbs(v) {
+		ps = append(ps, place{kindRuntime, v})
+	}
+	if v := w.cfg.getenv("TMPDIR"); isAbs(v) {
+		ps = append(ps, place{kindTmpdir, v})
+	}
+	return ps
+}
+
+// bName is the name of B in a place of kind: sockat-<euid>, sockat under
+// $XDG_RUNTIME_DIR (already the user's own).
+func bName(kind string) string {
+	if kind == kindRuntime {
+		return "sockat"
+	}
+	return "sockat-" + strconv.Itoa(os.Geteuid())
+}
+
+// fitsFunc reports whether a spelling through a B of the kind, whose real
+// path is real, can fit the sockaddr: the estimate before B is made (SPEC-routes
+// "実体の置き場": no B is made where it is known not to fit).
+type fitsFunc func(kind, real string) bool
+
+// autoBase is the world's B of the places 1 to 3 (cross: autoCross, where
+// others can follow the spelling), made in the first place where it can be
+// and fits says a spelling may fit. nil when none.
+func (w *world) autoBase(cross bool, fits fitsFunc) *base {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !cross && w.auto != nil {
+		return w.auto
+	}
+	if cross {
+		if w.autoCross != nil {
+			return w.autoCross
+		}
+		if w.auto != nil && w.auto.crossUID {
+			w.autoCross = w.auto
+			return w.auto
+		}
+	}
+	for _, p := range w.autoPlaces() {
+		real, err := realDir(p.path)
+		if err != nil || !fits(p.kind, real+"/"+bName(p.kind)) {
+			continue
+		}
+		b, err := w.makeBase(p, real, false)
+		if err != nil {
+			continue
+		}
+		b = w.known(b)
+		if cross {
+			if !b.crossUID {
+				// Not for this call; held only when it is auto already (an
+				// existing B of mode 0700, for example).
+				if b != w.auto {
+					unix.Close(b.fd)
+				}
+				continue
+			}
+			w.autoCross = b
+			return b
+		}
+		w.auto = b
+		return b
+	}
+	return nil
+}
+
+// checkGiven checks Options.Base before any route is tried (SPEC-routes
+// "B の作り方"), making nothing: an absolute path ending with a name (EINVAL
+// otherwise), whose parent exists (ENOENT) and is a directory (ENOTDIR), with
+// every ancestor passing checkAncestors (EPERM), and B itself, when it is
+// there, a directory (ENOTDIR) of ours that others cannot write to (EPERM).
+// With cross (UsableCrossUID of a bind), every one of them must also have
+// search permission for others (EPERM). The error is an *os.PathError.
+func checkGiven(b string, cross bool) error {
+	pathErr := func(err error) error { return &os.PathError{Op: "base", Path: b, Err: err} }
+	if !isAbs(b) {
+		return pathErr(syscall.EINVAL)
+	}
+	parent, name, err := splitPath(b)
+	if err != nil {
+		return pathErr(err)
+	}
+	real, err := realDir(parent)
+	if err != nil {
+		return pathErr(errnoOf(err))
+	}
+	var st unix.Stat_t
+	if err := unix.Stat(real, &st); err != nil {
+		return pathErr(err)
+	}
+	if uint32(st.Mode)&unix.S_IFMT != unix.S_IFDIR {
+		return pathErr(syscall.ENOTDIR)
+	}
+	if err := checkAncestors(real, cross); err != nil {
+		return pathErr(errnoOf(err))
+	}
+	switch err := unix.Lstat(joinUnder(real, name), &st); {
+	case errors.Is(err, unix.ENOENT):
+		return nil
+	case err != nil:
+		return pathErr(err)
+	}
+	mode := uint32(st.Mode)
+	switch {
+	case mode&unix.S_IFMT != unix.S_IFDIR:
+		return pathErr(syscall.ENOTDIR)
+	case st.Uid != uint32(os.Geteuid()) || mode&0o022 != 0 || (cross && mode&0o001 == 0):
+		return pathErr(syscall.EPERM)
+	}
+	return nil
+}
+
+// errnoOf is the errno inside err, or err itself when it has none.
+func errnoOf(err error) error {
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return errno
+	}
+	return err
+}
+
+// givenBase is the world's B at b (Options.Base, checked by checkGiven),
+// made when there is none there yet. The error is an *os.PathError: B could
+// not be made or opened (the open's error, a umask taking the owner's bits
+// for example), or what is at b is not a private directory of ours (EPERM).
+func (w *world) givenBase(b string) (*base, error) {
+	pathErr := func(err error) error { return &os.PathError{Op: "base", Path: b, Err: err} }
+	parent, _, err := splitPath(b)
+	if err != nil {
+		return nil, pathErr(err)
+	}
+	real, err := realDir(parent)
+	if err != nil {
+		return nil, pathErr(errnoOf(err))
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if id, ok := statID(b); ok {
+		if k := w.given[id]; k != nil {
+			return k, nil
+		}
+	}
+	nb, err := w.makeBase(place{kindGiven, b}, real, true)
+	if errors.Is(err, errNotOurs) {
+		err = syscall.EPERM
+	}
+	if err != nil {
+		return nil, pathErr(errnoOf(err))
+	}
+	w.given[nb.id] = nb
+	return nb, nil
+}
+
+// known is b, or the B the world already holds at the same (st_dev, st_ino)
+// (b's fd then closed): auto and autoCross may be one directory.
+func (w *world) known(b *base) *base {
+	for _, k := range []*base{w.auto, w.autoCross} {
+		if k != nil && k.id == b.id {
+			unix.Close(b.fd)
+			return k
+		}
+	}
+	return b
+}
+
+// sockdirBase is the world's B in the socket's directory (real, its real
+// path; id, its (st_dev, st_ino)), made when there is none yet: the place 4,
+// for when none of the places 1 to 3 can be used. nil when it cannot be made.
+func (w *world) sockdirBase(real string, id fileID) *base {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if b := w.sockdir[id]; b != nil {
+		return b
+	}
+	b, err := w.makeBase(place{kindSockdir, real}, real, false)
+	if err != nil {
+		return nil
+	}
+	w.sockdir[id] = b
+	return b
+}
+
+// makeBase makes (or opens) B in the place p, whose real path is real
+// (SPEC-routes "B の作り方" steps 2 to 5). Under w.mu.
+//
+// The place's ancestors are checked once per process. B is named
+// sockat-<euid> (sockat in $XDG_RUNTIME_DIR, .sockat.<random> in the socket's
+// directory); one already there that fails the check (not a directory of
+// ours, or writable by others) is passed over for sockat-<euid>.<random>.
+// given makes the error of B an Options.Base error rather than a reason to
+// fall back.
+func (w *world) makeBase(p place, real string, given bool) (*base, error) {
+	if !w.checked[real] {
+		if err := checkAncestors(real, false); err != nil {
+			return nil, err
+		}
+		w.checked[real] = true
+	}
+	pfd, err := unix.Open(real, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(pfd)
+	var name string
+	var fd int
+	switch {
+	case p.kind == kindSockdir:
+		name, fd, err = w.makeFresh(pfd, ".sockat.")
+	case given:
+		_, name, _ = splitPath(p.path)
+		fd, err = makeOrOpen(pfd, name)
+	default:
+		name = bName(p.kind)
+		fd, err = makeOrOpen(pfd, name)
+		if errors.Is(err, errNotOurs) {
+			name, fd, err = w.makeFresh(pfd, "sockat-"+strconv.Itoa(os.Geteuid())+".")
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		unix.Close(fd)
+		return nil, err
+	}
+	breal := joinUnder(real, name)
+	return &base{
+		fd:       fd,
+		id:       fileID{uint64(st.Dev), uint64(st.Ino)},
+		real:     breal,
+		kind:     p.kind,
+		crossUID: uint32(st.Mode)&0o001 != 0 && checkAncestors(real, true) == nil,
+		tmpPath:  w.throughPrivateTmp(p.path) || w.throughPrivateTmp(breal),
+	}, nil
+}
+
+// errNotOurs is the check of B (or D) failing: not a directory, not owned by
+// the effective uid, or writable by others.
+var errNotOurs = errors.New("sockat: not a private directory of ours")
+
+// makeOrOpen makes B named name in the directory pfd, or opens the one there
+// (SPEC-routes "B の作り方" steps 3 to 5): mkdirat 0700, opened O_NOFOLLOW,
+// checked (a directory owned by us), then 0711. One already there is used
+// when it is a directory owned by us that others cannot write to, whatever
+// its mode otherwise (left as it is); errNotOurs when it is not.
+func makeOrOpen(pfd int, name string) (int, error) {
+	err := unix.Mkdirat(pfd, name, 0o700)
+	if err == nil {
+		return openMade(pfd, name)
+	}
+	if !errors.Is(err, unix.EEXIST) {
+		return -1, err
+	}
+	fd, err := unix.Openat(pfd, name, dirOpenFlags, 0)
+	if err != nil {
+		// A symlink (ELOOP), a file (ENOTDIR), ...
+		return -1, errNotOurs
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil || !isOurDir(&st) || uint32(st.Mode)&0o022 != 0 {
+		unix.Close(fd)
+		return -1, errNotOurs
+	}
+	return fd, nil
+}
+
+// dirOpenFlags is how B and D are opened: for reading (D takes flock(2), the
+// tests list B), never through a symlink.
+const dirOpenFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+
+// openMade opens the directory name just made in pfd (mkdirat 0700), checks
+// it is a directory owned by us, and sets it to 0711.
+//
+// A umask that takes the owner's read or search bit leaves a directory we
+// cannot open: then the directory made is removed, when the name still looks
+// like it (a directory of ours; AT_REMOVEDIR takes only an empty one), and
+// the open's error returned (SPEC-routes "B の作り方" step 4).
+func openMade(pfd int, name string) (int, error) {
+	fd, err := unix.Openat(pfd, name, dirOpenFlags, 0)
+	if err != nil {
+		var st unix.Stat_t
+		if unix.Fstatat(pfd, name, &st, unix.AT_SYMLINK_NOFOLLOW) == nil && isOurDir(&st) {
+			unix.Unlinkat(pfd, name, unix.AT_REMOVEDIR)
+		}
+		return -1, err
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil || !isOurDir(&st) {
+		unix.Close(fd)
+		return -1, errNotOurs
+	}
+	if err := unix.Fchmod(fd, 0o711); err != nil {
+		unix.Close(fd)
+		unix.Unlinkat(pfd, name, unix.AT_REMOVEDIR)
+		return -1, err
+	}
+	return fd, nil
+}
+
+// makeFresh makes a directory named prefix + 10 random characters in pfd
+// (another name on EEXIST, linkAttempts at most) as openMade does.
+func (w *world) makeFresh(pfd int, prefix string) (string, int, error) {
+	part, err := createAt(w.cfg.random, func(n string) error { return unix.Mkdirat(pfd, prefix+n, 0o700) })
+	if err != nil {
+		return "", -1, err
+	}
+	fd, err := openMade(pfd, prefix+part)
+	return prefix + part, fd, err
+}
+
+// isOurDir reports whether st is a directory owned by the effective uid.
+func isOurDir(st *unix.Stat_t) bool {
+	return uint32(st.Mode)&unix.S_IFMT == unix.S_IFDIR && st.Uid == uint32(os.Geteuid())
+}
+
+// checkAncestors checks every directory from the root down to real, a real
+// path (SPEC-routes "B の作り方" step 2): each is owned by root or the
+// effective uid, and others cannot write to it (group included, mode & 022)
+// unless it is sticky (as /tmp is). Someone who can write to an ancestor
+// could put another directory in its place. With otherX, each must also have
+// search permission for others (mode & 0o001), for a spelling another uid
+// follows. EPERM when one fails; the lstat's error when one cannot be looked
+// up.
+//
+// Design rationale: SPEC's "持ち主が root か自分で他人が書けない、か、sticky"
+// is read as an owner of root or ours in either case. A sticky directory
+// owned by another user lets that user rename what is in it, which is the
+// replacement the check is there to rule out.
+func checkAncestors(real string, otherX bool) error {
+	cs := components(real)
+	p := ""
+	us := uint32(os.Geteuid())
+	for i, c := range cs {
+		switch {
+		case i == 0 && c == "/":
+			p = "/"
+		case p == "/":
+			p += c
+		default:
+			p += "/" + c
+		}
+		var st unix.Stat_t
+		if err := unix.Lstat(p, &st); err != nil {
+			return &os.PathError{Op: "lstat", Path: p, Err: err}
+		}
+		mode := uint32(st.Mode)
+		ok := mode&unix.S_IFMT == unix.S_IFDIR && (st.Uid == 0 || st.Uid == us) &&
+			(mode&0o022 == 0 || mode&unix.S_ISVTX != 0)
+		if ok && otherX {
+			ok = mode&0o001 != 0
+		}
+		if !ok {
+			return &os.PathError{Op: "check", Path: p, Err: syscall.EPERM}
+		}
+	}
+	return nil
+}
+
+// throughPrivateTmp reports whether p goes through a directory a private
+// /tmp replaces: component by component one of cfg.privateTmps or below it,
+// or below its real path (macOS's /tmp is /private/tmp).
+func (w *world) throughPrivateTmp(p string) bool {
+	for _, t := range w.cfg.privateTmps {
+		if sameComponents(p, t) || hasPrefixComponents(p, t) {
+			return true
+		}
+		if real, err := realDir(t); err == nil && (sameComponents(p, real) || hasPrefixComponents(p, real)) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasPrefixComponents reports whether p is below dir, component by component.
+func hasPrefixComponents(p, dir string) bool {
+	_, ok := below(p, dir)
+	return ok
+}
+
+// joinUnder spells the entry name of the directory dir (a real path).
+func joinUnder(dir, name string) string {
+	return strings.TrimSuffix(dir, "/") + "/" + name
+}

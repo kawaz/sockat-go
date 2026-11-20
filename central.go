@@ -229,7 +229,7 @@ func withoutD(sdir *os.File, real, name string, thread, proc bool, cfg *config) 
 		cfg.trace.skipProc(noDRoutes)
 		return nil, "", errUnusable
 	}
-	part, err := createAt(randomPart, func(n string) error { return symlinkat(real, fd, noDPrefix+n) })
+	part, err := createAt(randomPart, func(n string) error { return symlinkat(real, fd, "", noDPrefix+n) })
 	if err != nil {
 		cfg.trace.skipMeans(noDRoutes, "R not made")
 		return nil, "", errUnusable
@@ -370,7 +370,7 @@ var mkdirD = unix.Mkdirat
 
 // makeR makes R in D, pointing to real, named by nextR (SPEC "D と R" step 3).
 func (h *held) makeR(real string, nextR func() (string, error)) error {
-	r, err := createAt(nextR, func(n string) error { return symlinkat(real, h.fd, n) })
+	r, err := createAt(nextR, func(n string) error { return symlinkat(real, h.fd, "", n) })
 	if err != nil {
 		return err
 	}

@@ -261,6 +261,7 @@ Go の標準ライブラリの振る舞いに合わせて、sockat-go が標準�
 
 - **空のパスは `EINVAL`**。標準は空のパスの bind を、Linux ではカーネルが選ぶ abstract の名前に bind し (autobind)、connect は errno の無いエラーで断る
 - **NUL を含むパスは長さによらず `EINVAL`**。標準は NUL で黙って切り詰め、別のパスに bind する。Linux / Android では、先頭が NUL か `@` の abstract socket の名前を標準にそのまま渡す (`Spelling` は `Original`)。abstract socket の無い OS (illumos を含む) では先頭の NUL も `EINVAL`
+- **引数の誤りの `Err` はむき出しの `syscall.EINVAL` でない**。sockat が自分で見つけた引数の誤り (`Options.Base` の形の誤り、`SweepBase` の形の誤り、名前で終わらない長いパス、空のパス、NUL) の `*net.OpError` / `*os.PathError` の `Err` は、`syscall.EINVAL` を包んだ値。`errors.Is(err, syscall.EINVAL)` で見る (`== syscall.EINVAL` や `.(syscall.Errno)` の型の主張では一致しない)
 - **illumos では `@` で始まるパスを cwd の `@...` のファイルとして bind / connect する**。標準は先頭の `@` を abstract の名前に書き換えるが、illumos のカーネルには abstract socket が無い。sockat は `./` を付けて標準に渡すので、listener の `Addr()` は `./@...` を返し、`Spelling` は `CwdRelative`。listener の Close はファイルを消さない (他の OS の標準が `@` で始まるパスを消さないのとそろえる。消すなら `ListenEx` の `Remove`)。`./` を付けて上限を超える 106・107 バイトのパスは長いパスとして経路に回る
 - **標準の `UnixListener.Close` は覚えている綴りを unlink する**。既定の `Listen` の長いパスの listener では、link-dir の綴りは途中の E を辿ってソケットのファイルを消す (標準と同じ)。**link-file の綴りは E 自体が消え、ソケットのファイルは残る**。`Dangling` の綴りでは何も消さない (`SetUnlinkOnClose(false)` にしてある)。`ListenEx` の listener はどの綴りでも、短いパスでも消さない (`SetUnlinkOnClose(false)`。消すのは `Remove` だけ)
 - **macOS の広げた sockaddr (widened) の経路が無い**。理由と届かなくなる所は「[SPEC から外れる経路](#spec-から外れる経路)」

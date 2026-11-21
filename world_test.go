@@ -371,7 +371,7 @@ func TestTheBOfAUsableCrossUIDBindHasSearchPermissionForOthersAllTheWay(t *testi
 	t.Parallel()
 	w, ps := testWorld(t, nil)
 	auto := autoOf(w, false)
-	if auto == nil || auto.crossUID {
+	if auto == nil || auto.crossUID() {
 		t.Fatalf("B in a 0700 place: %v", auto)
 	}
 	if b := autoOf(w, true); b != nil {
@@ -384,7 +384,7 @@ func TestTheBOfAUsableCrossUIDBindHasSearchPermissionForOthersAllTheWay(t *testi
 		}
 	}
 	cross := autoOf(w, true)
-	if cross == nil || cross.kind != kindTmpdir || !cross.crossUID {
+	if cross == nil || cross.kind != kindTmpdir || !cross.crossUID() {
 		t.Fatalf("cross-uid B %v, want $TMPDIR's (the 0700 B in /tmp passed over)", cross)
 	}
 	if autoOf(w, false) != auto || autoOf(w, true) != cross {
@@ -399,7 +399,7 @@ func TestTheBOfAUsableCrossUIDBindHasSearchPermissionForOthersAllTheWay(t *testi
 		}
 	}
 	a := autoOf(w2, false)
-	if c := autoOf(w2, true); a == nil || c != a || !a.crossUID {
+	if c := autoOf(w2, true); a == nil || c != a || !a.crossUID() {
 		t.Fatalf("auto %v, cross %v: want one B", a, c)
 	}
 }
@@ -532,7 +532,7 @@ func TestOptionsBaseIsCheckedAndMakesNothing(t *testing.T) {
 	if again, err := w.givenBase(d+"/b", anyFits); err != nil || again != b {
 		t.Fatalf("given again: %v, %v", again, err)
 	}
-	if b, err := w.givenBase(d+"/own0700", anyFits); err != nil || modeOf(t, d+"/own0700") != 0o700 || b.crossUID {
+	if b, err := w.givenBase(d+"/own0700", anyFits); err != nil || modeOf(t, d+"/own0700") != 0o700 || b.crossUID() {
 		t.Fatalf("an existing given B: %v, %v", b, err)
 	}
 	if err := os.Chmod(d, 0o711); err != nil {
@@ -545,13 +545,20 @@ func TestOptionsBaseIsCheckedAndMakesNothing(t *testing.T) {
 
 // The safety of Options.Base (the ancestors, B's owner, nobody else writing)
 // is checked at every call, but whether others can search it all the way
-// (UsableCrossUID) is decided when the world first holds the B and not
-// looked at again (SPEC-routes "実体の置き場"): a held B made 0711 under
-// directories others can search stays good for a cross-uid bind after it is
-// set to 0700, a held B of 0700 stays EPERM after it is set to 0711, while a
-// B the world does not hold is judged by its mode now. A held B made
-// writable by its group fails at the next call whatever was decided before.
-func TestTheCrossUIDJudgmentOfAGivenBIsTheOneWhenItWasFirstHeld(t *testing.T) {
+// (UsableCrossUID) is decided when the world first holds the B (SPEC-routes
+// "実体の置き場"), and only B's own search bit, when it was judged missing, is
+// looked at again by every cross-uid call: another process making the same
+// B may have opened it between mkdirat(0700) and fchmodat(0711). So a held
+// B made 0711 under directories others can search stays good for a
+// cross-uid bind after it is set to 0700; a held B of 0700 is EPERM while
+// it stays 0700, good once it is 0711, and stays good when set back to 0700
+// (judged to have it from then on, as a B first held with it). A held B
+// whose parent others could not search when it was first held stays EPERM
+// after the parent is opened (the directories on the way are not looked at
+// again), while a B the world does not hold is judged by the modes now. A
+// held B made writable by its group fails at the next call whatever was
+// decided before.
+func TestTheCrossUIDJudgmentOfAGivenBIsKeptButItsOwnMissingSearchBit(t *testing.T) {
 	t.Parallel()
 	w, _ := testWorld(t, nil)
 	d := tmpDir(t)
@@ -565,27 +572,121 @@ func TestTheCrossUIDJudgmentOfAGivenBIsTheOneWhenItWasFirstHeld(t *testing.T) {
 	if err := os.Mkdir(closed, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if b, err := w.givenBase(closed, anyFits); err != nil || b.crossUID {
+	b, err := w.givenBase(closed, anyFits)
+	if err != nil || b.crossUID() {
 		t.Fatalf("a 0700 given B: %+v, %v", b, err)
+	}
+	if err := w.checkGiven(closed, true); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("a held B judged not usable across uids, still 0700: %v", err)
 	}
 	os.Chmod(open, 0o700)
 	os.Chmod(closed, 0o711)
 	if err := w.checkGiven(open, true); err != nil {
 		t.Fatalf("a held B judged usable across uids, now 0700: %v", err)
 	}
-	if err := w.checkGiven(closed, true); !errors.Is(err, syscall.EPERM) {
-		t.Fatalf("a held B judged not usable across uids, now 0711: %v", err)
+	if err := w.checkGiven(closed, true); err != nil || !b.crossUID() {
+		t.Fatalf("a held B judged not usable across uids, now 0711: %v (crossUID %v)", err, b.crossUID())
 	}
+	os.Chmod(closed, 0o700)
+	if err := w.checkGiven(closed, true); err != nil {
+		t.Fatalf("a held B found usable across uids, set back to 0700: %v", err)
+	}
+
+	shut := tmpDir(t)
+	inShut := shut + "/b"
+	if bs, err := w.givenBase(inShut, anyFits); err != nil || bs.crossUID() || modeOf(t, inShut) != 0o711 {
+		t.Fatalf("a given B of 0711 in a 0700 directory: %+v, %v", bs, err)
+	}
+	if err := os.Chmod(shut, 0o711); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.checkGiven(inShut, true); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("a held B whose parent others could not search when first held: %v", err)
+	}
+
 	other, _ := testWorld(t, nil)
+	if err := other.checkGiven(closed, true); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("a 0700 B not held: %v", err)
+	}
 	if err := other.checkGiven(open, true); !errors.Is(err, syscall.EPERM) {
 		t.Fatalf("a 0700 B not held: %v", err)
 	}
-	if err := other.checkGiven(closed, true); err != nil {
+	os.Chmod(open, 0o711)
+	if err := other.checkGiven(open, true); err != nil {
 		t.Fatalf("a 0711 B not held: %v", err)
+	}
+	if err := other.checkGiven(inShut, true); err != nil {
+		t.Fatalf("a 0711 B not held, in a 0711 directory: %v", err)
 	}
 	os.Chmod(closed, 0o731)
 	if err := w.checkGiven(closed, false); !errors.Is(err, syscall.EPERM) {
 		t.Fatalf("a held B its group can write to: %v", err)
+	}
+}
+
+// The B of the places 1 to 3 that the world holds is judged for
+// UsableCrossUID as a given B is (SPEC-routes "実体の置き場"): a B found at
+// mode 0700 (another process made it and has not set it to 0711 yet) and
+// held by an ordinary call serves no cross-uid call while it stays 0700,
+// serves one once it is 0711 (the same B: autoCross is auto, and a cross-uid
+// bind spells through it a Linked spelling usable across uids), and keeps
+// serving after it is set back to 0700. A held B under a place others could
+// not search when it was first held is not looked at again after the place
+// is opened.
+func TestAHeldBWithoutItsOwnSearchBitIsLookedAtAgainByACrossUIDCall(t *testing.T) {
+	t.Parallel()
+	w, ps := testWorld(t, nil)
+	root, _, _ := splitPath(ps.tmp)
+	for _, p := range []string{root, ps.tmp} {
+		if err := os.Chmod(p, 0o711); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b := ps.tmp + "/" + uidName()
+	if err := os.Mkdir(b, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(b, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	auto := autoOf(w, false)
+	if id, _ := statID(b); auto == nil || auto.id != id || auto.crossUID() {
+		t.Fatalf("auto %+v, want the 0700 B at %s, not usable across uids", auto, b)
+	}
+	if c := autoOf(w, true); c != nil {
+		t.Fatalf("a cross-uid B %s while B is 0700", c.real)
+	}
+	if err := os.Chmod(b, 0o711); err != nil {
+		t.Fatal(err)
+	}
+	if c := autoOf(w, true); c != auto || !auto.crossUID() {
+		t.Fatalf("cross-uid B %v once B is 0711, want auto %v", c, auto)
+	}
+	p := nest(t, tmpDir(t), 300, "s.sock")
+	_, bd := listenExIn(t, w, p, Options{UsableCrossUID: true})
+	if bd.Route != string(routeLinkDir) || !bd.Spelling.UsableCrossUID || bd.Base != kindTmp {
+		t.Fatalf("a cross-uid bind: %s %q %+v", bd.Route, bd.Base, bd.Spelling)
+	}
+	if err := os.Chmod(b, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if c := autoOf(w, true); c != auto {
+		t.Fatalf("cross-uid B %v after B is set back to 0700, want auto %v", c, auto)
+	}
+
+	w2, ps2 := testWorld(t, nil)
+	a2 := autoOf(w2, false)
+	if a2 == nil || a2.crossUID() || modeOf(t, a2.real) != 0o711 {
+		t.Fatalf("auto %+v in a 0700 place, want a 0711 B not usable across uids", a2)
+	}
+	root2, _, _ := splitPath(ps2.tmp)
+	for _, p := range []string{root2, ps2.tmp} {
+		if err := os.Chmod(p, 0o711); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if c := autoOf(w2, true); c != nil {
+		t.Fatalf("a cross-uid B %s: the places on the way were judged when B was first held", c.real)
 	}
 }
 

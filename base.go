@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -30,10 +31,13 @@ type base struct {
 	id   fileID // B's (st_dev, st_ino)
 	real string // B's real path
 	kind string
-	// crossUID: B and every directory on the way to it have search
-	// permission for others (mode & 0o001), so a real-path spelling through
-	// B can be followed by another uid.
-	crossUID bool
+	// ancestorsX: every directory on the way to B has search permission for
+	// others (mode & 0o001), judged when B was first held and kept.
+	ancestorsX bool
+	// ownX: B itself has search permission for others, judged when B was
+	// first held. While it is false, every call with UsableCrossUID looks at
+	// it again by the fstat of fd (crossNow); once true it is kept.
+	ownX atomic.Bool
 	// tmpPath: the place before its real path was resolved, or B's real path,
 	// goes through a directory a private /tmp replaces.
 	tmpPath bool
@@ -41,6 +45,36 @@ type base struct {
 	mu    sync.Mutex
 	d     *procD // this process's D in B, made at most once (ownD)
 	nextE uint64 // the name of the next resolve E (base 36)
+}
+
+// crossUID reports whether a real-path spelling through B can be followed
+// by another uid, as judged so far: B and every directory on the way to it
+// have search permission for others.
+func (b *base) crossUID() bool { return b.ancestorsX && b.ownX.Load() }
+
+// crossNow is crossUID for a call with UsableCrossUID (SPEC-routes
+// "実体の置き場"): where B itself was judged to have no search permission for
+// others, the fstat of its fd looks at it again, and a B that has it now is
+// judged to have it from then on. The directories on the way are not looked
+// at again.
+//
+// Design rationale: two processes making B at once leave the mode B is
+// first held with to chance: one may open B between the other's
+// mkdirat(0700) and fchmodat(0711). Kept as it was, a B held at that moment
+// would never serve UsableCrossUID for the life of the process.
+func (b *base) crossNow() bool {
+	if !b.ancestorsX {
+		return false
+	}
+	if b.ownX.Load() {
+		return true
+	}
+	var st unix.Stat_t
+	if unix.Fstat(b.fd, &st) != nil || uint32(st.Mode)&0o001 == 0 {
+		return false
+	}
+	b.ownX.Store(true)
+	return true
 }
 
 // place is somewhere B may be made: its kind and its path as configured
@@ -104,7 +138,7 @@ func (w *world) autoBase(cross bool, fits fitsFunc) (*base, error) {
 		if w.autoCross != nil {
 			return w.autoCross, nil
 		}
-		if w.auto != nil && w.auto.crossUID {
+		if w.auto != nil && w.auto.crossNow() {
 			w.autoCross = w.auto
 			return w.auto, nil
 		}
@@ -126,7 +160,7 @@ func (w *world) autoBase(cross bool, fits fitsFunc) (*base, error) {
 		}
 		b = w.known(b)
 		if cross {
-			if !b.crossUID {
+			if !b.crossNow() {
 				// Not for this call; held only when it is auto already.
 				if b != w.auto {
 					unix.Close(b.fd)
@@ -228,8 +262,9 @@ func crossPlace(real, name string) bool {
 // With cross (UsableCrossUID of a bind), every one of them must also have
 // search permission for others (EPERM): looked at now while the world does
 // not hold the B there yet, and taken from when it was first held once it
-// does (base.crossUID, not looked at again; SPEC-routes "実体の置き場"). The
-// error is an *os.PathError.
+// does, except that a B judged to have none itself is looked at again
+// (base.crossNow; SPEC-routes "実体の置き場"). The error is an
+// *os.PathError.
 func (w *world) checkGiven(b string, cross bool) error {
 	pathErr := func(err error) error { return &os.PathError{Op: "base", Path: b, Err: err} }
 	if err := givenShape(b); err != nil {
@@ -272,7 +307,7 @@ func (w *world) checkGiven(b string, cross bool) error {
 		return nil
 	}
 	if held := w.heldGiven(fileID{uint64(st.Dev), uint64(st.Ino)}); held != nil {
-		if !held.crossUID {
+		if !held.crossNow() {
 			return pathErr(syscall.EPERM)
 		}
 		return nil
@@ -424,14 +459,16 @@ func (w *world) makeBase(p place, real string, given bool) (*base, error) {
 		return nil, err
 	}
 	breal := joinUnder(real, name)
-	return &base{
-		fd:       fd,
-		id:       fileID{uint64(st.Dev), uint64(st.Ino)},
-		real:     breal,
-		kind:     p.kind,
-		crossUID: uint32(st.Mode)&0o001 != 0 && checkAncestors(real, true) == nil,
-		tmpPath:  w.throughPrivateTmp(p.path) || w.throughPrivateTmp(breal),
-	}, nil
+	b := &base{
+		fd:         fd,
+		id:         fileID{uint64(st.Dev), uint64(st.Ino)},
+		real:       breal,
+		kind:       p.kind,
+		ancestorsX: checkAncestors(real, true) == nil,
+		tmpPath:    w.throughPrivateTmp(p.path) || w.throughPrivateTmp(breal),
+	}
+	b.ownX.Store(uint32(st.Mode)&0o001 != 0)
+	return b, nil
 }
 
 // errNotOurs is the check of B (or D) failing: not a directory, not owned by

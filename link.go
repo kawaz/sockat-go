@@ -65,7 +65,7 @@ func linkedSpelling(b *base, viaProc, removable bool) Spelling {
 	if viaProc {
 		return Spelling{Kind: Linked, Removable: removable, Until: UntilProcess, UsableCrossUID: false, UsableWithPrivateTmp: true}
 	}
-	return Spelling{Kind: Linked, Removable: removable, Until: UntilCleanup, UsableCrossUID: b.crossUID, UsableWithPrivateTmp: !b.tmpPath}
+	return Spelling{Kind: Linked, Removable: removable, Until: UntilCleanup, UsableCrossUID: b.crossUID(), UsableWithPrivateTmp: !b.tmpPath}
 }
 
 // baseValue is the diagnostics' base of a spelling through b: the form of

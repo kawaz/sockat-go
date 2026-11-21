@@ -385,7 +385,7 @@ func TestUsableCrossUIDTakesABOthersCanFollowOrNoneThroughB(t *testing.T) {
 	case !errors.Is(err, syscall.ENAMETOOLONG):
 		t.Fatalf("no B others can follow: %v", err)
 	}
-	if err == nil && (w.auto == nil || w.auto.crossUID) {
+	if err == nil && (w.auto == nil || w.auto.crossUID()) {
 		t.Fatalf("the B of the Dangling spelling: %v", w.auto)
 	}
 	w2, ps2 := testWorld(t, nil)

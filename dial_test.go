@@ -249,7 +249,7 @@ func TestADialDoesNotLookAtUsableCrossUID(t *testing.T) {
 	p := nest(t, tmpDir(t), 300, farName)
 	l := listenAt(t, p)
 	c, r, _, err := dialTraced(t, w, p, Options{UsableCrossUID: true})
-	if err != nil || r != routeLinkFile || w.auto == nil || w.auto.crossUID || w.autoCross != nil {
+	if err != nil || r != routeLinkFile || w.auto == nil || w.auto.crossUID() || w.autoCross != nil {
 		t.Fatalf("dial: %s through %+v, %v", r, w.auto, err)
 	}
 	ping(t, l, c)

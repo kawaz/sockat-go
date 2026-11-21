@@ -33,6 +33,7 @@ sockat-go は、`sun_path` の上限を超えるパスでも Unix domain socket 
 | `raw.go` | 自前のソケットを `net.FileListener` / `FileConn` に渡す (FreeBSD の bindat / connectat、stream と DGRAM) |
 | `path.go` / `fileid.go` / `names.go` | パスの分割・相対パスの計算、`(st_dev, st_ino)` と realpath、乱数の名前 |
 | `abstract_*.go` / `stdat_*.go` / `at_none.go` / `symlinkat*.go` | build tag ごとの定数と関数 (abstract の名前、標準が `@` を読むか、at の有無、illumos の `Symlinkat` の代わり) |
+| `internal/argerr` | sockat が自分で見つけた引数の誤りの目印 (`Error()`・`errors.Is` は変えない)。適合試験の CLI が OS の `EINVAL` と分けるのに使う |
 | `internal/cmd/sockat-conform` | 適合試験の CLI (ハブの conformance.md。`ListenEx` / `DialEx` に `Options` を渡す) |
 | `*_test.go` | 経路を強制するパッケージ内の試験 (`main_test.go` の `TestMain` が試験専用の置き場を用意する)。`example_long_test.go` は公開 API だけを使う外の試験で、README の推奨コードを動かす |
 

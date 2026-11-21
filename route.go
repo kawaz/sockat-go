@@ -8,6 +8,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/kawaz/sockat-go/internal/argerr"
 	"golang.org/x/sys/unix"
 )
 
@@ -121,7 +122,17 @@ func reasonOf(err error) string {
 // (SPEC "短いパス"), which the net package would otherwise take to bind an
 // address of the kernel's choosing (an abstract name on Linux) or report
 // with an error of no errno.
-var errEmptyPath = fmt.Errorf("socket path must not be empty: %w", syscall.EINVAL)
+var errEmptyPath = argerr.Mark(fmt.Errorf("socket path must not be empty: %w", syscall.EINVAL))
+
+// errNULInPath is the error of a socket path with a NUL other than an
+// abstract name's leading one: an invalid argument whatever the length (SPEC
+// "短いパス"), which the net package would cut short there.
+var errNULInPath = argerr.Mark(fmt.Errorf("socket path must not contain a NUL byte: %w", syscall.EINVAL))
+
+// errInvalidArg is the errno of an argument of the wrong form that has no
+// message of its own (a long path not ending with a file name, an
+// Options.Base of the wrong form), marked as sockat's own argument error.
+var errInvalidArg = argerr.Mark(syscall.EINVAL)
 
 // errCwdChanged is returned when the cwd changed while binding / connecting
 // through a path relative to it.
@@ -180,7 +191,7 @@ func (w *world) bind(o op, path string, opts Options, tr *trace, e eUse) (endpoi
 		return ep, bound{route: routeStandard, spelling: Spelling{Kind: Original}}, nil
 	}
 	if strings.IndexByte(path, 0) >= 0 {
-		return nil, bound{}, opError(o, path, fmt.Errorf("socket path must not contain a NUL byte: %w", syscall.EINVAL))
+		return nil, bound{}, opError(o, path, errNULInPath)
 	}
 	if s := stdSpelling(path); len(s) <= directMax {
 		ep, err := viaStd(o, s, s == path)

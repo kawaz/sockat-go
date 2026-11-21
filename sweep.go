@@ -37,7 +37,7 @@ func Sweep() error {
 func SweepBase(base string) error {
 	pathErr := func(err error) error { return &os.PathError{Op: "sweep", Path: base, Err: err} }
 	if givenShape(base) != nil {
-		return pathErr(syscall.EINVAL)
+		return pathErr(errInvalidArg)
 	}
 	parent, name, _ := splitPath(base)
 	real, err := givenParent(parent)

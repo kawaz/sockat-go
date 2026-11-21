@@ -25,6 +25,7 @@ import (
 	"syscall"
 
 	"github.com/kawaz/sockat-go"
+	"github.com/kawaz/sockat-go/internal/argerr"
 	"golang.org/x/sys/unix"
 )
 
@@ -140,19 +141,22 @@ func report(route string, skipped []sockat.Skip, err error) output {
 	return out
 }
 
-// errorName is the errno's C name (EAGAIN, EOPNOTSUPP and EDEADLK for the
-// values with two names), "invalid-argument" for sockat's argument errors
-// (EINVAL: a NUL, a long path not ending with a file name, an Options.Base
-// that is relative or does not end with a name), errno-<n> for an errno
-// without a name, or "general" for an error without an errno.
+// errorName is "invalid-argument" for sockat's own argument errors (marked
+// by internal/argerr: an empty path, a NUL, a long path not ending with a
+// file name, an Options.Base of the wrong form), the errno's C name for any
+// other error with an errno (EAGAIN, EOPNOTSUPP and EDEADLK for the values
+// with two names; an EINVAL that a system call or the standard library
+// returned is "EINVAL"), errno-<n> for an errno without a name, or "general"
+// for an error without an errno.
 func errorName(err error) string {
+	if argerr.Is(err) {
+		return "invalid-argument"
+	}
 	var errno syscall.Errno
 	if !errors.As(err, &errno) {
 		return "general"
 	}
 	switch errno {
-	case syscall.EINVAL:
-		return "invalid-argument"
 	case unix.EAGAIN:
 		return "EAGAIN"
 	case unix.EOPNOTSUPP:

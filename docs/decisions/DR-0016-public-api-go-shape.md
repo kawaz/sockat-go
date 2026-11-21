@@ -62,7 +62,7 @@ package は `sockat` 1 つ (子 package を作らない)。
 | 各 `Ex` | `*RouteError`。`Unwrap` で上の `*net.OpError` に届く |
 | `ResolveForBind`・`ResolveForConnect` | `*RouteError`。`Err` は `*os.PathError` (`Op` は `resolve`、`Path` は呼び出し元のパス) |
 | `(*ForBind).SocketFile`・`Remove`・`Cleanup`・`Sweep`・`SweepBase` | `*os.PathError` (複数あれば `errors.Join`) |
-| 引数の誤り (SPEC「エラー」と、「短いパス」の空のパス) | `syscall.EINVAL` を包んだ上の型 |
+| 引数の誤り (SPEC「エラー」と、「短いパス」の空のパス) | `syscall.EINVAL` を包んだ上の型。sockat が自分で見つけた引数の誤りには内部の目印 (`internal/argerr`) を付ける。目印は `Error()` と `errors.Is` を変えず、利用者は名指しできない。適合試験の CLI はこの目印の付いた物だけを `invalid-argument` にし、システムコールや標準が返した `EINVAL` は `EINVAL` と出す |
 | 一般のエラー (relative の途中で cwd が変わった) | errno を持たないエラーを包んだ上の型 |
 | `Options.Base` の確かめに外れた | `ENOENT` / `ENOTDIR` / `EPERM` を包んだ上の型。`Ex` では `RouteError.Route` は `""`、`Skipped` は空 |
 

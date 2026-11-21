@@ -2,11 +2,9 @@ package sockat
 
 import (
 	"errors"
-	"fmt"
 	"net"
 	"os"
 	"strings"
-	"syscall"
 
 	"golang.org/x/sys/unix"
 )
@@ -96,7 +94,7 @@ func (w *world) connect(o op, path string, opts Options, tr *trace) (endpoint, r
 		return ep, routeStandard, nil
 	}
 	if strings.IndexByte(path, 0) >= 0 {
-		return nil, "", opError(o, path, fmt.Errorf("socket path must not contain a NUL byte: %w", syscall.EINVAL))
+		return nil, "", opError(o, path, errNULInPath)
 	}
 	if s := stdSpelling(path); len(s) <= directMax {
 		ep, err := viaStd(o, s, s == path)
@@ -128,7 +126,7 @@ func (w *world) connect(o op, path string, opts Options, tr *trace) (endpoint, r
 func (w *world) dialLong(o op, path string, opts Options, tr *trace) (endpoint, route, error) {
 	dir, name, err := splitPath(path)
 	if err != nil {
-		return nil, "", err
+		return nil, "", errInvalidArg
 	}
 	var st unix.Stat_t
 	if err := unix.Stat(dir, &st); err != nil {

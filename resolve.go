@@ -2,7 +2,6 @@ package sockat
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"strings"
 	"syscall"
@@ -285,7 +284,7 @@ func shortSpelling(path string, opts Options) (string, bool, error) {
 		return path, true, nil
 	}
 	if strings.IndexByte(path, 0) >= 0 {
-		return "", false, fmt.Errorf("socket path must not contain a NUL byte: %w", syscall.EINVAL)
+		return "", false, errNULInPath
 	}
 	if s := stdSpelling(path); len(s) <= directMax {
 		return s, true, nil

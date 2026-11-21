@@ -418,7 +418,7 @@ func (w *world) heldGiven(id fileID) *base {
 // EINVAL, as an *os.PathError, otherwise.
 func givenShape(b string) error {
 	if _, _, err := splitPath(b); err != nil || !isAbs(b) || strings.IndexByte(b, 0) >= 0 {
-		return &os.PathError{Op: "base", Path: b, Err: syscall.EINVAL}
+		return &os.PathError{Op: "base", Path: b, Err: errInvalidArg}
 	}
 	return nil
 }

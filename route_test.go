@@ -11,6 +11,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/kawaz/sockat-go/internal/argerr"
 )
 
 // directMax is sun_path less the NUL: the longest path the net package
@@ -336,6 +338,132 @@ func TestAnOptionsBaseWithANULIsEINVALWhateverThePath(t *testing.T) {
 	for _, pl := range []string{ps.tmp, ps.runtime, ps.tmpdir} {
 		assertUntouched(t, pl)
 	}
+}
+
+// The argument errors sockat finds itself (SPEC "エラー": an empty path, a
+// NUL other than an abstract name's leading one, a long path not ending with
+// a file name, an Options.Base of the wrong form) carry the internal mark
+// (internal/argerr), by which the conformance CLI tells them,
+// "invalid-argument", from an EINVAL a system call or the standard library
+// returned, which it reports as "EINVAL". The mark must reach every public
+// function's error and change nothing a caller sees: errors.Is(err,
+// syscall.EINVAL) still holds, and the error is the same type in the same
+// shape as before (*net.OpError, *RouteError, *os.PathError). An error that
+// is not one of them carries no mark: a long path whose directory is missing
+// (ENOENT), and, where the kernel has abstract names, an abstract name too
+// long for sun_path, which the standard library refuses with an EINVAL of its
+// own.
+func TestSockatsOwnArgumentErrorsAndOnlyThoseAreMarked(t *testing.T) {
+	t.Parallel()
+	d := tmpDir(t)
+	long := nest(t, tmpDir(t), 300, "s.sock")
+	type call struct {
+		name string
+		do   func(p string, o Options) error
+	}
+	calls := []call{
+		{"Listen", func(p string, o Options) error { _, err := Listen(p); return wantType[*net.OpError](t, err) }},
+		{"Dial", func(p string, o Options) error { _, err := Dial(p); return wantType[*net.OpError](t, err) }},
+		{"ListenUnixgram", func(p string, o Options) error { _, err := ListenUnixgram(p); return wantType[*net.OpError](t, err) }},
+		{"DialUnixgram", func(p string, o Options) error { _, err := DialUnixgram(p); return wantType[*net.OpError](t, err) }},
+		{"ListenEx", func(p string, o Options) error {
+			_, _, err := ListenEx(p, o)
+			return wantRouteError[*net.OpError](t, err)
+		}},
+		{"DialEx", func(p string, o Options) error {
+			_, _, err := DialEx(p, o)
+			return wantRouteError[*net.OpError](t, err)
+		}},
+		{"ListenUnixgramEx", func(p string, o Options) error {
+			_, _, err := ListenUnixgramEx(p, o)
+			return wantRouteError[*net.OpError](t, err)
+		}},
+		{"DialUnixgramEx", func(p string, o Options) error {
+			_, _, err := DialUnixgramEx(p, o)
+			return wantRouteError[*net.OpError](t, err)
+		}},
+		{"ResolveForBind", func(p string, o Options) error {
+			_, err := ResolveForBind(p, o)
+			return wantRouteError[*os.PathError](t, err)
+		}},
+		{"ResolveForConnect", func(p string, o Options) error {
+			_, err := ResolveForConnect(p, o)
+			return wantRouteError[*os.PathError](t, err)
+		}},
+	}
+	args := []struct {
+		what string
+		path string
+		opts Options
+	}{
+		{"an empty path", "", Options{}},
+		{"a NUL in a short path", d + "/a\x00b", Options{}},
+		{"a NUL in a long path", long + "\x00b", Options{}},
+		{"a long path ending with /", filepath.Dir(long) + "/", Options{}},
+		{"a long path ending with /..", filepath.Dir(long) + "/..", Options{}},
+		{"a relative Options.Base", d + "/s.sock", Options{Base: "rel"}},
+		{"an Options.Base ending with /", long, Options{Base: d + "/b/"}},
+		{"an Options.Base with a NUL", long, Options{Base: d + "/b\x00c"}},
+	}
+	for _, a := range args {
+		for _, c := range calls {
+			if a.opts.Base != "" && !strings.HasSuffix(c.name, "Ex") && !strings.HasPrefix(c.name, "Resolve") {
+				continue // no Options to give
+			}
+			err := c.do(a.path, a.opts)
+			if !errors.Is(err, syscall.EINVAL) || !argerr.Is(err) {
+				t.Errorf("%s, %s: %v (EINVAL %v, marked %v)", a.what, c.name, err, errors.Is(err, syscall.EINVAL), argerr.Is(err))
+			}
+		}
+	}
+	if err := SweepBase("rel"); !errors.Is(err, syscall.EINVAL) || !argerr.Is(err) {
+		t.Errorf("SweepBase of a relative base: %v, marked %v", err, argerr.Is(err))
+	}
+	if _, ok := SweepBase("rel").(*os.PathError); !ok {
+		t.Error("SweepBase's error is not an *os.PathError")
+	}
+
+	missing := filepath.Dir(long) + "/missing/s.sock"
+	for _, c := range calls {
+		if err := c.do(missing, Options{}); !errors.Is(err, syscall.ENOENT) || argerr.Is(err) {
+			t.Errorf("a missing directory, %s: %v, marked %v", c.name, err, argerr.Is(err))
+		}
+	}
+	if abstractNames {
+		tooLong := "@" + strings.Repeat("a", directMax+10)
+		for _, c := range calls[:8] {
+			if err := c.do(tooLong, Options{}); !errors.Is(err, syscall.EINVAL) || argerr.Is(err) {
+				t.Errorf("an abstract name too long, %s: %v, marked %v", c.name, err, argerr.Is(err))
+			}
+		}
+	}
+}
+
+// wantType checks that err is a T itself (the type a function returns its
+// errors as) and returns it.
+func wantType[T error](t *testing.T, err error) error {
+	t.Helper()
+	if _, ok := err.(T); !ok {
+		var zero T
+		t.Errorf("%T is not a %T: %v", err, zero, err)
+	}
+	return err
+}
+
+// wantRouteError checks that err is a *RouteError whose Err is a T, and
+// returns err.
+func wantRouteError[T error](t *testing.T, err error) error {
+	t.Helper()
+	re, ok := err.(*RouteError)
+	if !ok {
+		t.Errorf("%T is not a *RouteError: %v", err, err)
+		return err
+	}
+	if _, ok := re.Err.(T); !ok {
+		var zero T
+		t.Errorf("RouteError.Err %T is not a %T: %v", re.Err, zero, err)
+	}
+	return err
 }
 
 // An empty path is an invalid argument (SPEC "短いパス"): every function

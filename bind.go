@@ -64,7 +64,7 @@ type bindCall struct {
 func (w *world) newBindCall(path string, opts Options) (*bindCall, error) {
 	dir, name, err := splitPath(path)
 	if err != nil {
-		return nil, err
+		return nil, errInvalidArg
 	}
 	var st unix.Stat_t
 	if err := unix.Stat(dir, &st); err != nil {

@@ -22,4 +22,4 @@ close_reason: implemented
 
 ## 結果
 
-v0.4.3 を 2026-11-21 に公開した (tag v0.4.3 = e0ee21fb、Release の run 44920374876 は 11 job とも success、macOS の Go oldstable の主スレッドの試験も通過、proxy.golang.org に掲載)。残った窓 (経路を組んだ時点の realpath) はハブ 307620d1 の決定で [2026-11-22-v044-remove-records-route-dir.md](../2026-11-22-v044-remove-records-route-dir.md) に回した。
+v0.4.3 を 2026-11-21 に公開した (tag v0.4.3 = e0ee21fb、Release の run 44920374876 は 11 job とも success、macOS の Go oldstable の主スレッドの試験も通過、proxy.golang.org に掲載)。残った窓 (経路を組んだ時点の realpath) はハブ 307620d1 の決定で [2026-11-22-v044-remove-records-route-dir.md](./2026-11-22-v044-remove-records-route-dir.md) に回した。

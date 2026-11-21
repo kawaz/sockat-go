@@ -1,8 +1,9 @@
 ---
 title: v0.4.4 — remove が覚える場所を経路が作った実ディレクトリにする、README に Err の型の注意
-status: open
+status: resolved
 category: task
 created: 2026-11-22
+close_reason: implemented
 ---
 
 # v0.4.4 — remove が覚える場所を経路が作った実ディレクトリにする、README に Err の型の注意
@@ -25,3 +26,7 @@ sockat が出す引数の誤り (Options.Base の形の誤り、SweepBase の形
 ## 出し方
 
 just ci・just test-linux・BSD と illumos の compile・ハブの just conformance (全言語) を通し、`just bump-version patch` → `just push` → Monitor で `just watch`。tag が出たら run の URL と版をハブの統括 (session 64eabc3d-e5db-421f-925d-659927ded2c3) に知らせる。
+
+## 結果
+
+1 は bind.go で、link-dir・thread-cwd・at の経路が E に指させた実ディレクトリとファイル名を bind の結果と一緒に返し (`bound.file`)、`bindReported` はそれを覚える。standard と link-file は bind の後の realpath のまま、相対パスの cwd の比べ方も変えていない。試験 `TestListenExRecordsWhereTheRouteBoundThroughASymlinkRetargetedAfterTheRoute` (bindEx の継ぎ目で bind の直後に途中の symlink を張り替える) は、直す前は macOS (link-dir・thread-cwd) と Linux (link-dir の procB と B の実パス、unconfined の thread-cwd) で、張り替え先に別のソケットがあればそれを覚えて Remove が消し、無ければ覚えられずに失敗した。直した後は経路が作った所を覚えて Remove がそれを消し、張り替え先に触らない (at は FreeBSD の compile まで)。2 は README の「Go に固有の注意」に日英で足した。版は上げておらず、公開はまだ。

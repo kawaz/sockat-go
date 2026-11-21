@@ -243,7 +243,7 @@ resolve: `ResolveForBind` は bind の列の link-dir と (macOS・NetBSD だけ
 
 Go での手段:
 
-- **thread-cwd・thread-cwd-direct**: OS スレッドに固定した使い捨ての goroutine で、そのスレッドだけ cwd を移す。使い終わったスレッドは Unlock せずに goroutine ごと捨てる。Linux は `unshare(CLONE_FS)` → `fchdir` (seccomp の filter が掛かった環境では使わない。docker の既定等)、Apple の OS は `__pthread_fchdir`
+- **thread-cwd・thread-cwd-direct**: OS スレッドに固定した使い捨ての goroutine で、そのスレッドだけ cwd を移す。使い終わったスレッドは Unlock せずに goroutine ごと捨てる (runtime が捨てない主スレッドでは cwd を移さない)。Linux は `unshare(CLONE_FS)` → `fchdir` (seccomp の filter が掛かった環境では使わない。docker の既定等)、Apple の OS は `__pthread_fchdir`
 - **at**: FreeBSD の `bindat(2)` で自前のソケットを bind し、`net.FileListener` で標準の型に渡す
 - どの経路もプロセスの cwd も呼び出し元のスレッドの cwd も変えないので、どの goroutine から呼んでもよい
 

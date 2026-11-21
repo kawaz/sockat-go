@@ -46,7 +46,7 @@ sockat-go は、`sun_path` の上限を超えるパスでも Unix domain socket 
 - **既定の connect は D を作らず、E を残さない。** B の直下の E は connect の後すぐ消す (DR-0018)
 - **B と D の fd は `int` で持ち、閉じない。** 消されて外した B・D の fd も閉じない (DR-0019)
 - **綴りが収まらないと見積もった時は B を作らず、次の置き場にも移らない。** プロセスの B はパスの長さで変わらない (DR-0019)
-- **スレッド cwd の goroutine は `UnlockOSThread` しない。** cwd が変わったスレッドは goroutine と一緒に捨てる (DR-0004)
+- **スレッド cwd の goroutine は、cwd を移しうる所まで進んだら `UnlockOSThread` しない。** cwd が変わったスレッドは goroutine と一緒に捨てる。主スレッドでは cwd を移さない (runtime は主スレッドを捨てない) (DR-0004)
 - **既定の `Listen` は `SetUnlinkOnClose` を触らず、`Dangling` と illumos の `./@` だけ `false`。`ListenEx` 系はどれも `false`** (DR-0017)
 - **経路は公開 API に出さない。** 試験はパッケージ内で `config` を差し替えた `world` で各経路を強制する (DR-0009)
 - **試験は本物の `/tmp/sockat-<uid>` を使わない。** 公開 API の試験も `TestMain` が向けた試験専用の置き場を使う (DR-0009)

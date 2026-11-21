@@ -243,7 +243,7 @@ resolve: `ResolveForBind` takes link-dir of the bind routes and (on macOS and Ne
 
 The means in Go:
 
-- **thread-cwd and thread-cwd-direct**: a throwaway goroutine locked to its own OS thread moves that thread's cwd (and no other's). The thread is thrown away with the goroutine after use, without unlocking. Linux uses `unshare(CLONE_FS)` then `fchdir` (not under a seccomp filter, such as Docker's default); Apple's systems use `__pthread_fchdir`
+- **thread-cwd and thread-cwd-direct**: a throwaway goroutine locked to its own OS thread moves that thread's cwd (and no other's). The thread is thrown away with the goroutine after use, without unlocking (the cwd is never moved on the main thread, which the runtime does not throw away). Linux uses `unshare(CLONE_FS)` then `fchdir` (not under a seccomp filter, such as Docker's default); Apple's systems use `__pthread_fchdir`
 - **at**: binds a socket of our own with FreeBSD's `bindat(2)` and hands it to the standard type with `net.FileListener`
 - None of the routes changes the working directory of the process or of the calling thread, so any goroutine may call them
 

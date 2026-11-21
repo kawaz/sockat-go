@@ -97,8 +97,10 @@ func openDir(dir string) (*os.File, error) {
 // even called under a seccomp filter (prctl(PR_GET_SECCOMP) other than 0, or
 // prctl failing): a filter may answer it by killing the process with SIGSYS
 // (systemd's SystemCallFilter= does) rather than with an error, and Docker's
-// default profile refuses it anyway (EPERM). A failure of fchdir(2) after
-// unshare(2) is a real failure and is returned.
+// default profile refuses it anyway (EPERM). The thread's cwd is then left
+// as it was, shared with the process. A failure of fchdir(2) after
+// unshare(2) is a real failure and is returned; the thread's cwd is its own
+// by then.
 func threadChdir(dirfd int) error {
 	if mode, err := unix.PrctlRetInt(unix.PR_GET_SECCOMP, 0, 0, 0, 0); err != nil || mode != 0 {
 		return errUnusable
@@ -107,6 +109,19 @@ func threadChdir(dirfd int) error {
 		return errUnusable
 	}
 	return syscallError("fchdir", unix.Fchdir(dirfd))
+}
+
+// threadSelf is the calling thread's id (gettid(2)).
+func threadSelf() uint64 { return uint64(unix.Gettid()) }
+
+// onMainThread reports whether the calling goroutine, locked to its thread,
+// runs on the main thread: the one the package was initialized on
+// (mainThread), or the thread group's leader, whose cwd /proc/<pid>/cwd shows
+// (the two are one in a program; the leader alone stays the runtime's main
+// thread when a plugin loads the package).
+func onMainThread() bool {
+	t := unix.Gettid()
+	return uint64(t) == mainThread || t == unix.Getpid()
 }
 
 // hasProc: /proc may be there.

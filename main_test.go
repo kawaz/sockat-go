@@ -3,6 +3,7 @@ package sockat
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -22,6 +23,15 @@ const placeEnv = "SOCKAT_TEST_PLACE"
 // child process of the tests uses its parent's place (placeEnv) and leaves it
 // to the parent.
 func TestMain(m *testing.M) {
+	if name := os.Getenv(mainChildEnv); name != "" {
+		f, ok := mainChildren[name]
+		if !ok {
+			fmt.Fprintln(os.Stderr, "no main child", name)
+			os.Exit(1)
+		}
+		f()
+		os.Exit(0)
+	}
 	place, own := os.Getenv(placeEnv), false
 	if place == "" {
 		d, err := os.MkdirTemp("/tmp", "sgt-t")
@@ -43,6 +53,30 @@ func TestMain(m *testing.M) {
 		os.RemoveAll(place)
 	}
 	os.Exit(code)
+}
+
+// mainChildEnv names the function of mainChildren a child process of this
+// binary runs (runMainChild) instead of the tests: on the main goroutine,
+// which starts on the runtime's main thread, as a program's main does. For
+// what depends on that thread, which a test goroutine cannot choose.
+const mainChildEnv = "SOCKAT_TEST_MAIN_CHILD"
+
+// mainChildren are the functions runMainChild may run. They report with
+// childReport and end the process with a status other than 0 on a failure.
+var mainChildren = map[string]func(){}
+
+// runMainChild runs mainChildren[name] in a child process of this test binary
+// with env added and returns its output, failing the test when it fails.
+func runMainChild(t *testing.T, name string, env ...string) string {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
+	cmd.Env = append(os.Environ(), mainChildEnv+"="+name)
+	cmd.Env = append(cmd.Env, env...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("main child %s: %v\n%s", name, err, out)
+	}
+	return string(out)
 }
 
 // placeConfig is the process's configuration with place as /tmp and neither

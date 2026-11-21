@@ -85,7 +85,8 @@
 //     that way has a nil RemoteAddr, whose String panics.
 //   - The thread-cwd routes run on a throwaway goroutine locked to its OS
 //     thread, which ends without unlocking so that the runtime throws the
-//     thread away. None of the routes changes the working directory of the
+//     thread away (the main thread, which the runtime keeps, never has its
+//     cwd moved). None of the routes changes the working directory of the
 //     process or of the calling goroutine's thread, and sockat does not fork:
 //     every function can be called from any goroutine.
 package sockat

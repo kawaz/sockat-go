@@ -89,6 +89,20 @@ func threadChdir(dirfd int) error {
 	return nil
 }
 
+// threadSelf is the calling thread's id (thread_selfid(2), the id
+// pthread_threadid_np(3) gives).
+func threadSelf() uint64 {
+	// Design rationale: syscall.Syscall for want of a wrapper without cgo, as
+	// in threadChdir.
+	id, _, _ := syscall.Syscall(unix.SYS_THREAD_SELFID, 0, 0, 0)
+	return uint64(id)
+}
+
+// onMainThread reports whether the calling goroutine, locked to its thread,
+// runs on the main thread, the one the package was initialized on
+// (mainThread).
+func onMainThread() bool { return threadSelf() == mainThread }
+
 // hasProc: no /proc routes here.
 const hasProc = false
 

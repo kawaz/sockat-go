@@ -315,20 +315,11 @@ func (w *world) checkGiven(b string, cross bool) error {
 		return err
 	}
 	parent, name, _ := splitPath(b)
-	real, err := realDir(parent)
+	real, err := givenParent(parent)
 	if err != nil {
-		return pathErr(errnoOf(err))
-	}
-	var st unix.Stat_t
-	if err := unix.Stat(real, &st); err != nil {
 		return pathErr(err)
 	}
-	if uint32(st.Mode)&unix.S_IFMT != unix.S_IFDIR {
-		return pathErr(syscall.ENOTDIR)
-	}
-	if err := checkAncestors(real, false); err != nil {
-		return pathErr(errnoOf(err))
-	}
+	var st unix.Stat_t
 	switch err := unix.Lstat(joinUnder(real, name), &st); {
 	case errors.Is(err, unix.ENOENT):
 		if cross && checkAncestors(real, true) != nil {
@@ -360,6 +351,28 @@ func (w *world) checkGiven(b string, cross bool) error {
 		return pathErr(syscall.EPERM)
 	}
 	return nil
+}
+
+// givenParent is the real path of parent, the directory an Options.Base is
+// in (checkGiven, SweepBase): it exists (ENOENT), is a directory (ENOTDIR),
+// and it and every directory on the way pass checkAncestors (EPERM, or the
+// errno of an lstat that failed). The error is the errno.
+func givenParent(parent string) (string, error) {
+	real, err := realDir(parent)
+	if err != nil {
+		return "", errnoOf(err)
+	}
+	var st unix.Stat_t
+	if err := unix.Stat(real, &st); err != nil {
+		return "", err
+	}
+	if uint32(st.Mode)&unix.S_IFMT != unix.S_IFDIR {
+		return "", syscall.ENOTDIR
+	}
+	if err := checkAncestors(real, false); err != nil {
+		return "", errnoOf(err)
+	}
+	return real, nil
 }
 
 // heldGiven is the B of Options.Base the world holds at id, nil when none.

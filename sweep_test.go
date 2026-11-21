@@ -271,6 +271,32 @@ func TestSweepBaseSweepsTheGivenB(t *testing.T) {
 	}
 }
 
+// SweepBase checks base as Options.Base is checked (SPEC "sweep"): when the
+// directory base would be in is a regular file, the error is ENOTDIR, as it
+// is for a long bind with that Options.Base, and not EPERM (the file is not a
+// directory others could replace: it is no directory at all). Nothing is
+// made or touched in the directory holding the file.
+func TestSweepBaseOfABaseInAFileIsENOTDIRAsForOptionsBase(t *testing.T) {
+	t.Parallel()
+	w, _ := testWorld(t, nil)
+	d := tmpDir(t)
+	if err := os.WriteFile(d+"/file", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	markUntouched(t, d)
+	base := d + "/file/b"
+	_, _, err := w.listenEx(nest(t, tmpDir(t), 300, "s.sock"), Options{Base: base})
+	if !errors.Is(err, syscall.ENOTDIR) {
+		t.Fatalf("a long bind with the base %s: %v, want ENOTDIR", base, err)
+	}
+	err = SweepBase(base)
+	var pe *os.PathError
+	if !errors.Is(err, syscall.ENOTDIR) || !errors.As(err, &pe) || pe.Op != "sweep" || pe.Path != base {
+		t.Fatalf("SweepBase(%q) = %v, want ENOTDIR", base, err)
+	}
+	assertUntouched(t, d)
+}
+
 // Sweep goes through the process's world (in the tests, the place TestMain
 // made, which only this test binary and its children use): this process's
 // own D, made by a long bind, survives it. Not parallel, so that no other

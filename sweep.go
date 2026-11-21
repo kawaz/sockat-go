@@ -31,8 +31,8 @@ func Sweep() error {
 // alone, as Sweep's are). Nothing happens when base, or the directory it is
 // in, does not exist. The error is an *os.PathError (several
 // joined with errors.Join): EINVAL for a base that is not absolute, does
-// not end with a name or holds a NUL, ENOTDIR for one that is not a directory, EPERM for a
-// symlink, for one not of this user or writable by others, or for a
+// not end with a name or holds a NUL, ENOTDIR for one that is not a directory or is in one that is not (as for
+// Options.Base), EPERM for a symlink, for one not of this user or writable by others, or for a
 // directory on the way others can write to; and otherwise as Sweep's.
 func SweepBase(base string) error {
 	pathErr := func(err error) error { return &os.PathError{Op: "sweep", Path: base, Err: err} }
@@ -40,15 +40,12 @@ func SweepBase(base string) error {
 		return pathErr(syscall.EINVAL)
 	}
 	parent, name, _ := splitPath(base)
-	real, err := realDir(parent)
-	if errors.Is(err, os.ErrNotExist) {
+	real, err := givenParent(parent)
+	if errors.Is(err, syscall.ENOENT) {
 		return nil
 	}
 	if err != nil {
-		return pathErr(errnoOf(err))
-	}
-	if checkAncestors(real, false) != nil {
-		return pathErr(syscall.EPERM)
+		return pathErr(err)
 	}
 	return sweepB(joinUnder(real, name), base, true)
 }

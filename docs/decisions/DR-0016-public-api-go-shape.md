@@ -68,8 +68,8 @@ package は `sockat` 1 つ (子 package を作らない)。
 
 `SocketFile`:
 
-- `ListenEx`・`ListenUnixgramEx` は bind した直後にソケットのファイルの realpath (カーネルと同じに引く。[DR-0018](DR-0018-route-orders-per-os.md)) と `(st_dev, st_ino)` を覚える。realpath も bind の後に引く (bind の前に引くと、間に途中の symlink が張り替わった時に bind したのと別のファイルを覚え、`Remove` がそれを消す)。元のパスの最後の要素が既にある symlink の時は辿った先のソケットのファイルを覚え、辿った先がソケットでなければ覚えられない時と同じに扱う。覚えられなければ listener を閉じ、作った E を片付け、ソケットのファイルは消さずにエラーを返す
-- 相対パスでは、何かを引く前と、bind と realpath の両方の後でプロセスの cwd の `(st_dev, st_ino)` を比べ、違えば覚えられない時と同じに扱う
+- `ListenEx`・`ListenUnixgramEx` は bind した直後にソケットのファイルの realpath (カーネルと同じに引く。[DR-0018](DR-0018-route-orders-per-os.md)) と `(st_dev, st_ino)` を覚える。覚える場所はハブの SPEC「[remove](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#remove)」のとおりで、link-dir・thread-cwd・at は経路が E に指させた実ディレクトリ (`bindCall.real`、経路を組む時に引いた物) とファイル名を、経路が bind の結果と一緒に返し (`bound.file`)、元のパスを引き直さない。standard と link-file は bind の後に元のパスの realpath を引く (bind の前に引くと、間に途中の symlink が張り替わった時に bind したのと別のファイルを覚え、`Remove` がそれを消す)。元のパスの最後の要素が既にある symlink の時は辿った先のソケットのファイルを覚え、辿った先がソケットでなければ覚えられない時と同じに扱う。覚えられなければ listener を閉じ、作った E を片付け、ソケットのファイルは消さずにエラーを返す
+- 相対パスでは、何かを引く前と、bind と覚えるための realpath (経路が返した物を覚える時は bind と覚える物の確かめ) の両方の後でプロセスの cwd の `(st_dev, st_ino)` を比べ、違えば覚えられない時と同じに扱う
 - `Remove` はそのパスが今も同じファイルの時だけ消し、その後 `Cleanup` もする。listener は閉じない。既に無い・置き換わっていた時は nil。エラーを返すのは確かめられない時 (`lstat` が `ENOENT` / `ENOTDIR` 以外で失敗) と消すのに失敗した時で、その時も `Cleanup` まで行う
 - `Remove`・`Cleanup` は 1 回目だけ働く。`ForBind` と、その `SocketFile()` が返す物は同じ E の片付けを共有する
 - doc と README で `Remove` を listener を閉じる前に呼ぶよう勧め、例の `defer` もその順にする
@@ -102,4 +102,5 @@ package は `sockat` 1 つ (子 package を作らない)。
 - 関数・`Options`・返す物・`Spelling`・片付けの約束: ハブの SPEC と DR-0017
 - `Ex` の 3 値・`*SocketFile` の method・`Spelling` の struct・`DialUnixgram` 1 つ: 実装側の案、ハブの答え (2026-11-21、3 言語共通として SPEC に入った)
 - 元のパスの最後の要素が symlink の時に辿った先を覚えること: ハブの答え (2026-11-21)
+- link-dir・thread-cwd・at は経路が作った実ディレクトリを覚えること: ハブの SPEC「remove」(ハブ 307620d1、2026-11-22)
 - `Dial` を 1 つにすること: ハブの裁定 (ハブの DR-0003)

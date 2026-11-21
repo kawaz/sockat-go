@@ -3,6 +3,7 @@ package sockat
 import (
 	"errors"
 	"net"
+	"path/filepath"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -30,13 +31,20 @@ import (
 // ResolveForBind makes them (linkDirSpelling, linkFileSpelling).
 
 // bound is what a bind produced besides the listener: the route, what its
-// spelling is good for, the diagnostics' base, and the E kept for the
-// spelling (link-dir, link-file), which SocketFile cleans up.
+// spelling is good for, the diagnostics' base, the E kept for the spelling
+// (link-dir, link-file), which SocketFile cleans up, and the socket file the
+// route made.
 type bound struct {
 	route    route
 	spelling Spelling
 	base     string
 	link     *link
+	// file is the socket file as the route made it (link-dir, thread-cwd,
+	// at): the name in the real directory its E points to (bindCall.made),
+	// which ListenEx records rather than looking the path up again (SPEC
+	// "remove"). "" for standard and link-file, whose file ListenEx looks up
+	// after the bind.
+	file string
 }
 
 // bindCall is one bind, or one resolve, of a long path.
@@ -269,7 +277,19 @@ func (c *bindCall) linkDir() (endpoint, bound, error) {
 	if err != nil {
 		return nil, bound{}, err
 	}
-	return c.bindThrough(routeLinkDir, ln)
+	ep, bd, err := c.bindThrough(routeLinkDir, ln)
+	if err == nil {
+		bd.file = c.made()
+	}
+	return ep, bd, err
+}
+
+// made is the socket file a route through E pointing to the socket's
+// directory (link-dir, thread-cwd, at) makes: the name in the real directory
+// E points to, whatever a symlink on the path names by the time the bind is
+// done.
+func (c *bindCall) made() string {
+	return filepath.Join(c.real, c.name)
 }
 
 // linkFile binds by link-file's spelling through B's real path
@@ -366,7 +386,7 @@ func (c *bindCall) dangling() (endpoint, bound, error) {
 	if l, ok := ep.(*net.UnixListener); ok {
 		l.SetUnlinkOnClose(false)
 	}
-	return ep, bound{route: r, spelling: Spelling{Kind: Dangling}}, nil
+	return ep, bound{route: r, spelling: Spelling{Kind: Dangling}, file: c.made()}, nil
 }
 
 // listenEx is ListenEx on w.
@@ -382,10 +402,11 @@ func (w *world) listenEx(path string, opts Options) (*net.UnixListener, *Bound, 
 // (bindEx), reported, with the socket file recorded for Bound.File.
 func (w *world) bindReported(o op, path string, opts Options) (endpoint, *Bound, error) {
 	tr := &trace{}
-	// A relative path is resolved against the cwd twice, by the bind and by
-	// realFile after it, and the cwd is the process's: another goroutine may
-	// change it in between. It is read before anything looks the path up and
-	// compared after both (SPEC "remove").
+	// A relative path is resolved against the cwd more than once (by the
+	// route's lookup of the socket's directory, by the bind, by realFile
+	// after it), and the cwd is the process's: another goroutine may change
+	// it in between. It is read before anything looks the path up and
+	// compared after both the bind and the record (SPEC "remove").
 	rel := !abstractName(path) && !isAbs(path)
 	var cwd fileID
 	cwdOK := true
@@ -402,10 +423,18 @@ func (w *world) bindReported(o op, path string, opts Options) (endpoint, *Bound,
 	f := &SocketFile{clean: &cleaner{e: b.link}}
 	// An abstract name has no file to record or remove.
 	if !abstractName(path) {
-		// The real path is looked up after the bind, not before: a symlink on
-		// the way changed in between would have it name another file than
-		// the one bound (another socket there, which Remove would remove).
-		file, err := realFile(path)
+		// The file is where the route made it (link-dir, thread-cwd, at: in
+		// the real directory the route was built with), so a symlink on the
+		// way changed after the route was built does not have it name another
+		// file than the one bound (another socket there, which Remove would
+		// remove). Standard and link-file bind through the path itself: their
+		// file is the path's real path looked up after the bind, not before,
+		// for the same reason with a symlink changed before the bind.
+		file := b.file
+		var err error
+		if file == "" {
+			file, err = realFile(path)
+		}
 		var id fileID
 		ok := err == nil && cwdOK
 		if ok {
@@ -439,7 +468,8 @@ func (w *world) bindReported(o op, path string, opts Options) (endpoint, *Bound,
 // only so that tests (in a child process each) can change things right
 // before or after the bind, which no input of bindReported can bring about:
 // the cwd (TestListenExWhoseCwdChangesBeforeTheBindRecordsNothing), a symlink
-// on the way (TestListenExRecordsTheFileBoundThroughASymlinkRetargetedBeforeTheBind),
+// on the way (TestListenExRecordsTheFileBoundThroughASymlinkRetargetedBeforeTheBind,
+// TestListenExRecordsWhereTheRouteBoundThroughASymlinkRetargetedAfterTheRoute),
 // the file bound. Only tests assign it.
 var bindEx = (*world).bind
 

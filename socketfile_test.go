@@ -12,6 +12,7 @@ package sockat
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -477,6 +478,148 @@ func TestChildListenExThroughARetargetedSymlink(t *testing.T) {
 	}
 	if err := b.File.Remove(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// link-dir, thread-cwd and at make the socket in the real directory they
+// were built with (E points to its real path), so ListenEx records that
+// directory and the file name, not the original path looked up again (SPEC
+// "remove": where to remember). A directory on the way may be a symlink of
+// the caller's (<r>/link -> <r>/A) that someone retargets (to <r>/B) after
+// the route is built: the socket is then below A, while the path looked up
+// again after the bind names B/..., where there may be another server's
+// socket (which Remove would then remove, leaving the one bound) or nothing
+// (and ListenEx would fail to record what it bound). The seam bindEx
+// retargets the symlink right after the bind, the latest point before
+// ListenEx records the file. ListenEx must record the socket below A, and
+// Remove must remove it and leave B/... as it was (the other socket the same
+// file, or still nothing). Each route the system has (link-dir with procB and
+// with the real path of B, thread-cwd, at), forced in a world of its own
+// places (testWorld), for ListenEx and ListenUnixgramEx (which record the same
+// way), with and without another socket below B; in a child process each,
+// since the seam bindEx is the whole process's.
+func TestListenExRecordsWhereTheRouteBoundThroughASymlinkRetargetedAfterTheRoute(t *testing.T) {
+	t.Parallel()
+	type routeCase struct {
+		what  string
+		route route
+		mode  string // the child's world: SOCKAT_MODE
+		name  string
+	}
+	cases := []routeCase{{"link-dir", routeLinkDir, "link-dir", "s.sock"}}
+	if procHere() {
+		cases = append(cases, routeCase{"link-dir without procB", routeLinkDir, "link-dir-no-proc", "s.sock"})
+	}
+	switch {
+	case atSupported:
+		cases = append(cases, routeCase{"at", routeAt, "dangling", threadName})
+	case hasThreadCwd && threadCwdAvailable():
+		cases = append(cases, routeCase{"thread-cwd", routeThreadCwd, "dangling", threadName})
+	}
+	tail := strings.Repeat(strings.Repeat("d", 60)+"/", 3)
+	for _, c := range cases {
+		for _, kind := range []string{"stream", "datagram"} {
+			for _, other := range []bool{true, false} {
+				t.Run(fmt.Sprintf("%s %s, other socket below B %v", c.what, kind, other), func(t *testing.T) {
+					r := tmpDir(t)
+					for _, dir := range []string{"A", "B"} {
+						if err := os.MkdirAll(filepath.Join(r, dir, tail), 0o700); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if err := os.Symlink(r+"/A", r+"/link"); err != nil {
+						t.Fatal(err)
+					}
+					path := r + "/link/" + tail + c.name
+					if len(path) <= directMax {
+						t.Fatalf("%d bytes is not long", len(path))
+					}
+					if other {
+						staleSocket(t, filepath.Join(r, "B", tail, c.name))
+					}
+					runChild(t, "TestChildListenExThroughASymlinkRetargetedAfterTheRoute", r,
+						"SOCKAT_PATH="+path, "SOCKAT_LINK="+r+"/link", "SOCKAT_FROM="+r+"/A", "SOCKAT_TO="+r+"/B",
+						"SOCKAT_KIND="+kind, "SOCKAT_MODE="+c.mode, "SOCKAT_ROUTE="+string(c.route))
+				})
+			}
+		}
+	}
+}
+
+func TestChildListenExThroughASymlinkRetargetedAfterTheRoute(t *testing.T) {
+	asChild(t)
+	path, link := os.Getenv("SOCKAT_PATH"), os.Getenv("SOCKAT_LINK")
+	from, to := os.Getenv("SOCKAT_FROM"), os.Getenv("SOCKAT_TO")
+	var mod func(*config, testPlaces)
+	switch os.Getenv("SOCKAT_MODE") {
+	case "link-dir":
+	case "link-dir-no-proc":
+		mod = func(c *config, _ testPlaces) { c.proc = "/nonexistent/proc" }
+	case "dangling":
+		mod = func(c *config, _ testPlaces) { c.bindFollows = followsNo }
+	default:
+		t.Fatalf("SOCKAT_MODE %q", os.Getenv("SOCKAT_MODE"))
+	}
+	w, _ := testWorld(t, mod)
+	realFrom, err := filepath.EvalSymlinks(from)
+	if err != nil {
+		t.Fatal(err)
+	}
+	realTo, err := filepath.EvalSymlinks(to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rest := strings.TrimPrefix(path, link)
+	made, there := realFrom+rest, realTo+rest
+	var otherID fileID
+	other := exists(there)
+	if other {
+		otherID = lstatID(t, there)
+	}
+	bindEx = func(w *world, o op, p string, opts Options, tr *trace, use eUse) (endpoint, bound, error) {
+		ep, b, err := w.bind(o, p, opts, tr, use)
+		// The symlink on the way is retargeted after the route is built and
+		// has bound, before ListenEx records the file.
+		if err := os.Remove(link); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(to, link); err != nil {
+			t.Fatal(err)
+		}
+		return ep, b, err
+	}
+	t.Cleanup(func() { bindEx = (*world).bind })
+	o := opListen
+	if os.Getenv("SOCKAT_KIND") == "datagram" {
+		o = opListenGram
+	}
+	ep, b, err := w.bindReported(o, path, Options{})
+	if err == nil {
+		defer ep.Close()
+	}
+	if err != nil {
+		t.Fatalf("other socket below B %v: %v", other, err)
+	}
+	if b.Route != os.Getenv("SOCKAT_ROUTE") {
+		t.Fatalf("route %s, want %s", b.Route, os.Getenv("SOCKAT_ROUTE"))
+	}
+	if !isSocket(made) {
+		t.Fatalf("the route did not make the socket below A: %s", made)
+	}
+	if b.File.file != made {
+		t.Errorf("other socket below B %v: recorded %s, want where the route made the socket, %s", other, b.File.file, made)
+	}
+	if err := b.File.Remove(); err != nil {
+		t.Fatal(err)
+	}
+	if exists(made) {
+		t.Errorf("other socket below B %v: the socket the route made below A is still there after Remove", other)
+	}
+	switch {
+	case other && (!isSocket(there) || lstatID(t, there) != otherID):
+		t.Errorf("the other server's socket below B was removed or replaced")
+	case !other && exists(there):
+		t.Errorf("something was made below B: %s", there)
 	}
 }
 

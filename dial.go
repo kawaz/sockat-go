@@ -71,8 +71,8 @@ func (w *world) dial(path string, opts Options, tr *trace) (*net.UnixConn, route
 // connect connects to path (o: opDial, opDialGram), recording the routes
 // found unusable in tr (nil records nothing).
 //
-// An Options.Base of the wrong form (relative, or not ending with a name) is
-// EINVAL whatever the length of the path, and so is an empty path. A path the standard library accepts
+// An Options.Base of the wrong form (relative, not ending with a name, or
+// with a NUL) is EINVAL whatever the length of the path, and so is an empty path. A path the standard library accepts
 // goes to it as is (stdSpelling), before anything else is looked at (the
 // environment included). So does an abstract socket name (Linux, Android). A
 // NUL anywhere else, a leading one too where the kernel has no abstract

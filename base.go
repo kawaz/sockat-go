@@ -370,10 +370,11 @@ func (w *world) heldGiven(id fileID) *base {
 }
 
 // givenShape checks the form of Options.Base, whatever the length of the
-// socket path (SPEC "エラー"): absolute and ending with a name ("dir/", "..",
-// "/" do not). EINVAL, as an *os.PathError, otherwise.
+// socket path (SPEC "エラー"): absolute, ending with a name ("dir/", "..",
+// "/" do not) and without a NUL (the system calls would cut it short there).
+// EINVAL, as an *os.PathError, otherwise.
 func givenShape(b string) error {
-	if _, _, err := splitPath(b); err != nil || !isAbs(b) {
+	if _, _, err := splitPath(b); err != nil || !isAbs(b) || strings.IndexByte(b, 0) >= 0 {
 		return &os.PathError{Op: "base", Path: b, Err: syscall.EINVAL}
 	}
 	return nil

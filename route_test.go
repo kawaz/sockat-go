@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -285,6 +286,55 @@ func TestPathsWithoutAFileNameOrWithANULAreEINVALAndCreateNothing(t *testing.T) 
 	}
 	if exists(shortDir+"/a") || exists(dir+"/a") {
 		t.Fatal("the path cut at the NUL was created")
+	}
+}
+
+// An Options.Base with a NUL in it is of the wrong form (SPEC "エラー"), as a
+// relative one is: the base is a path the system calls would cut short at
+// the NUL, so it names some other directory than the one written. The form
+// of the base is checked whatever the length of the path and before the
+// abstract name is told apart, so a short path, a long one and (where the
+// kernel has them) an abstract name with such a base are all EINVAL with no
+// route and nothing skipped, for a bind, a connect and both resolves, and
+// nothing appears at the path, at the base or at the base cut at the NUL.
+// SweepBase of such a base is EINVAL as well.
+func TestAnOptionsBaseWithANULIsEINVALWhateverThePath(t *testing.T) {
+	t.Parallel()
+	w, ps := testWorld(t, nil)
+	for _, pl := range []string{ps.tmp, ps.runtime, ps.tmpdir} {
+		markUntouched(t, pl)
+	}
+	d := tmpDir(t)
+	markUntouched(t, d)
+	bad := d + "/b\x00c"
+	paths := []string{tmpDir(t) + "/s.sock", nest(t, tmpDir(t), 300, "s.sock")}
+	if abstractNames {
+		paths = append(paths, "@sgt-base-nul-"+strconv.Itoa(os.Getpid()))
+	}
+	for _, p := range paths {
+		opts := Options{Base: bad}
+		_, _, err := w.listenEx(p, opts)
+		if re := routeErr(t, err); !errors.Is(err, syscall.EINVAL) || re.Route != "" || len(re.Skipped) != 0 {
+			t.Fatalf("listen %q: %+v %v", p, re, err)
+		}
+		_, r, sks, err := dialTraced(t, w, p, opts)
+		if !errors.Is(err, syscall.EINVAL) || r != "" || len(sks) != 0 {
+			t.Fatalf("dial %q: route %q, skipped %v, %v", p, r, sks, err)
+		}
+		_, err = w.resolveForBind(p, opts)
+		wantResolveError(t, "resolve for bind "+p, p, err, syscall.EINVAL)
+		_, err = w.resolveForConnect(p, opts)
+		wantResolveError(t, "resolve for connect "+p, p, err, syscall.EINVAL)
+		if !abstractName(p) && exists(p) {
+			t.Fatalf("%q was made", p)
+		}
+	}
+	if err := SweepBase(bad); !errors.Is(err, syscall.EINVAL) {
+		t.Fatalf("SweepBase: %v, want EINVAL", err)
+	}
+	assertUntouched(t, d)
+	for _, pl := range []string{ps.tmp, ps.runtime, ps.tmpdir} {
+		assertUntouched(t, pl)
 	}
 }
 

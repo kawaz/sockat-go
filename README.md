@@ -133,7 +133,7 @@ The meaning of the fields and their errors are in the specification's "[`Options
 | `base` | `Base string` (`""` for none) |
 
 - The zero value `Options{}` is the default: `ListenEx` / `DialEx` then try the routes `Listen` / `Dial` do, in the same order
-- A `Base` of the wrong form (relative, or not ending with a name) is `EINVAL`, whatever the length of the path
+- A `Base` of the wrong form (relative, not ending with a name, or containing a NUL) is `EINVAL`, whatever the length of the path
 
 ### DGRAM
 

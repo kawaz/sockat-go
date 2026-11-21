@@ -14,8 +14,8 @@ type Options struct {
 	// Base is the path of B itself (for example /tmp/app-1000/sockat, a
 	// place the application manages), "" for none: B is made there instead of
 	// in /tmp, $XDG_RUNTIME_DIR or $TMPDIR, and a check that fails is an
-	// error rather than a fall back to those places. It must be absolute and
-	// end with a name (EINVAL otherwise, whatever the length of the path);
+	// error rather than a fall back to those places. It must be absolute,
+	// end with a name and hold no NUL (EINVAL otherwise, whatever the length of the path);
 	// for a long path, a missing parent is ENOENT, a parent or B that is not
 	// a directory ENOTDIR, and a B that is a symlink or that others could
 	// replace, or a directory on the way that others could replace, EPERM

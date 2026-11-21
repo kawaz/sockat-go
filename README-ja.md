@@ -133,7 +133,7 @@ log.Printf("dial %s: route %s after %v", path, rep.Route, rep.Skipped)
 | `base` | `Base string` (`""` は指定しない) |
 
 - ゼロ値の `Options{}` が既定で、`ListenEx` / `DialEx` は `Listen` / `Dial` と同じ経路を同じ順に試す
-- `Base` の形の誤り (相対パス、最後が名前でない) は、パスの長さによらず `EINVAL`
+- `Base` の形の誤り (相対パス、最後が名前でない、NUL を含む) は、パスの長さによらず `EINVAL`
 
 ### DGRAM
 

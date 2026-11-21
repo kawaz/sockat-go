@@ -159,8 +159,8 @@ func (w *world) listen(path string, tr *trace) (*net.UnixListener, bound, error)
 // does an abstract socket name (Linux, Android). A NUL anywhere else, a
 // leading one too where the kernel has no abstract names, is EINVAL, whatever
 // the length: the standard library would cut the path short there and bind
-// some other path; so is an Options.Base of the wrong form (relative, or not
-// ending with a name). A longer path takes the bind order (bindLong). The error
+// some other path; so is an Options.Base of the wrong form (relative, not
+// ending with a name, or with a NUL). A longer path takes the bind order (bindLong). The error
 // is a *net.OpError for path; the route that bound and failed, if any, is in
 // the bound returned.
 func (w *world) bind(o op, path string, opts Options, tr *trace, e eUse) (endpoint, bound, error) {

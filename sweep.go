@@ -30,8 +30,8 @@ func Sweep() error {
 // the application that manages it sweeps (the directory is for this library
 // alone, as Sweep's are). Nothing happens when base, or the directory it is
 // in, does not exist. The error is an *os.PathError (several
-// joined with errors.Join): EINVAL for a base that is not absolute or does
-// not end with a name, ENOTDIR for one that is not a directory, EPERM for a
+// joined with errors.Join): EINVAL for a base that is not absolute, does
+// not end with a name or holds a NUL, ENOTDIR for one that is not a directory, EPERM for a
 // symlink, for one not of this user or writable by others, or for a
 // directory on the way others can write to; and otherwise as Sweep's.
 func SweepBase(base string) error {

@@ -1,9 +1,9 @@
 ---
 title: v0.4.3 — 外部レビューの残り (bind の前の realpath、CLI の EINVAL、macOS oldstable の主スレッド)
 status: resolved
-close_reason: implemented
 category: task
 created: 2026-11-22
+close_reason: implemented
 ---
 
 # v0.4.3 — 外部レビューの残り (bind の前の realpath、CLI の EINVAL、macOS oldstable の主スレッド)

@@ -56,7 +56,8 @@ func Dial(path string) (*net.UnixConn, error) {
 // When the file cannot be recorded (a symlink there leads to no socket, for
 // example), the listener is closed, the file is left, and an error is
 // returned; so too for a relative path when the cwd changes (another
-// goroutine's os.Chdir) between the resolving of its real path and the bind.
+// goroutine's os.Chdir) between the start of the call and the resolving of
+// its real path after the bind.
 //
 // The listener does not remove the socket file on Close, short paths
 // included: the removal is Bound.File's alone. Neither Remove nor Cleanup is

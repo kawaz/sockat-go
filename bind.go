@@ -382,21 +382,15 @@ func (w *world) listenEx(path string, opts Options) (*net.UnixListener, *Bound, 
 // (bindEx), reported, with the socket file recorded for Bound.File.
 func (w *world) bindReported(o op, path string, opts Options) (endpoint, *Bound, error) {
 	tr := &trace{}
-	// An abstract name has no file to record or remove.
-	file, ferr := "", error(nil)
-	// A relative path is resolved against the cwd twice, by realFile and by
-	// the bind, and the cwd is the process's: another goroutine may change it
-	// in between. It is read before the first and compared after the bind.
+	// A relative path is resolved against the cwd twice, by the bind and by
+	// realFile after it, and the cwd is the process's: another goroutine may
+	// change it in between. It is read before anything looks the path up and
+	// compared after both (SPEC "remove").
 	rel := !abstractName(path) && !isAbs(path)
 	var cwd fileID
 	cwdOK := true
-	if !abstractName(path) {
-		if rel {
-			cwd, cwdOK = statID(".")
-		}
-		// The real path is resolved before the bind, as the bind resolves
-		// it; the file's identity is read the moment the bind returns.
-		file, ferr = realFile(path)
+	if rel {
+		cwd, cwdOK = statID(".")
 	}
 	ep, b, err := bindEx(w, o, path, opts, tr, eOwn)
 	if err != nil {
@@ -406,15 +400,19 @@ func (w *world) bindReported(o op, path string, opts Options) (endpoint, *Bound,
 		l.SetUnlinkOnClose(false)
 	}
 	f := &SocketFile{clean: &cleaner{e: b.link}}
+	// An abstract name has no file to record or remove.
 	if !abstractName(path) {
+		// The real path is looked up after the bind, not before: a symlink on
+		// the way changed in between would have it name another file than
+		// the one bound (another socket there, which Remove would remove).
+		file, err := realFile(path)
 		var id fileID
-		ok := ferr == nil && cwdOK
+		ok := err == nil && cwdOK
 		if ok {
 			// Where bind(2) follows a symlink in the last component, the
 			// socket is where it leads, and the symlink is the caller's: what
 			// is recorded is the socket file reached, and a path that reaches
 			// no socket cannot be recorded (SPEC "remove").
-			var err error
 			file, id, err = socketAt(file)
 			ok = err == nil
 		}
@@ -438,9 +436,11 @@ func (w *world) bindReported(o op, path string, opts Options) (endpoint, *Bound,
 // bindEx is the bind of bindReported.
 //
 // Design rationale: a variable rather than a direct call to (*world).bind
-// only so that a test (TestListenExWhoseCwdChangesBeforeTheBindRecordsNothing,
-// in a child process) can change the cwd between realFile and the bind, which
-// no input of bindReported can bring about. Nothing else assigns it.
+// only so that tests (in a child process each) can change things right
+// before or after the bind, which no input of bindReported can bring about:
+// the cwd (TestListenExWhoseCwdChangesBeforeTheBindRecordsNothing), a symlink
+// on the way (TestListenExRecordsTheFileBoundThroughASymlinkRetargetedBeforeTheBind),
+// the file bound. Only tests assign it.
 var bindEx = (*world).bind
 
 // absTarget is the caller's spelling made absolute against the cwd, for a

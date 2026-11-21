@@ -375,6 +375,111 @@ func TestChildListenExThatCannotRecordTheBoundFile(t *testing.T) {
 	l2.Close()
 }
 
+// ListenEx records the socket file the bind made (SPEC "remove": recorded
+// right after the bind), so the real path it records must be looked up after
+// the bind, not before. A directory on the way may be a symlink of the
+// caller's (<r>/link -> <r>/A) that someone retargets (to <r>/B) between a
+// lookup made before the bind and the bind: the bind then makes the socket
+// below B, while a real path looked up before names A/s.sock, here another
+// server's socket. Recording that one (a socket, so it passes the check)
+// would make Remove remove the other server's socket and leave the one bound.
+// The seam bindEx retargets the symlink right before the bind. ListenEx must
+// record the socket below B: Remove removes it, and the other server's socket
+// below A stays, the same file as before. ListenEx and ListenUnixgramEx
+// (which record the same way), each with a short path (the net package) and
+// a long one (the routes through D), in a child process each, since the seam
+// bindEx is the whole process's.
+func TestListenExRecordsTheFileBoundThroughASymlinkRetargetedBeforeTheBind(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat(strings.Repeat("d", 60)+"/", 3) + "s.sock"
+	for _, kind := range []string{"stream", "datagram"} {
+		for _, rel := range []string{"s.sock", long} {
+			r := tmpDir(t)
+			for _, dir := range []string{"A", "B"} {
+				if err := os.MkdirAll(filepath.Dir(filepath.Join(r, dir, rel)), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Symlink(r+"/A", r+"/link"); err != nil {
+				t.Fatal(err)
+			}
+			path := r + "/link/" + rel
+			if rel == long && len(path) <= directMax {
+				t.Fatalf("%d bytes is not long", len(path))
+			}
+			other := filepath.Join(r, "A", rel)
+			staleSocket(t, other)
+			was := lstatID(t, other)
+			runChild(t, "TestChildListenExThroughARetargetedSymlink", r, "SOCKAT_PATH="+path, "SOCKAT_LINK="+r+"/link", "SOCKAT_TO="+r+"/B", "SOCKAT_KIND="+kind)
+			if !isSocket(other) || lstatID(t, other) != was {
+				t.Fatalf("%s, %d bytes: the other server's socket below A was removed or replaced", kind, len(path))
+			}
+			if exists(filepath.Join(r, "B", rel)) {
+				t.Fatalf("%s, %d bytes: the socket bound below B is still there after Remove", kind, len(path))
+			}
+		}
+	}
+}
+
+// lstatID is the (st_dev, st_ino) of p itself (a symlink not followed).
+func lstatID(t *testing.T, p string) fileID {
+	t.Helper()
+	var st syscall.Stat_t
+	if err := syscall.Lstat(p, &st); err != nil {
+		t.Fatal(err)
+	}
+	return fileID{uint64(st.Dev), uint64(st.Ino)}
+}
+
+func TestChildListenExThroughARetargetedSymlink(t *testing.T) {
+	asChild(t)
+	path, link, to := os.Getenv("SOCKAT_PATH"), os.Getenv("SOCKAT_LINK"), os.Getenv("SOCKAT_TO")
+	bindEx = func(w *world, o op, p string, opts Options, tr *trace, use eUse) (endpoint, bound, error) {
+		// The symlink on the way is retargeted between ListenEx's start and
+		// the bind.
+		if err := os.Remove(link); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(to, link); err != nil {
+			t.Fatal(err)
+		}
+		return w.bind(o, p, opts, tr, use)
+	}
+	t.Cleanup(func() { bindEx = (*world).bind })
+	var b *Bound
+	var err error
+	if os.Getenv("SOCKAT_KIND") == "stream" {
+		var l *net.UnixListener
+		l, b, err = ListenEx(path, Options{})
+		if err == nil {
+			defer l.Close()
+		}
+	} else {
+		var c *net.UnixConn
+		c, b, err = ListenUnixgramEx(path, Options{})
+		if err == nil {
+			defer c.Close()
+		}
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	realTo, err := filepath.EvalSymlinks(to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound := realTo + strings.TrimPrefix(path, link)
+	if !isSocket(bound) {
+		t.Fatalf("the bind did not make the socket below the new target: %s", bound)
+	}
+	if b.File.file != bound {
+		t.Fatalf("recorded %s, want the socket bound, %s", b.File.file, bound)
+	}
+	if err := b.File.Remove(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // A path ListenEx refuses comes back with its error and no listener or
 // Bound; an abstract name (where the kernel has abstract names: Linux,
 // Android) is Original through standard and has no file, so its Remove does

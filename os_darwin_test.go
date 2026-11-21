@@ -176,6 +176,35 @@ func unreadable(t *testing.T, dir string) {
 	}
 }
 
+// On Apple's systems the thread cwd is unusable whenever pthread_fchdir_np
+// fails (SPEC-routes "thread-cwd"), not only when the kernel lacks it
+// (ENOSYS): the thread's cwd is then unchanged, and the next route may still
+// reach the socket. Here __pthread_fchdir fails with EACCES (a directory
+// opened for reading, without search permission): inThreadCwd is unusable for
+// a bind and for a connect, and nothing appears in the directory.
+func TestAFailingPthreadFchdirMakesTheThreadCwdUnusable(t *testing.T) {
+	t.Parallel()
+	d := mkdirMode(t, tmpDir(t)+"/noexec", 0o700)
+	fd, err := unix.Open(d, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { unix.Close(fd) })
+	if err := os.Chmod(d, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(d, 0o700) })
+	for _, o := range []op{opListen, opDial} {
+		if _, err := inThreadCwd(o, fd, "s.sock"); !errors.Is(err, errUnusable) {
+			t.Fatalf("%s: %v, want errUnusable", o.sysName(), err)
+		}
+	}
+	os.Chmod(d, 0o700)
+	if exists(d + "/s.sock") {
+		t.Fatal("a socket was made")
+	}
+}
+
 // The socket's directory is opened O_SEARCH, which needs only search
 // permission, as a bind / connect by the path itself does: in a directory of
 // mode 0300 a bind takes link-dir and a dial thread-cwd-direct, which uses

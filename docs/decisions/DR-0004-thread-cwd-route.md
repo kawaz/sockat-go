@@ -14,7 +14,7 @@ SPEC の thread-cwd (bind) と thread-cwd-direct (connect) は、使い捨ての
   - macOS: `__pthread_fchdir` (syscall 349、libSystem の `pthread_fchdir_np` の中身)
 - goroutine は Unlock せずに終える。runtime はそのスレッドを捨て、他の goroutine に渡さない。新しいスレッドは locked なスレッドからは作られないので、cwd は他のスレッドに移らない
 - 呼び出し元は goroutine の結果を待ってから E を片付ける (thread-cwd の E は成功でも失敗でもすぐ消す)
-- 使えないとみなす時: Linux で seccomp の filter が掛かっている・`prctl` か `unshare` が失敗した、macOS で `ENOSYS`。その時は次の経路へ進む (bind の thread-cwd は列の最後なので `ENAMETOOLONG`、connect の thread-cwd-direct は link-file へ)。`unshare` の後の `fchdir` の失敗は本当の失敗として返す
+- 使えないとみなす時: Linux で seccomp の filter が掛かっている・`prctl` か `unshare` が失敗した、macOS で `__pthread_fchdir` が失敗した (`ENOSYS` に限らず `EACCES`・サンドボックスの `EPERM` 等も。スレッドの cwd は変わらない)。その時は次の経路へ進む (bind の thread-cwd は列の最後なので `ENAMETOOLONG`、connect の thread-cwd-direct は link-file へ)。`unshare` の後の `fchdir` の失敗は本当の失敗として返す
 - NetBSD / OpenBSD / illumos にはスレッド単位の cwd が無いので、この経路は無い (列にも並ばない)
 
 実測 (macOS 26.5、Linux の docker arm64 で root と uid 1000、go 1.27):

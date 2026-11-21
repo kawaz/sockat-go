@@ -74,20 +74,19 @@ func searchOrReadOnly(dir string, fd int, err error) (*os.File, error) {
 // directory dirfd: __pthread_fchdir(2), the system call behind libSystem's
 // pthread_fchdir_np(3), gives the thread a working directory of its own.
 //
-// errUnusable when the kernel does not have it (ENOSYS).
+// errUnusable whenever it fails, the kernel not having it (ENOSYS) or
+// refusing it (EACCES, EPERM in a sandbox, ...): the thread cwd cannot be
+// used then (SPEC-routes "thread-cwd"), and the thread's cwd is left as it
+// was, so the next route is tried.
 func threadChdir(dirfd int) error {
 	// Design rationale: there is no wrapper for pthread_fchdir_np in the
 	// standard library or golang.org/x/sys, and calling libSystem directly
 	// needs cgo. The system call number is stable (XNU's syscalls.master) and
 	// syscall.Syscall goes through libSystem's syscall(2).
-	_, _, e := syscall.Syscall(unix.SYS___PTHREAD_FCHDIR, uintptr(dirfd), 0, 0)
-	switch e {
-	case 0:
-		return nil
-	case syscall.ENOSYS:
-		return errUnusable
+	if _, _, e := syscall.Syscall(unix.SYS___PTHREAD_FCHDIR, uintptr(dirfd), 0, 0); e != 0 {
+		return unusable("pthread_fchdir: " + e.Error())
 	}
-	return syscallError("fchdir", e)
+	return nil
 }
 
 // hasProc: no /proc routes here.

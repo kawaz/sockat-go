@@ -206,7 +206,7 @@ c, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: f.Path, Net: "unix"}) //
 |---|---|
 | `Spelling` を見ずに `os.Remove(l.Addr().String())` / `os.Stat(l.Addr().String())` | 元のパスを持っておいて使う。`b.File.Remove()` (`ExampleListenEx`) |
 | `Cleanup` の後やプロセスが終わった後に、古い綴り (`ForBind.Path`、`ForConnect.Path`、`l.Addr()`) を使う | 綴りは `Spelling.Until` の間だけ使う |
-| 相対パスで Listen し、`os.Chdir` の後にその相対パスで `os.Remove` する | Listen の前に `filepath.Abs` で絶対パスにする (`ExampleListenEx_absolutePath`)。`b.File.Remove()` |
+| 相対パスで Listen し、`os.Chdir` の後にその相対パスで `os.Remove` する | Listen の前に `os.Getwd()` を前に付けて絶対パスにする (`filepath.Abs` は字句で `..` を畳むので使わない。`ExampleListenEx_absolutePath`)。`b.File.Remove()` |
 | `l.Close()` だけでソケットのファイルが消えると当てにする | `b.File.Remove()` か、元のパスで `os.Remove(path)` |
 | `b.File.Remove()` で listener も閉じると当てにする | `defer l.Close()` を自分で書く |
 | `l.Close()` の後に `b.File.Remove()` を呼ぶ | listener を閉じる前に呼ぶ (`defer` は `l.Close` を先に書く) |

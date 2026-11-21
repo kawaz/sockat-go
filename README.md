@@ -206,7 +206,7 @@ Why not is in the specification's "[Patterns not to use](https://github.com/kawa
 |---|---|
 | `os.Remove(l.Addr().String())` / `os.Stat(l.Addr().String())` without looking at `Spelling` | Keep the path you passed and use it. `b.File.Remove()` (`ExampleListenEx`) |
 | Using an old spelling (`ForBind.Path`, `ForConnect.Path`, `l.Addr()`) after its `Cleanup`, or after the process ends | Use a spelling only for as long as `Spelling.Until` says |
-| Listening on a relative path, and removing it by that relative path after an `os.Chdir` | Make the path absolute with `filepath.Abs` before the listen (`ExampleListenEx_absolutePath`). `b.File.Remove()` |
+| Listening on a relative path, and removing it by that relative path after an `os.Chdir` | Make the path absolute before the listen by putting `os.Getwd()` in front (not `filepath.Abs`, which folds `..` lexically; `ExampleListenEx_absolutePath`). `b.File.Remove()` |
 | Counting on `l.Close()` alone to remove the socket file | `b.File.Remove()`, or `os.Remove(path)` with the path you passed |
 | Counting on `b.File.Remove()` to close the listener too | Write `defer l.Close()` yourself |
 | Calling `b.File.Remove()` after `l.Close()` | Call it before closing the listener (write the `defer` of `l.Close` first) |

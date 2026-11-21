@@ -52,15 +52,22 @@ func ExampleListenEx() {
 // A relative path is made absolute before the bind: the spelling of a
 // relative path names another place once the cwd changes (CwdRelative), and
 // so does the relative path itself. Remove, which recorded the file at the
-// bind, and the absolute path stay right.
+// bind, and the absolute path stay right. The cwd goes in front as it is,
+// not through filepath.Abs: that cleans the path ("a/sym/.." becomes "a"),
+// while the kernel follows sym before "..", so a cleaned path can name
+// another directory.
 func ExampleListenEx_absolutePath() {
 	tmp, dir := longDir()
 	defer os.RemoveAll(tmp)
 	path := filepath.Join(dir, "server.sock") // may be relative in your code
 
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		log.Fatal(err)
+	abs := path
+	if !filepath.IsAbs(path) {
+		wd, err := os.Getwd()
+		if err != nil {
+			log.Fatal(err)
+		}
+		abs = wd + "/" + path
 	}
 	l, b, err := sockat.ListenEx(abs, sockat.Options{})
 	if err != nil {

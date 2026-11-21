@@ -2,6 +2,7 @@ package sockat
 
 import (
 	"path/filepath"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
@@ -21,13 +22,26 @@ func statID(path string) (fileID, bool) {
 // point to: the kernel then reaches the socket's directory as dir names it
 // now.
 //
-// dir is made absolute first and then resolved component by component, so
-// every component is looked up: on macOS getcwd(3) still reports the path of
-// a cwd that was removed, which resolving "." alone would take as real.
+// dir is resolved as the kernel resolves it (SPEC "長いパス": the path is
+// never folded lexically). A relative dir is put after the cwd as
+// getcwd(3) reports it, with no cleaning, and the whole is resolved
+// component by component, each ".." taken from the directory reached so far
+// (so "a/sym/.." is the parent of where sym leads, not "a"). Every component
+// is looked up: on macOS getcwd(3) still reports the path of a cwd that was
+// removed, which resolving "." alone would take as real.
+//
+// Design rationale: not filepath.Abs, which cleans the path (folding
+// "sym/.." to nothing) and starts from $PWD where $PWD names the cwd, so
+// that "../x" from a cwd entered through a symlink is taken from the
+// symlink's parent rather than the cwd's. filepath.EvalSymlinks itself does
+// not clean its input and takes each ".." from the real directory reached.
 func realDir(dir string) (string, error) {
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		return "", err
+	if !isAbs(dir) {
+		cwd, err := syscall.Getwd()
+		if err != nil {
+			return "", err
+		}
+		dir = cwd + "/" + dir
 	}
-	return filepath.EvalSymlinks(abs)
+	return filepath.EvalSymlinks(dir)
 }

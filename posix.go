@@ -4,7 +4,6 @@ package sockat
 
 import (
 	"os"
-	"path/filepath"
 	"syscall"
 )
 
@@ -102,11 +101,9 @@ func newRelative(path, dir string) *relative {
 		}
 	}
 	if best == "" || len(best) > directMax {
-		if realDir, err := filepath.EvalSymlinks(dir); err == nil {
-			if realDir, err = filepath.Abs(realDir); err == nil {
-				if rel, ok := relativeTo(filepath.Join(realDir, name), cwd); ok {
-					keep(rel)
-				}
+		if real, err := realDir(dir); err == nil {
+			if rel, ok := relativeTo(joinUnder(real, name), cwd); ok {
+				keep(rel)
 			}
 		}
 	}

@@ -8,6 +8,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -16,39 +17,51 @@ import (
 func init() {
 	mainChildren["thread-cwd-from-the-main-goroutine"] = threadCwdFromTheMainGoroutine
 	mainChildren["thread-cwd-unusable-keeps-the-thread"] = threadCwdUnusableKeepsTheThread
+	// LockOSThread in an init keeps the main goroutine on the main thread
+	// when main starts (runtime.LockOSThread): that main child starts there
+	// for certain, whatever system calls run before it.
+	if os.Getenv(mainChildEnv) == "thread-cwd-from-the-main-goroutine" {
+		runtime.LockOSThread()
+	}
 }
 
 // The thread cwd runs on a goroutine of its own that exits locked to its
 // thread, so that the runtime terminates the thread whose cwd changed. The
 // runtime never terminates its main thread: it parks it for good instead,
 // cwd and all. A goroutine started from the main goroutine, which then
-// waits, runs on the main thread (measured on Linux whatever GOMAXPROCS),
-// so the first thread cwd of a program called from main would leave the
-// main thread parked in the directory it moved to: on Linux
-// /proc/<pid>/cwd (the cwd of the thread group's leader, the main thread)
-// would show that directory for the rest of the process, and the directory
-// would stay in use (a mount on it could not be unmounted); on any system
-// the main thread would be lost to the program.
+// waits, runs on the main thread, so the first thread cwd of a program called
+// from main would leave the main thread parked in the directory it moved to:
+// on Linux /proc/<pid>/cwd (the cwd of the thread group's leader, the main
+// thread) would show that directory for the rest of the process, and the
+// directory would stay in use (a mount on it could not be unmounted); on any
+// system the main thread would be lost to the program.
 //
-// So, in a child process whose main goroutine (on the main thread) binds
-// three times through the thread cwd: a goroutine started from it runs on
-// the main thread before (the premise: the case is the one described), the
-// sockets appear in the directory, and afterwards a goroutine started from
-// it still runs on the main thread (not parked) and /proc/<pid>/cwd, where
-// there is one, is what it was.
+// So, in a child process, the main goroutine, held on the main thread from
+// init, lets go of it only for each of three binds through the thread cwd
+// and takes it again right after. A goroutine started while it is let go
+// runs on the main thread (the premise: the case is the one described), the
+// sockets appear in the directory, after each bind the main goroutine is back
+// on the main thread (which a parked main thread could not be), and
+// /proc/<pid>/cwd, where there is one, is what it was. With one P
+// (GOMAXPROCS=1) no other thread can take the main goroutine, or the
+// goroutine started from it, from the main thread's P: whether it is back is
+// then up to the main thread alone. With more Ps another thread takes the main
+// goroutine now and then (seen under load), and its being elsewhere would not
+// tell whether the main thread was lost.
 func TestThreadCwdFromTheMainGoroutineLeavesTheMainThreadAsItWas(t *testing.T) {
 	t.Parallel()
 	if !threadCwdAvailable() {
 		t.Skip("no thread cwd here (a seccomp filter); just test-linux's unconfined pass runs this")
 	}
-	out := runMainChild(t, "thread-cwd-from-the-main-goroutine")
-	if got, want := readChildReport(t, out), "before=true after=true cwd-kept=true"; got != want {
+	out := runMainChild(t, "thread-cwd-from-the-main-goroutine", "GOMAXPROCS=1")
+	if got, want := readChildReport(t, out), "start=true before=true back=true,true,true cwd-kept=true"; got != want {
 		t.Fatalf("got %q, want %q\n%s", got, want, out)
 	}
 }
 
 func threadCwdFromTheMainGoroutine() {
-	before := spawnedOnMainThread()
+	// Locked to the main thread since init.
+	start := onMainThread()
 	d, err := os.MkdirTemp("/tmp", "sgt-")
 	if err != nil {
 		mainChildFail("%v", err)
@@ -60,9 +73,16 @@ func threadCwdFromTheMainGoroutine() {
 	}
 	defer unix.Close(fd)
 	cwd := processCwd()
+	runtime.UnlockOSThread()
+	before := spawnedOnMainThread()
+	runtime.LockOSThread()
+	var back []string
 	for i := range 3 {
 		name := fmt.Sprintf("s%d.sock", i)
+		runtime.UnlockOSThread()
 		ep, err := inThreadCwd(opListen, fd, name)
+		runtime.LockOSThread()
+		back = append(back, strconv.FormatBool(onMainThread()))
 		if err != nil {
 			mainChildFail("bind %s: %v", name, err)
 		}
@@ -71,8 +91,7 @@ func threadCwdFromTheMainGoroutine() {
 		}
 		ep.Close()
 	}
-	after := spawnedOnMainThread()
-	childReport("before=%t after=%t cwd-kept=%t", before, after, processCwd() == cwd)
+	childReport("start=%t before=%t back=%s cwd-kept=%t", start, before, strings.Join(back, ","), processCwd() == cwd)
 }
 
 // The thread of the thread cwd is thrown away only once its cwd may have

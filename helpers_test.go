@@ -564,7 +564,7 @@ func listenPublic(t *testing.T, p string) *net.UnixListener {
 // test on an error; the listener is closed at the end of the test.
 func listenRoute(t *testing.T, p string) (*net.UnixListener, route) {
 	t.Helper()
-	l, b, err := defaultWorld.listen(p, Options{}, nil)
+	l, b, err := defaultWorld.listen(p, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

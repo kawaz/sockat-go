@@ -48,6 +48,8 @@ type bindCall struct {
 	real  string // the socket's directory as a real path
 	dirID fileID // the socket's directory's (st_dev, st_ino)
 	opts  Options
+	// e is how link-dir's E is had (a bind's; a resolve's is its own).
+	e eUse
 	// noD is the B in which D could not be made during this call: the later
 	// routes of the call do not try to make it there again (SPEC-routes
 	// "実体の置き場"), and do not look for another B either.
@@ -127,12 +129,12 @@ func (w *world) bindOrder() []bindStep {
 // bindLong binds (and listens, for opListen) at path, longer than
 // directMax, by the first route of the bind order that can be used
 // (newBindCall first). ENAMETOOLONG when no route can be used.
-func (w *world) bindLong(o op, path string, opts Options, tr *trace) (endpoint, bound, error) {
+func (w *world) bindLong(o op, path string, opts Options, tr *trace, e eUse) (endpoint, bound, error) {
 	c, err := w.newBindCall(path, opts)
 	if err != nil {
 		return nil, bound{}, err
 	}
-	c.o = o
+	c.o, c.e = o, e
 	tr.add(routeStandard, "path too long")
 	for _, s := range w.bindOrder() {
 		ep, b, err := s.try(c)
@@ -187,13 +189,13 @@ type linked struct {
 }
 
 // linkDirSpelling makes link-dir's spelling <B>/<D>/<E>/<name>, E a symlink
-// to the socket's directory (its real path), B spelt by procB (Linux with
-// /proc, not for UsableCrossUID) or its real path (not for a B in the
-// socket's directory, whose real path is longer than the path), the first
-// that fits.
+// to the socket's directory (its real path), had as c.e says, B spelt by
+// procB (Linux with /proc, not for UsableCrossUID) or its real path (not for
+// a B in the socket's directory, whose real path is longer than the path),
+// the first that fits.
 func (c *bindCall) linkDirSpelling() (linked, error) {
 	useProc := hasProc && !c.opts.UsableCrossUID
-	return c.throughB(useProc, c.real, "/"+c.name, true, func(bspell, e string) int { return linkDirLen(bspell, e, c.name) })
+	return c.throughB(useProc, c.real, "/"+c.name, true, c.e, func(bspell, e string) int { return linkDirLen(bspell, e, c.name) })
 }
 
 // linkFileSpelling makes link-file's spelling <B>/<D>/<E>, E a symlink to
@@ -201,17 +203,18 @@ func (c *bindCall) linkDirSpelling() (linked, error) {
 // resolve: a bind never follows a symlink where /proc is) or its real path,
 // the first that fits.
 func (c *bindCall) linkFileSpelling(target string, useProc bool) (linked, error) {
-	return c.throughB(useProc, target, "", false, linkFileLen)
+	return c.throughB(useProc, target, "", false, eOwn, linkFileLen)
 }
 
 // throughB makes the spelling <B>/<D>/<E><rest> of length size(<B>, <E>), E
-// a resolve E in the process's D of the call's B pointing to target. B is
+// a resolve E in the process's D of the call's B pointing to target (the one
+// shared by the default binds, for eShared; base.sharedE). B is
 // spelt by procB when useProc and it fits, otherwise by its real path when
 // B is not in the socket's directory and it fits; the route is unusable
 // when neither does (estimated before B is made, with the shortest procB and
 // E). removable is what unlinking the spelling does (link-dir's E is
 // followed, link-file's is not).
-func (c *bindCall) throughB(useProc bool, target, rest string, removable bool, size func(bspell, e string) int) (linked, error) {
+func (c *bindCall) throughB(useProc bool, target, rest string, removable bool, use eUse, size func(bspell, e string) int) (linked, error) {
 	w := c.w
 	fits := func(kind, breal string) bool {
 		if p := w.procBShortest(); useProc && p != "" && size(p, "0") <= directMax {
@@ -240,21 +243,27 @@ func (c *bindCall) throughB(useProc bool, target, rest string, removable bool, s
 	if err != nil {
 		return linked{}, err
 	}
-	l, err := b.resolveE(d, target)
+	var l *link
+	if use == eShared {
+		l, err = b.sharedE(d, target)
+	} else {
+		l, err = b.resolveE(d, target)
+	}
 	if err != nil {
 		return linked{}, unusable("E not made")
 	}
 	spelling := spell + "/" + d.name + "/" + l.name + rest
 	if len(spelling) > directMax {
 		// Another call took the E name estimated, and a longer one came.
-		l.remove()
+		l.release()
 		return linked{}, unusable("spelling too long")
 	}
 	return linked{spelling: spelling, e: l, sp: linkedSpelling(b, viaProc, removable), base: baseValue(b, viaProc)}, nil
 }
 
-// linkDir binds by link-dir's spelling (linkDirSpelling). E stays for
-// SocketFile's Cleanup; a failure of the bind removes it.
+// linkDir binds by link-dir's spelling (linkDirSpelling). E stays, for
+// SocketFile's Cleanup or (shared) for the later default binds; a failure
+// of the bind removes the call's own E (link.release).
 func (c *bindCall) linkDir() (endpoint, bound, error) {
 	ln, err := c.linkDirSpelling()
 	if err != nil {
@@ -289,14 +298,12 @@ func (c *bindCall) linkFile() (endpoint, bound, error) {
 }
 
 // bindThrough binds by ln's spelling for the route r and returns what the
-// bind is, with ln's E kept. A failure of the bind removes E before it is
-// returned.
+// bind is, with ln's E kept. A failure of the bind releases E (removes the
+// call's own) before it is returned.
 func (c *bindCall) bindThrough(r route, ln linked) (endpoint, bound, error) {
 	ep, err := viaStd(c.o, ln.spelling, false)
 	if err != nil {
-		// A failure to remove E is not reported: the bind's error is the
-		// call's, and stays as it is (SPEC-routes "D と E").
-		ln.e.remove()
+		ln.e.release()
 		return nil, bound{route: r}, err
 	}
 	return ep, bound{route: r, spelling: ln.sp, base: ln.base, link: ln.e}, nil
@@ -391,7 +398,7 @@ func (w *world) bindReported(o op, path string, opts Options) (endpoint, *Bound,
 		// it; the file's identity is read the moment the bind returns.
 		file, ferr = realFile(path)
 	}
-	ep, b, err := bindEx(w, o, path, opts, tr)
+	ep, b, err := bindEx(w, o, path, opts, tr, eOwn)
 	if err != nil {
 		return nil, nil, &RouteError{Route: string(b.route), Skipped: tr.skips(), Err: err}
 	}

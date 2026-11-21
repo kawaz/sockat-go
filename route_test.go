@@ -524,7 +524,7 @@ func TestADirectoryPartThatIsAFileIsENOTDIR(t *testing.T) {
 	if _, _, err := w.dial(p, Options{}, nil); !errors.Is(err, syscall.ENOTDIR) {
 		t.Fatalf("dial: %v, want ENOTDIR", err)
 	}
-	if _, _, err := w.listen(p, Options{}, nil); !errors.Is(err, syscall.ENOTDIR) {
+	if _, _, err := w.listen(p, nil); !errors.Is(err, syscall.ENOTDIR) {
 		t.Fatalf("listen: %v, want ENOTDIR", err)
 	}
 	assertUntouched(t, ps.tmp)
@@ -575,7 +575,7 @@ func TestChildRealPathOfARemovedCwd(t *testing.T) {
 	if !errors.Is(err, want) || errors.Is(err, syscall.ENAMETOOLONG) {
 		t.Fatalf("dial: %v, want %v", err, want)
 	}
-	_, _, err = w.listen(p, Options{}, nil)
+	_, _, err = w.listen(p, nil)
 	if !errors.Is(err, want) || errors.Is(err, syscall.ENAMETOOLONG) {
 		t.Fatalf("listen: %v, want %v", err, want)
 	}

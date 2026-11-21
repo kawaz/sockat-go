@@ -12,7 +12,8 @@ import "net"
 // created at path, and the spelling the kernel keeps for it (the listener's
 // Addr()) goes through a directory of this user's processes in /tmp (or
 // $XDG_RUNTIME_DIR, $TMPDIR, the socket's directory), left there for as long
-// as the process lives. Closing the listener unlinks that spelling as the net
+// as the process lives; the listens to one directory share the symlink to
+// it in that spelling. Closing the listener unlinks that spelling as the net
 // package does: through a spelling that names the socket's directory the
 // socket file is removed, through one that names the socket file itself the
 // symlink is removed and the file stays, and through a spelling that names
@@ -23,7 +24,7 @@ import "net"
 // ENAMETOOLONG when no route reaches path, EINVAL for an empty path or a path that contains a
 // NUL byte or for a long path that does not end with a file name.
 func Listen(path string) (*net.UnixListener, error) {
-	l, _, err := defaultWorld.listen(path, Options{}, nil)
+	l, _, err := defaultWorld.listen(path, nil)
 	return l, err
 }
 

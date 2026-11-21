@@ -23,7 +23,7 @@ Status は各 DR ファイルの `Status:` 行が正本。
 | [DR-0016](DR-0016-public-api-go-shape.md) | ✅ 実装済 | 公開 API は SPEC の関数を Go の net の形に写す (stream・DGRAM・resolve・Sweep)。`Ex` は標準の型・`*Bound` / `Report`・error の 3 値、消す口は `*SocketFile` の `Remove` / `Cleanup`、綴りの性質は `Spelling` |
 | [DR-0017](DR-0017-listener-close-by-spelling.md) | ✅ 実装済 | 既定の `Listen` の listener は Close で標準のまま綴りを unlink し、`Dangling` (と illumos の `./@`) だけ消さない。`ListenEx` の listener はどの綴りでも消さない |
 | [DR-0018](DR-0018-route-orders-per-os.md) | ✅ 実装済 | 長いパスの経路は OS ごとの 1 つの列 (bind・connect・resolve) で試し、列に並ぶ経路だけを `Skipped` に入れる。ディレクトリは字句で畳まずカーネルと同じに引く。bind が symlink を辿るかは OS の表と実行時の見分け、FreeBSD の connect の link-file は作って CI で確かめる |
-| [DR-0019](DR-0019-places-held-by-world.md) | ✅ 実装済 | 置き場の B と D はプロセスの `world` が fd (`int`) で持ち続け、閉じない。綴りの長さは B を作る前に見積もり、procB は `(st_dev, st_ino)` を確かめて使う。`Sweep` は D の形の名前だけを消す。`UsableCrossUID` の判定は初めて持った時の物で、B 自身の other の x が無い時だけ見直す。占拠された既定の名前の B は次の置き場へ |
+| [DR-0019](DR-0019-places-held-by-world.md) | ✅ 実装済 | 置き場の B と D はプロセスの `world` が fd (`int`) で持ち続け、閉じない。綴りの長さは B を作る前に見積もり、procB は `(st_dev, st_ino)` を確かめて使う。`Sweep` は D の形の名前だけを消す。`UsableCrossUID` の判定は初めて持った時の物で、B 自身の other の x が無い時だけ見直す。占拠された既定の名前の B は次の置き場へ。既定の bind の link-dir の E は (D, ディレクトリ) ごとに使い回す |
 
 言語によらない振る舞いの正本は [ハブの SPEC](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md)。
 

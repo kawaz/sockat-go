@@ -15,3 +15,12 @@ import "golang.org/x/sys/unix"
 func symlinkat(target string, _ int, dirPath, name string) error {
 	return unix.Symlink(target, dirPath+"/"+name)
 }
+
+// readlinkat is what the symlink name in the directory dirfd, whose real
+// path is dirPath, points to.
+//
+// Design rationale: golang.org/x/sys/unix has no Readlinkat here either, so
+// the symlink is read by the directory's real path, as symlinkat makes it.
+func readlinkat(_ int, dirPath, name string) (string, error) {
+	return readlinkWith(func(buf []byte) (int, error) { return unix.Readlink(dirPath+"/"+name, buf) })
+}

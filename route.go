@@ -127,9 +127,23 @@ var errEmptyPath = fmt.Errorf("socket path must not be empty: %w", syscall.EINVA
 // through a path relative to it.
 var errCwdChanged = errors.New("the current directory changed while binding / connecting through a path relative to it; the result was discarded")
 
-// listen is bind for a stream socket (Listen, ListenEx).
-func (w *world) listen(path string, opts Options, tr *trace) (*net.UnixListener, bound, error) {
-	ep, b, err := w.bind(opListen, path, opts, tr)
+// eUse is how a bind has link-dir's E (SPEC-routes "link-dir").
+type eUse bool
+
+const (
+	// eOwn: an E made for the call, which its SocketFile cleans up (ListenEx,
+	// ListenUnixgramEx), removed when the bind through it fails.
+	eOwn eUse = false
+	// eShared: one E per (D, the socket's directory's real path), shared by
+	// the default binds (Listen, ListenUnixgram), which return no SocketFile
+	// and so never clean it up; nothing removes it (base.sharedE).
+	eShared eUse = true
+)
+
+// listen is the bind of Listen: a stream socket, no Options, link-dir's E
+// shared.
+func (w *world) listen(path string, tr *trace) (*net.UnixListener, bound, error) {
+	ep, b, err := w.bind(opListen, path, Options{}, tr, eShared)
 	if err != nil {
 		return nil, b, err
 	}
@@ -137,7 +151,7 @@ func (w *world) listen(path string, opts Options, tr *trace) (*net.UnixListener,
 }
 
 // bind binds (and listens, for opListen) at path, recording the routes found
-// unusable in tr (nil records nothing).
+// unusable in tr (nil records nothing), with link-dir's E had as e says.
 //
 // An empty path is EINVAL. A path the standard library accepts goes to it as is (stdSpelling), before
 // anything else is looked at (the environment and Options included), and
@@ -149,7 +163,7 @@ func (w *world) listen(path string, opts Options, tr *trace) (*net.UnixListener,
 // ending with a name). A longer path takes the bind order (bindLong). The error
 // is a *net.OpError for path; the route that bound and failed, if any, is in
 // the bound returned.
-func (w *world) bind(o op, path string, opts Options, tr *trace) (endpoint, bound, error) {
+func (w *world) bind(o op, path string, opts Options, tr *trace, e eUse) (endpoint, bound, error) {
 	if opts.Base != "" {
 		if err := givenShape(opts.Base); err != nil {
 			return nil, bound{}, opError(o, path, err)
@@ -185,7 +199,7 @@ func (w *world) bind(o op, path string, opts Options, tr *trace) (endpoint, boun
 		}
 		return ep, bound{route: routeStandard, spelling: Spelling{Kind: kind}}, nil
 	}
-	ep, b, err := w.bindLong(o, path, opts, tr)
+	ep, b, err := w.bindLong(o, path, opts, tr, e)
 	if err != nil {
 		return nil, b, opError(o, path, err)
 	}

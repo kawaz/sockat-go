@@ -6,11 +6,14 @@ package sockat
 
 import (
 	"errors"
+	"fmt"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -415,7 +418,7 @@ func TestADefaultBindWithEveryPlaceOccupiedUsesTheSocketsDirectory(t *testing.T)
 	at := occupyAll(t, ps)
 	p := nest(t, tmpDir(t), 300, "s.sock")
 	tr := &trace{}
-	ep, bd, err := w.listen(p, Options{}, tr)
+	ep, bd, err := w.listen(p, tr)
 	if ep != nil {
 		defer ep.Close()
 	}
@@ -563,7 +566,7 @@ func TestLinkFileBindsWhereBindFollowsASymlinkAndIsSkippedWhereItDoesNot(t *test
 		return
 	}
 	tr := &trace{}
-	_, _, err := w.listen(p, Options{}, tr)
+	_, _, err := w.listen(p, tr)
 	wantErrno(t, "a 100-byte name", err, syscall.ENAMETOOLONG)
 	if got := namesOf(t, tr.skipped); len(got) < 3 || got[2] != routeLinkFile {
 		t.Fatalf("skipped %v", got)
@@ -577,7 +580,7 @@ func TestLinkFileBindsWhereBindFollowsASymlinkAndIsSkippedWhereItDoesNot(t *test
 	if err := os.WriteFile(p, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, b, err := w.listen(p, Options{}, nil)
+	_, b, err := w.listen(p, nil)
 	wantErrno(t, "a file at the path", err, syscall.EADDRINUSE)
 	if b.route != routeLinkFile {
 		t.Fatalf("the failure came through %s", b.route)
@@ -716,7 +719,7 @@ func TestTheListenerOfListenUnlinksItsSpellingOnClose(t *testing.T) {
 	for _, k := range cases {
 		w := k.w
 		p := nest(t, tmpDir(t), 300, k.name)
-		l, b, err := w.listen(p, Options{}, nil)
+		l, b, err := w.listen(p, nil)
 		if err != nil || b.route != k.route {
 			t.Fatalf("%s: %s, %v", k.name, b.route, err)
 		}
@@ -949,5 +952,214 @@ func TestSkipsIsNeverNil(t *testing.T) {
 	tr.add(routeStandard, "path too long")
 	if s := tr.skips(); len(s) != 1 || s[0] != (Skip{"standard", "path too long"}) {
 		t.Fatalf("%v", s)
+	}
+}
+
+// listenDefault is w.listen(p) (the default bind, Listen's), failing the
+// test unless it bound at p by link-dir; the listener is closed at the end
+// of the test.
+func listenDefault(t *testing.T, w *world, p string) *net.UnixListener {
+	t.Helper()
+	l, b, err := w.listen(p, nil)
+	if err != nil {
+		t.Fatalf("%d bytes: %v", len(p), err)
+	}
+	t.Cleanup(func() { l.Close() })
+	if b.route != routeLinkDir || !isSocket(p) {
+		t.Fatalf("%d bytes: route %s, socket at the path %v", len(p), b.route, isSocket(p))
+	}
+	return l
+}
+
+// eTargets are where the E in the D of w's process B point to, by E's
+// name.
+func eTargets(t *testing.T, w *world) map[string]string {
+	t.Helper()
+	got := map[string]string{}
+	for _, n := range dEntries(t, w.auto) {
+		to, err := os.Readlink(w.auto.real + "/" + w.auto.d.name + "/" + n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got[n] = to
+	}
+	return got
+}
+
+// The default binds (Listen and ListenUnixgram: no SocketFile, so nothing
+// ever cleans their E up) share link-dir's E per (D, the socket's
+// directory's real path), SPEC-routes "link-dir": binding again and again to
+// one directory leaves one E, not one per bind, so a long-lived process does
+// not pile up E. Another directory has an E of its own. Every socket bound
+// through the shared E is at its path and talks.
+func TestDefaultBindsToOneDirectoryShareOneE(t *testing.T) {
+	t.Parallel()
+	w, _ := testWorld(t, nil)
+	pa := nest(t, tmpDir(t), 300, "a.sock")
+	dir, _, _ := splitPath(pa)
+	la := listenDefault(t, w, pa)
+	lb := listenDefault(t, w, dir+"/b.sock")
+	ep, bd, err := w.bind(opListenGram, dir+"/g.sock", Options{}, nil, eShared)
+	if err != nil || bd.route != routeLinkDir {
+		t.Fatalf("ListenUnixgram's bind: %s, %v", bd.route, err)
+	}
+	ep.Close()
+	if got := eTargets(t, w); len(got) != 1 || !slices.Contains(slices.Collect(maps.Values(got)), mustRealDir(t, dir)) {
+		t.Fatalf("E in D: %v, want one to %s", got, mustRealDir(t, dir))
+	}
+	for p, l := range map[string]*net.UnixListener{pa: la, dir + "/b.sock": lb} {
+		c, _ := dialIn(t, w, p)
+		ping(t, l, c)
+	}
+	other := nest(t, tmpDir(t), 300, "c.sock")
+	listenDefault(t, w, other)
+	if got := eTargets(t, w); len(got) != 2 {
+		t.Fatalf("E in D after a bind to another directory: %v, want two", got)
+	}
+}
+
+// Concurrent default binds to one directory make one E between them (the
+// shared E is looked up and made under the lock of the B), and every one of
+// them binds at its path.
+func TestConcurrentDefaultBindsToOneDirectoryMakeOneE(t *testing.T) {
+	t.Parallel()
+	w, _ := testWorld(t, nil)
+	dir, _, _ := splitPath(nest(t, tmpDir(t), 300, "s.sock"))
+	var wg sync.WaitGroup
+	errs := make([]error, 16)
+	for i := range errs {
+		wg.Go(func() {
+			p := dir + "/" + strconv.Itoa(i) + ".sock"
+			l, b, err := w.listen(p, nil)
+			if err == nil {
+				defer l.Close()
+				if b.route != routeLinkDir || !isSocket(p) {
+					err = fmt.Errorf("route %s, socket at the path %v", b.route, isSocket(p))
+				}
+			}
+			errs[i] = err
+		})
+	}
+	wg.Wait()
+	if err := errors.Join(errs...); err != nil {
+		t.Fatal(err)
+	}
+	if got := eTargets(t, w); len(got) != 1 {
+		t.Fatalf("E in D: %v, want one", got)
+	}
+}
+
+// The shared E is used again only while readlinkat of its name still gives
+// the socket's directory (SPEC-routes "link-dir"): removed, or replaced by a
+// symlink to elsewhere, it is dropped and another E made, and the next
+// default bind goes through that one and binds at its path. A replaced E is
+// not bound through: the socket would be made in the directory it points
+// to, not at the path; what replaced it is left as it is (not ours to
+// remove).
+func TestASharedEThatWasRemovedOrReplacedIsMadeAgain(t *testing.T) {
+	t.Parallel()
+	w, _ := testWorld(t, nil)
+	dir, _, _ := splitPath(nest(t, tmpDir(t), 300, "a.sock"))
+	real := mustRealDir(t, dir)
+	listenDefault(t, w, dir+"/a.sock")
+	first := slices.Collect(maps.Keys(eTargets(t, w)))
+	d := w.auto.real + "/" + w.auto.d.name
+	if err := os.Remove(d + "/" + first[0]); err != nil {
+		t.Fatal(err)
+	}
+	listenDefault(t, w, dir+"/b.sock")
+	got := eTargets(t, w)
+	if len(got) != 1 || got[first[0]] != "" {
+		t.Fatalf("E in D after the shared E was removed: %v (the removed was %s)", got, first[0])
+	}
+	second := slices.Collect(maps.Keys(got))[0]
+	elsewhere := tmpDir(t)
+	if err := os.Remove(d + "/" + second); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, d+"/"+second); err != nil {
+		t.Fatal(err)
+	}
+	listenDefault(t, w, dir+"/c.sock")
+	got = eTargets(t, w)
+	if len(got) != 2 || got[second] != elsewhere {
+		t.Fatalf("E in D after the shared E was replaced: %v", got)
+	}
+	for n, to := range got {
+		if n != second && to != real {
+			t.Fatalf("the E made again (%s) points to %s, want %s", n, to, real)
+		}
+	}
+	assertEmpty(t, elsewhere)
+}
+
+// A default bind through the shared E that fails (EADDRINUSE: a file is at
+// the path) returns its error and leaves the E, the one an earlier call made
+// and the one the failing call made itself alike (SPEC-routes "経路の失敗の扱い":
+// another default bind may be binding through it, and the next one uses it),
+// so no lock orders the default binds. The next default bind to the
+// directory goes through that same E.
+func TestAFailedDefaultBindLeavesTheSharedE(t *testing.T) {
+	t.Parallel()
+	w, _ := testWorld(t, nil)
+	dir, _, _ := splitPath(nest(t, tmpDir(t), 300, "taken"))
+	if err := os.WriteFile(dir+"/taken", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, b, err := w.listen(dir+"/taken", nil)
+	wantErrno(t, "a file at the path", err, syscall.EADDRINUSE)
+	if b.route != routeLinkDir {
+		t.Fatalf("failed through %s", b.route)
+	}
+	made := eTargets(t, w)
+	if len(made) != 1 {
+		t.Fatalf("E in D after the failed bind that made it: %v, want it left", made)
+	}
+	listenDefault(t, w, dir+"/s.sock")
+	if _, _, err := w.listen(dir+"/taken", nil); !errors.Is(err, syscall.EADDRINUSE) {
+		t.Fatalf("again: %v", err)
+	}
+	if got := eTargets(t, w); !maps.Equal(got, made) {
+		t.Fatalf("E in D: %v, want the same one, %v", got, made)
+	}
+}
+
+// ListenEx, ListenUnixgramEx and ResolveForBind make an E of their own per
+// call, as before (the unit their SocketFile / ForBind cleans up), and do
+// not touch the shared E: their Cleanup removes their own only, and a
+// failed ListenEx leaves no E of its own.
+func TestListenExAndResolveMakeAnEPerCall(t *testing.T) {
+	t.Parallel()
+	w, _ := testWorld(t, nil)
+	dir, _, _ := splitPath(nest(t, tmpDir(t), 300, "d.sock"))
+	listenDefault(t, w, dir+"/d.sock")
+	shared := eTargets(t, w)
+	_, b1 := listenExIn(t, w, dir+"/x1.sock", Options{})
+	_, b2 := listenExIn(t, w, dir+"/x2.sock", Options{})
+	g, b3, err := w.bindReported(opListenGram, dir+"/x3.sock", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	f := resolveBindIn(t, w, dir+"/x4.sock", Options{})
+	if got := eTargets(t, w); len(got) != 5 {
+		t.Fatalf("E in D: %v, want the shared one and one per call", got)
+	}
+	if err := os.WriteFile(dir+"/taken", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := w.listenEx(dir+"/taken", Options{}); !errors.Is(err, syscall.EADDRINUSE) {
+		t.Fatalf("a file at the path: %v", err)
+	}
+	if got := eTargets(t, w); len(got) != 5 {
+		t.Fatalf("E in D after a failed ListenEx: %v", got)
+	}
+	for _, c := range []func() error{b1.File.Cleanup, b2.File.Cleanup, b3.File.Cleanup, f.Cleanup} {
+		if err := c(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := eTargets(t, w); !maps.Equal(got, shared) {
+		t.Fatalf("E in D after the Cleanups: %v, want the shared one only, %v", got, shared)
 	}
 }

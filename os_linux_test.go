@@ -221,7 +221,7 @@ func checkThreadCwdUnusable(t *testing.T) {
 	}
 	p := nest(t, d, 600, "s.sock")
 	w, _ := testWorld(t, nil)
-	l, b, err := w.listen(p, Options{}, nil)
+	l, b, err := w.listen(p, nil)
 	if err != nil || b.route != routeLinkDir || b.base != "proc" {
 		t.Fatalf("listen: %s %s, %v", b.route, b.base, err)
 	}
@@ -232,7 +232,7 @@ func checkThreadCwdUnusable(t *testing.T) {
 	}
 	ping(t, l, c)
 	tr := &trace{}
-	_, _, err = w.listen(filepath.Dir(p)+"/"+threadName, Options{}, tr)
+	_, _, err = w.listen(filepath.Dir(p)+"/"+threadName, tr)
 	wantErrno(t, "listen of a 92-byte name", err, syscall.ENAMETOOLONG)
 	if got := namesOf(t, tr.skipped); !slices.Equal(got, []route{routeStandard, routeLinkDir, routeThreadCwd}) || tr.skipped[2].reason != "seccomp filter" {
 		t.Fatalf("skipped %v", tr.skipped)
@@ -261,7 +261,7 @@ func TestThreadCwdIsUsedWithoutASeccompFilter(t *testing.T) {
 	}
 	p := nest(t, tmpDir(t), 600, threadName)
 	w, _ := testWorld(t, nil)
-	l, b, err := w.listen(p, Options{}, nil)
+	l, b, err := w.listen(p, nil)
 	if err != nil || b.route != routeThreadCwd || b.spelling.Kind != Dangling || !isSocket(p) {
 		t.Fatalf("listen: %s %v, %v", b.route, b.spelling, err)
 	}
@@ -306,7 +306,7 @@ func TestAbstractNamesGoToTheNetPackageAsTheyAre(t *testing.T) {
 	cwd, _ := os.Getwd()
 	for i, prefix := range []string{"@", "\x00"} {
 		name := fmt.Sprintf("%ssockat-test-%d-%d", prefix, os.Getpid(), i)
-		l, b, err := defaultWorld.listen(name, Options{}, nil)
+		l, b, err := defaultWorld.listen(name, nil)
 		if err != nil || b.route != routeStandard || b.spelling.Kind != Original {
 			t.Fatalf("%q: %s %v, %v", name, b.route, b.spelling, err)
 		}

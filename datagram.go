@@ -18,7 +18,7 @@ import "net"
 // not, ENAMETOOLONG when no route reaches path, EINVAL for an empty path or a path that
 // contains a NUL byte or for a long path that does not end with a file name.
 func ListenUnixgram(path string) (*net.UnixConn, error) {
-	ep, _, err := defaultWorld.bind(opListenGram, path, Options{}, nil)
+	ep, _, err := defaultWorld.bind(opListenGram, path, Options{}, nil, eShared)
 	if err != nil {
 		return nil, err
 	}

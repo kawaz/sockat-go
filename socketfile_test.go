@@ -280,13 +280,13 @@ func TestListenExWhoseCwdChangesBeforeTheBindRecordsNothing(t *testing.T) {
 func TestChildListenExWithACwdChange(t *testing.T) {
 	asChild(t)
 	rel, to := os.Getenv("SOCKAT_REL"), os.Getenv("SOCKAT_CHDIR")
-	bindEx = func(w *world, o op, path string, opts Options, tr *trace) (endpoint, bound, error) {
+	bindEx = func(w *world, o op, path string, opts Options, tr *trace, e eUse) (endpoint, bound, error) {
 		if to != "" {
 			if err := os.Chdir(to); err != nil {
 				t.Fatal(err)
 			}
 		}
-		return w.bind(o, path, opts, tr)
+		return w.bind(o, path, opts, tr, e)
 	}
 	t.Cleanup(func() { bindEx = (*world).bind })
 	l, b, err := ListenEx(rel, Options{})
@@ -339,11 +339,12 @@ func TestChildListenExThatCannotRecordTheBoundFile(t *testing.T) {
 	path := os.Getenv("SOCKAT_PATH")
 	var bl *net.UnixListener
 	var e *link
-	bindEx = func(w *world, o op, p string, opts Options, tr *trace) (endpoint, bound, error) {
-		l, b, err := w.listen(p, opts, tr)
+	bindEx = func(w *world, o op, p string, opts Options, tr *trace, use eUse) (endpoint, bound, error) {
+		ep, b, err := w.bind(o, p, opts, tr, use)
 		if err != nil {
 			return nil, b, err
 		}
+		l := ep.(*net.UnixListener)
 		bl, e = l, b.link
 		// The file the bind made is gone before ListenEx looks at it.
 		if err := os.Remove(path); err != nil {
@@ -609,11 +610,12 @@ func TestChildListenExThroughASymlinkToANonSocket(t *testing.T) {
 	path, actual := os.Getenv("SOCKAT_PATH"), os.Getenv("SOCKAT_ACTUAL")
 	var bl *net.UnixListener
 	var e *link
-	bindEx = func(w *world, o op, p string, opts Options, tr *trace) (endpoint, bound, error) {
-		l, b, err := w.listen(p, opts, tr)
+	bindEx = func(w *world, o op, p string, opts Options, tr *trace, use eUse) (endpoint, bound, error) {
+		ep, b, err := w.bind(o, p, opts, tr, use)
 		if err != nil {
 			return nil, b, err
 		}
+		l := ep.(*net.UnixListener)
 		bl, e = l, b.link
 		// The socket the bind made, where the symlink leads, is replaced by
 		// a regular file before ListenEx looks at it.

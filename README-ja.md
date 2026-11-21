@@ -196,7 +196,7 @@ c, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: f.Path, Net: "unix"}) //
 長いパスの bind は、アプリの置き場の外 (`/tmp/sockat-<uid>` 等) に B・D・E を残す。何が残り、いつ消えるか、`Sweep` が何を消すか、長命のプロセスでの片付け方は仕様の「[置き場に残る物](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#置き場に残る物)」と「[`sweep`](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#sweep)」。Go での形:
 
 - `sockat.Sweep()` は置き場 1〜3 の死んだ D を、`sockat.SweepBase(base)` は `Options.Base` に渡した B の中の死んだ D を消す。自動では呼ばれない。試験を何度も回す環境では `sockat.Sweep()` を 1 回呼ぶ
-- 既定の `Listen` は `SocketFile` を返さないので、その E はプロセスが終わるまで残る。長いパスに何度も bind する長命のプロセスは `ListenEx` を使い、要らなくなったソケットごとに `b.File.Remove()` (ファイルも消す) か `b.File.Cleanup()` (E だけ) を呼ぶ
+- 既定の `Listen` と `ListenUnixgram` は `SocketFile` を返さないので、その E はプロセスが終わるまで残る。link-dir の E は同じディレクトリへの bind で使い回すので、増えるのはディレクトリの数だけ。毎回違うディレクトリへ長いパスで bind する長命のプロセスは `ListenEx` を使い、要らなくなったソケットごとに `b.File.Remove()` (ファイルも消す) か `b.File.Cleanup()` (E だけ) を呼ぶ
 
 ## 使ってはいけない書き方
 

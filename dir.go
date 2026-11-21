@@ -16,6 +16,10 @@ type procD struct {
 	fd   int    // D (never closed)
 	name string // D's name in B
 	id   fileID // D's (st_dev, st_ino)
+	// shared is the name of the E of link-dir in D that the default binds
+	// share, by the real path of the socket's directory it points to (under
+	// the mu of D's B). A D made again starts with none.
+	shared map[string]string
 }
 
 // dirAttempts is how many times D is made again when the D just made was
@@ -104,6 +108,21 @@ type link struct {
 	b    *base
 	d    *procD
 	name string
+	// shared: the E of link-dir the default binds to its directory share
+	// (base.sharedE), which nothing removes.
+	shared bool
+}
+
+// release is what a bind through E that failed, or a spelling that came out
+// too long, does with it: the call's own E is removed; a shared E stays,
+// made by this call or not (SPEC-routes "経路の失敗の扱い": another default
+// bind may be binding through it, and the next one uses it). A failure to
+// remove it is not reported: the call's error stays as it is (SPEC-routes
+// "D と E").
+func (e *link) release() {
+	if !e.shared {
+		e.remove()
+	}
 }
 
 // remove unlinks E. A missing E is no error (removed already).
@@ -127,18 +146,67 @@ func (e *link) path() string {
 func (b *base) resolveE(d *procD, target string) (*link, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	return b.resolveELocked(d, target)
+}
+
+// resolveELocked is resolveE under b.mu.
+func (b *base) resolveELocked(d *procD, target string) (*link, error) {
 	for range linkAttempts {
 		name := strconv.FormatUint(b.nextE, 36)
 		b.nextE++
 		err := symlinkat(target, d.fd, b.real+"/"+d.name, name)
 		if err == nil {
-			return &link{b, d, name}, nil
+			return &link{b: b, d: d, name: name}, nil
 		}
 		if !errors.Is(err, unix.EEXIST) {
 			return nil, err
 		}
 	}
 	return nil, errNoFreeName
+}
+
+// sharedE is the E of link-dir in d (b's D) that the default binds to the
+// directory target (its real path) share (SPEC-routes "link-dir"): one per
+// (D, target), made as resolveE makes one the first time and kept in d. The
+// one kept is used again while readlinkat of its name, relative to D's fd,
+// gives target; one removed or replaced since is dropped and another made.
+// Under b.mu, so that concurrent binds to one directory make one E. No
+// reference is counted: nothing removes it (SPEC "置き場に残る物").
+func (b *base) sharedE(d *procD, target string) (*link, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if name, ok := d.shared[target]; ok {
+		if got, err := readlinkat(d.fd, b.real+"/"+d.name, name); err == nil && got == target {
+			return &link{b: b, d: d, name: name, shared: true}, nil
+		}
+		delete(d.shared, target)
+	}
+	l, err := b.resolveELocked(d, target)
+	if err != nil {
+		return nil, err
+	}
+	if d.shared == nil {
+		d.shared = map[string]string{}
+	}
+	d.shared[target] = l.name
+	l.shared = true
+	return l, nil
+}
+
+// readlinkWith reads a symlink's target by read (readlink(2) or
+// readlinkat(2) into buf), with a larger buffer while the target may have
+// been cut short (it filled the buffer).
+func readlinkWith(read func(buf []byte) (int, error)) (string, error) {
+	for size := 256; ; size *= 2 {
+		buf := make([]byte, size)
+		n, err := read(buf)
+		if err != nil {
+			return "", err
+		}
+		if n < size {
+			return string(buf[:n]), nil
+		}
+	}
 }
 
 // nextEName is the name the next resolveE of b will try first, for the
@@ -156,5 +224,5 @@ func (b *base) callE(d *procD, target string, random func() (string, error)) (*l
 	if err != nil {
 		return nil, err
 	}
-	return &link{b, d, name}, nil
+	return &link{b: b, d: d, name: name}, nil
 }

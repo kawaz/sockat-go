@@ -202,7 +202,7 @@ func TestTheSocketsDirectoryIsOpenedForSearchOnly(t *testing.T) {
 	unreadable(t, filepath.Dir(p))
 	t.Cleanup(func() { os.Chmod(filepath.Dir(p), 0o700) })
 	w, _ := testWorld(t, nil)
-	l, b, err := w.listen(p, Options{}, nil)
+	l, b, err := w.listen(p, nil)
 	if err != nil || b.route != routeLinkDir || !isSocket(p) {
 		t.Fatalf("listen in a directory without read permission: %s, %v", b.route, err)
 	}

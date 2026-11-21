@@ -196,7 +196,7 @@ c, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: f.Path, Net: "unix"}) //
 A bind of a long path leaves B, D and E outside the application's places (`/tmp/sockat-<uid>` and the like). What stays, when it goes, what `Sweep` removes, and how a long-lived process cleans up are in the specification's "[What stays in the base](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#what-stays-in-the-base)" and "[`sweep`](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#sweep)". The Go forms:
 
 - `sockat.Sweep()` removes the dead D of places 1 to 3, and `sockat.SweepBase(base)` the dead D in the B given as `Options.Base`. Neither is called for you. Where tests run again and again, call `sockat.Sweep()` once
-- The default `Listen` returns no `SocketFile`, so its E stays until the process ends. A long-lived process that binds long paths again and again uses `ListenEx`, and for each socket no longer needed calls `b.File.Remove()` (the file too) or `b.File.Cleanup()` (the E only)
+- The default `Listen` and `ListenUnixgram` return no `SocketFile`, so their E stays until the process ends. Link-dir's E is shared by the binds to one directory, so the E grow with the number of directories only. A long-lived process that binds long paths in a new directory again and again uses `ListenEx`, and for each socket no longer needed calls `b.File.Remove()` (the file too) or `b.File.Cleanup()` (the E only)
 
 ## Patterns not to use
 

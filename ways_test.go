@@ -42,7 +42,7 @@ type way struct {
 // dials the way.
 func (w way) run(o op) (endpoint, route, error) {
 	if o == opListen {
-		l, b, err := defaultWorld.listen(w.path, Options{}, nil)
+		l, b, err := defaultWorld.listen(w.path, nil)
 		if err != nil {
 			return nil, b.route, err
 		}

@@ -44,13 +44,13 @@ func TestAtAndAtDirectBindAndConnect(t *testing.T) {
 	// The binds go through a world of their own: at makes D, which the
 	// dials, checked to make none, must not find.
 	wb, _ := testWorld(t, nil)
-	l, b, err := wb.listen(fits, Options{}, nil)
+	l, b, err := wb.listen(fits, nil)
 	if err != nil || b.route != routeAt || b.spelling.Kind != Dangling || !isSocket(fits) {
 		t.Fatalf("a %d-byte name: listen %s %v, %v", directMax-11, b.route, b.spelling, err)
 	}
 	t.Cleanup(func() { l.Close() })
 	over := d + "/" + strings.Repeat("o", directMax-10)
-	_, _, err = wb.listen(over, Options{}, nil)
+	_, _, err = wb.listen(over, nil)
 	wantErrno(t, "listen past at", err, syscall.ENAMETOOLONG)
 	if err := syscall.Rename(fits, over); err != nil {
 		t.Fatal(err)
@@ -71,7 +71,7 @@ func TestAtAndAtDirectBindAndConnect(t *testing.T) {
 	missing := d + "/nope/" + strings.Repeat("n", 200)
 	_, _, err = w.dial(missing, Options{}, nil)
 	wantErrno(t, "dial in a missing directory", err, syscall.ENOENT)
-	_, _, err = w.listen(missing, Options{}, nil)
+	_, _, err = w.listen(missing, nil)
 	wantErrno(t, "listen in a missing directory", err, syscall.ENOENT)
 }
 

@@ -214,7 +214,8 @@ c, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: f.Path, Net: "unix"}) //
 - 既定の `Listen` は `SocketFile` を返さないので、その E はプロセスが終わるまで残り、D と一緒に OS の掃除で消える。片付けを気にするなら `ListenEx` か resolve を使う
 - 既定の `Dial` はプロセスの中に D も E も残さない (B の直下の E を connect の後すぐ消す)
 - B は (`Options.Base` で指定した物も) sockat 専用で、利用者は中に他の物を置かない
-- `Sweep()` は `/tmp/sockat-<uid>`・`$XDG_RUNTIME_DIR/sockat`・`$TMPDIR/sockat-<uid>` のうち、あって確かめに通る物の中の死んだ D を消す。B は作らない。`SweepBase(base)` は `Options.Base` に渡した B の中の死んだ D を消す (その B を管理するアプリが呼ぶ)。消すのは名前が D の形 (英数字 10 文字) のディレクトリだけで、生きている他のプロセスの D、symlink でない物がある D、B の直下の E には触らない。自動では呼ばれない
+- `Sweep()` は `/tmp/sockat-<uid>`・`$XDG_RUNTIME_DIR/sockat`・`$TMPDIR/sockat-<uid>` のうち、あって確かめに通る物の中の死んだ D を消す。B は作らない。`SweepBase(base)` は `Options.Base` に渡した B の中の死んだ D を消す (その B を管理するアプリが呼ぶ)。消すのは名前が D の形 (英数字 10 文字) のディレクトリだけで、生きている他のプロセスの D、symlink でない物がある D、B の直下の E には触らない。自動では呼ばれない。sockat は死んだ D を自分では消さない (resolve の時も、プロセスの初めと終わりにも消さない)
+- 長いパスに何度も bind する長命のプロセス (セッションごとにソケットを作る daemon 等) は、既定の `Listen` の E がプロセスの終わりまで溜まる。`ListenEx` を使い、要らなくなったソケットごとに `Remove()` (ファイルも消す) か `Cleanup()` (E だけ) で片付ける
 - 呼び出しの中で E を片付けるのに失敗しても、その呼び出しの成否も返すエラーも変わらない
 - **ソケットのディレクトリの B (`.sockat.<乱数>`) と、確かめに外れて落とした B (`sockat-<uid>.<乱数>`) は、`Sweep` も OS の掃除も消さずに残る**。乱数の名前なので次のプロセスも使い回さず、プロセスごとに増えうる。ソケットのディレクトリの B は利用者のディレクトリに残る
 

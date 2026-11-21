@@ -54,12 +54,11 @@ func SweepBase(base string) error {
 // whose ancestors pass their check.
 func (w *world) sweep() error {
 	var errs []error
-	for _, p := range w.autoPlaces() {
-		real, err := realDir(p.path)
-		if err != nil || checkAncestors(real, false) != nil {
+	for _, p := range w.realAutoPlaces() {
+		if checkAncestors(p.real, false) != nil {
 			continue
 		}
-		b := joinUnder(real, bName(p.kind))
+		b := joinUnder(p.real, bName(p.kind))
 		errs = append(errs, sweepB(b, b, false))
 	}
 	return errors.Join(errs...)

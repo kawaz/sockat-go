@@ -25,6 +25,7 @@
 
 作り方 (SPEC-routes のとおり):
 
+- 置き場 1〜3 は realpath した `(st_dev, st_ino)` で重複を除き、先の置き場 (とその種類) を残す (macOS の `TMPDIR=/private/tmp` と `/tmp` 等。B を探す時も `Sweep` も。ハブの SPEC-routes「実体の置き場」、2026-11-22)
 - B: 置き場を realpath → 途中を確かめる → 置き場を `O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC` で開く → `mkdirat(0700)` → `fchmodat(0711)` → 同じフラグで開いて `fstat` (実ディレクトリ・持ち主が実効 uid)。`EEXIST` なら開いて確かめ (他人が書けないことも)、mode は変えない。外れたら (占拠) その置き場に何も作らず次の置き場へ進む (`Options.Base` はエラー)。そろえられない・開けない時は作った自分の空のディレクトリを消す
 - D: B の fd を基準に乱数 10 文字で `mkdirat(0700)` → `fchmodat(0711)` → 開いて確かめる → `flock(LOCK_SH)` → 名前を引き直して fd と同じ物か確かめ、違えば (間に他のプロセスの `Sweep` が消した) 作り直す (16 回まで)
 - E: resolve の E は B ごとのカウンタを 36 進にした名前、thread-cwd・at と既定の connect の E は乱数 10 文字。既定の bind (`Listen`・`ListenUnixgram`) の link-dir の E は (D, ソケットのディレクトリの realpath) ごとに 1 つを D の `procD` に名前で覚えて使い回し、使う前に D の fd を基準にした `readlinkat` で指す先が realpath のままかを確かめ、違えば (消された・差し替えられた) 覚えを外して新しく作る (差し替えた物には触らない)。探すのと作るのは B の lock の中で行い、同じ (D, realpath) の E を 2 つ作らない。bind に失敗しても、その呼び出しで作った物も含めて消さない。`ListenEx`・`ListenUnixgramEx`・resolve と link-file の E は呼び出しごとで、失敗した時は消す。どちらにするかは公開 API の入口が `bind` に渡す (`eShared` / `eOwn`)。illumos / Solaris は `golang.org/x/sys/unix` に `Symlinkat` が無いので、D (か B) の実パスから組んだパスで `unix.Symlink` を呼ぶ

@@ -257,6 +257,54 @@ func TestWithEveryPlaceOccupiedThereIsNoBAndTheErrorTellsThem(t *testing.T) {
 	}
 }
 
+// The places 1 to 3 are told apart by the (st_dev, st_ino) of their real
+// paths (SPEC-routes "実体の置き場"): a place that is the same directory as
+// an earlier one ($TMPDIR a symlink to /tmp here, as macOS's
+// TMPDIR=/private/tmp is for /tmp) is not a place of its own. So with B
+// occupied in /tmp and no $XDG_RUNTIME_DIR, $TMPDIR is not tried again:
+// errNoBase tells the occupied B once. Free, B is made in /tmp, as the /tmp
+// place's (kind tmp), and Sweep looks at it once: a dead D in it is
+// removed, with no error.
+func TestAPlaceThatIsTheSameDirectoryAsAnEarlierOneIsNotTriedAgain(t *testing.T) {
+	t.Parallel()
+	root := tmpDir(t)
+	link := root + "/tmpdir"
+	w, ps := testWorld(t, func(c *config, ps testPlaces) {
+		c.getenv = func(k string) string {
+			if k == "TMPDIR" {
+				return link
+			}
+			return ""
+		}
+	})
+	if err := os.Symlink(ps.tmp, link); err != nil {
+		t.Fatal(err)
+	}
+	at := ps.tmp + "/" + uidName()
+	occupiers[1].make(t, at)
+	_, err := w.autoBase(false, anyFits)
+	real := []string{mustRealDir(t, ps.tmp) + "/" + uidName()}
+	if !errors.Is(err, errNoBase) || !slices.Equal(occupiedIn(err), real) {
+		t.Fatalf("%v (occupied %q); want errNoBase telling %q once", err, occupiedIn(err), real)
+	}
+	if err := os.Remove(at); err != nil {
+		t.Fatal(err)
+	}
+	b := autoOf(w, false)
+	if b == nil || b.kind != kindTmp {
+		t.Fatalf("B %+v once /tmp is free", b)
+	}
+	if err := os.Mkdir(at+"/deadD00000", 0o711); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.sweep(); err != nil {
+		t.Fatal(err)
+	}
+	if exists(at + "/deadD00000") {
+		t.Fatal("the dead D is still there")
+	}
+}
+
 // A B owned by another user occupies its place too (it is passed over for
 // the next place, with nothing made in it), and a place one of whose
 // directories on the way is owned by another user is passed over for the

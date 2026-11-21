@@ -3,6 +3,7 @@ package sockat
 import (
 	"errors"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -97,6 +98,35 @@ func (w *world) autoPlaces() []place {
 	return ps
 }
 
+// realPlace is a place with its real path.
+type realPlace struct {
+	place
+	real string
+}
+
+// realAutoPlaces are the places 1 to 3 in order (autoPlaces) whose real path
+// can be resolved, each with it, less a place that is the same directory
+// ((st_dev, st_ino) of the real path) as an earlier one: macOS's
+// TMPDIR=/private/tmp is /tmp (SPEC-routes "実体の置き場"). The earlier one
+// stays, with its kind.
+func (w *world) realAutoPlaces() []realPlace {
+	var rs []realPlace
+	var seen []fileID
+	for _, p := range w.autoPlaces() {
+		real, err := realDir(p.path)
+		if err != nil {
+			continue
+		}
+		id, ok := statID(real)
+		if !ok || slices.Contains(seen, id) {
+			continue
+		}
+		seen = append(seen, id)
+		rs = append(rs, realPlace{p, real})
+	}
+	return rs
+}
+
 // bName is the name of B in a place of kind: sockat-<euid>, sockat under
 // $XDG_RUNTIME_DIR (already the user's own).
 func bName(kind string) string {
@@ -184,9 +214,9 @@ func (w *world) autoBase(cross bool, fits fitsFunc) (*base, error) {
 		}
 	}
 	var occupied []string
-	for _, p := range w.autoPlaces() {
-		real, err := realDir(p.path)
-		if err != nil || !w.ancestorsPass(real) {
+	for _, rp := range w.realAutoPlaces() {
+		p, real := rp.place, rp.real
+		if !w.ancestorsPass(real) {
 			continue
 		}
 		if cross && !crossPlace(real, bName(p.kind)) {

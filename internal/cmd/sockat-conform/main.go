@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"syscall"
@@ -29,7 +30,7 @@ import (
 
 type input struct {
 	Op             string  `json:"op"`
-	Path           string  `json:"path"`
+	Path           *string `json:"path"`
 	UsableCrossUID bool    `json:"usable_cross_uid"`
 	Base           *string `json:"base"`
 }
@@ -56,10 +57,19 @@ type output struct {
 var keep *net.UnixListener
 
 func main() {
+	os.Exit(run(os.Stdin, os.Stdout, os.Stderr))
+}
+
+// run reads the input from stdin, does the bind or connect and writes the
+// output to stdout. It returns the exit status: 0 once the output is
+// written, 2 for an input it cannot take (nothing written to stdout).
+func run(stdin io.Reader, stdout, stderr io.Writer) int {
 	var in input
-	if err := json.NewDecoder(os.Stdin).Decode(&in); err != nil || (in.Op != "bind" && in.Op != "connect") {
-		fmt.Fprintln(os.Stderr, `sockat-conform: want {"op": "bind"|"connect", "path": ..., "usable_cross_uid": true|false, "base": null|...} on stdin`)
-		os.Exit(2)
+	// path has no default: an input without it (or with it null) is not
+	// one the CLI takes, unlike usable_cross_uid and base.
+	if err := json.NewDecoder(stdin).Decode(&in); err != nil || (in.Op != "bind" && in.Op != "connect") || in.Path == nil {
+		fmt.Fprintln(stderr, `sockat-conform: want {"op": "bind"|"connect", "path": ..., "usable_cross_uid": true|false, "base": null|...} on stdin`)
+		return 2
 	}
 	opts := sockat.Options{UsableCrossUID: in.UsableCrossUID}
 	if in.Base != nil {
@@ -69,19 +79,20 @@ func main() {
 	if in.Op == "bind" {
 		var b *sockat.Bound
 		var err error
-		keep, b, err = sockat.ListenEx(in.Path, opts)
+		keep, b, err = sockat.ListenEx(*in.Path, opts)
 		out = bindReport(b, err)
 	} else {
-		c, r, err := sockat.DialEx(in.Path, opts)
+		c, r, err := sockat.DialEx(*in.Path, opts)
 		if err == nil {
 			c.Write([]byte("x"))
 			c.Close()
 		}
 		out = report(r.Route, r.Skipped, err)
 	}
-	if err := json.NewEncoder(os.Stdout).Encode(out); err != nil {
-		os.Exit(2)
+	if err := json.NewEncoder(stdout).Encode(out); err != nil {
+		return 2
 	}
+	return 0
 }
 
 // bindReport is the output for a bind: report, and on success the base and

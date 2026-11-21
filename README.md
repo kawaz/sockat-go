@@ -58,7 +58,7 @@ defer l.Close()
 defer b.File.Remove() // removes the socket file (does not close l); runs before l.Close
 ```
 
-- `b.File` (a `*sockat.SocketFile`) records the socket file's real path and `(st_dev, st_ino)` right after the bind, and `Remove()` removes it only while the path still names that same file. When the file cannot be recorded, `ListenEx` closes the listener, cleans up the spelling's E, leaves the file, and returns an error
+- `b.File` (a `*sockat.SocketFile`) records the socket file's real path (looked up as the kernel looks it up: for `a/sym/../s.sock`, the `s.sock` in the parent of where sym leads) and `(st_dev, st_ino)` right after the bind, and `Remove()` removes it only while the path still names that same file. When the file cannot be recorded, `ListenEx` closes the listener, cleans up the spelling's E, leaves the file, and returns an error
 - When the last component of the path is a symlink already there (on macOS and NetBSD the standard bind follows it and makes the socket at its end), what is recorded is the socket file it leads to, and `Remove()` removes that (not your symlink). When it leads to something that is not a socket, the file counts as one that cannot be recorded
 - **Call `Remove()` before closing the listener** (with the `defer` order above, `Remove` runs first). A replacement can be told apart only while the listener is open: the kernel then holds the socket file, so one removed and made again by another process has another `(st_dev, st_ino)` and `Remove` leaves it. One removed and made again after the close may get the same numbers on file systems that reuse them at once (Linux's ext4, the BSDs' UFS / FFS), and `Remove` may remove it
 - `Remove()` also does `Cleanup()` after removing the file. `Cleanup()` only cleans up the E (symlink) the spelling goes through; it does not remove the file. After a success, calling either again does nothing; after a failure, the next call tries again (when `Remove` removed the file but its `Cleanup` failed, the next `Remove` leaves the file side alone and tries the `Cleanup` again; a retried file side checks again that the path names the file bound). Concurrent calls remove one at a time. Neither is called for you
@@ -132,7 +132,7 @@ The errors of `Base`:
   - A directory on the way is missing: `ENOENT`
   - B's place is neither a directory nor a symlink: `ENOTDIR`
   - B is a symlink, others can write to it, it is someone else's, or a directory on the way can be replaced by others: `EPERM`
-  - With `UsableCrossUID` of a bind, a directory on the way or B itself has no search permission for others: `EPERM`
+  - With `UsableCrossUID` of a bind, a directory on the way or B itself has no search permission for others: `EPERM` (for a B held, as judged when it was first held; only when B itself was judged to have none is it looked at again, at every call)
 
 The zero value `Options{}` is the default: `ListenEx` / `DialEx` then try the routes `Listen` / `Dial` do, in the same order.
 
@@ -259,7 +259,7 @@ The length handed to the standard library as it is:
 | Linux / Android / illumos | Up to 107 bytes |
 | Apple's systems / FreeBSD / NetBSD / OpenBSD | Up to 103 bytes |
 
-A longer path has its socket directory looked up first (`ENOENT` when missing, `ENOTDIR` when not a directory); then the routes that make a short spelling ([the SPEC's "Route names"](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#route-names)) are tried from left to right, and the first route that can be used binds / connects. When a route actually binds / connects and fails, that error is returned, and the next route does not try again.
+A longer path has its socket directory looked up first (`ENOENT` when missing, `ENOTDIR` when not a directory; the path is not folded on the string but looked up as the kernel looks it up: `a/sym/..` is the parent of where sym leads, not `a`); then the routes that make a short spelling ([the SPEC's "Route names"](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#route-names)) are tried from left to right, and the first route that can be used binds / connects. When a route actually binds / connects and fails, that error is returned, and the next route does not try again.
 
 Bind (`Listen`, `ListenEx`, `ListenUnixgram`, `ListenUnixgramEx`):
 
@@ -306,6 +306,7 @@ How B is made ([the SPEC-routes' "Building B"](https://github.com/kawaz/sockat/b
 - The place is opened `O_NOFOLLOW` and held by its fd; B is made by `mkdirat(0700)`, set to 0711, opened and checked to be a real directory of yours. One already there is checked the same way (and that others cannot write to it); when it fails, B falls back to `sockat-<uid>.<random>` in the same place
 - `$XDG_RUNTIME_DIR` and `$TMPDIR` are not used when empty or relative
 - A process keeps using the first B it could make (the length of the path does not change it). When a spelling is known beforehand not to fit, no B is made and the route is passed over as unusable
+- The judgement for `UsableCrossUID` (whether B and every directory on the way to it have search permission for others) is made when B is first held and kept. Only when B itself was judged to have none is it looked at again by B's fd at every call with `UsableCrossUID`, and once it has it, it is kept as having it (so that a B opened while another process making it at the same time had not yet set it to 0711 can serve later)
 - B in the socket's directory is used only for a spelling through `/proc` (its real-path spelling is longer than the path). Where there is no `/proc`, it serves only as the place of thread-cwd's / at's D
 - A B or D held but since removed is made again by the next call
 
@@ -338,6 +339,7 @@ The file name lengths reached in the usual environment (the thread cwd and `/pro
 
 ## What differs from the standard library
 
+- **An empty path is `EINVAL`.** The standard library binds an empty path, on Linux, to an abstract name the kernel picks (autobind), and refuses a connect to it with an error that has no errno
 - **A path containing a NUL byte is `EINVAL`, whatever its length.** The standard library silently cuts the path at the NUL and binds another path. On Linux / Android, an abstract socket name (a leading NUL or `@`) is handed to the standard library as it is (`Spelling` `Original`). Where there are no abstract sockets (illumos included), a leading NUL is `EINVAL` too
 - **On illumos, a path that starts with `@` is bound / connected as the file `@...` in the cwd.** The standard library rewrites a leading `@` into an abstract name, but the illumos kernel has no abstract sockets. sockat hands the path to it with `./` in front, so the listener's `Addr()` is `./@...` and `Spelling` is `CwdRelative`. Closing the listener does not remove the file (as the standard library elsewhere leaves a path that starts with `@`; to remove it, use `ListenEx`'s `Remove`). A path of 106 or 107 bytes, which no longer fits with `./`, goes through the routes as a long path
 
@@ -346,7 +348,7 @@ Only for a long path:
 - **The listener's `Addr()` (and an accepted connection's `LocalAddr()`, the peer's `RemoteAddr()`) is not the path you passed but the bind's spelling.** `Spelling` tells whether it can be used later. The address shown by `ss -x`, `lsof`, `/proc/net/unix` and the like is the spelling too (a link-file spelling holds no file name)
 - **What closing the default `Listen`'s listener removes depends on the spelling.** Go's `UnixListener.Close` unlinks the spelling it keeps. Through a link-dir spelling, the E on the way is followed and the socket file is removed (as with the standard library). **Through a link-file spelling, the E itself is removed and the socket file stays.** Through a `Dangling` spelling nothing is removed (it is set `SetUnlinkOnClose(false)`). The listener of `ListenEx` removes nothing, whatever the spelling
 - **A path that does not end with a file name** (`dir/`, `dir/.`, `dir/..`) is `EINVAL`, and nothing is created
-- **The directory is looked up first**: the E of link-dir and of thread-cwd / at points to the socket's directory's real path, and proc-direct, at-direct and thread-cwd-direct look the directory up before passing the file name. A rename or a symlink repointed in between is not seen
+- **The directory is looked up first**: the E of link-dir and of thread-cwd / at points to the socket's directory's real path (looked up as the kernel looks it up), and proc-direct, at-direct and thread-cwd-direct look the directory up before passing the file name. A rename or a symlink repointed in between is not seen
 - **Another goroutine's `os.Chdir`**: when the cwd changes during relative (a connect), the result is dropped and an error is returned. A relative `ListenEx` (short paths too) whose cwd changes between the resolving of the real path and the bind closes the listener, leaves the file, and returns an error
 - **State piles up outside the application's places**: B, D and E stay in `/tmp`, `$XDG_RUNTIME_DIR`, `$TMPDIR` (and the socket's directory) ("[What stays in the places, and `Sweep`](#what-stays-in-the-places-and-sweep)")
 - **Where a live D may be removed**: Linux with systemd older than v242, and B in macOS's `$TMPDIR`. Its spellings can then no longer be followed, and that is all

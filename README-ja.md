@@ -58,7 +58,7 @@ defer l.Close()
 defer b.File.Remove() // ソケットのファイルを消す (l は閉じない)。l.Close より先に走る
 ```
 
-- `b.File` (`*sockat.SocketFile`) は bind した直後にソケットのファイルの realpath と `(st_dev, st_ino)` を覚え、`Remove()` はそのパスが今も同じファイルの時だけ消す。覚えられなければ `ListenEx` は listener を閉じ、綴りの E を片付け、ファイルは消さずにエラーを返す
+- `b.File` (`*sockat.SocketFile`) は bind した直後にソケットのファイルの realpath (カーネルと同じに引く。`a/sym/../s.sock` なら sym の先の親の `s.sock`) と `(st_dev, st_ino)` を覚え、`Remove()` はそのパスが今も同じファイルの時だけ消す。覚えられなければ `ListenEx` は listener を閉じ、綴りの E を片付け、ファイルは消さずにエラーを返す
 - 元のパスの最後の要素が既にある symlink の時 (macOS・NetBSD では標準の bind がそれを辿り、その先にソケットを作る)、覚えるのは辿った先のソケットのファイルで、`Remove()` はそれを消す (利用者の symlink は消さない)。辿った先がソケットでなければ覚えられない時と同じに扱う
 - **`Remove()` は listener を閉じる前に呼ぶ** (上の `defer` の順で `Remove` が先に走る)。置き換えを見分けられるのは listener が開いている間だけ: 開いている間はカーネルがソケットのファイルを掴んでいるので、他のプロセスが消して作り直した物は別の `(st_dev, st_ino)` になり、`Remove` は消さない。閉じた後に消して作り直された物は、番号をすぐ使い回すファイルシステム (Linux の ext4、BSD の UFS / FFS) では同じ番号になり、`Remove` が消しうる
 - `Remove()` はファイルを消した後に `Cleanup()` もする。`Cleanup()` は綴りが通る E (symlink) だけを片付け、ファイルは消さない。どちらも成功した後の呼び出しは何もしない。失敗した後の呼び出しはやり直す (`Remove` はファイルを消せた後に `Cleanup` だけ失敗したなら、次はファイルに触らず `Cleanup` だけをやり直す。ファイルをやり直す時も同じファイルかを確かめ直す)。並行して呼ばれても消す操作は同時に 1 つ。自動では呼ばれない
@@ -132,7 +132,7 @@ log.Printf("dial %s: route %s after %v", path, rep.Route, rep.Skipped)
   - 途中のディレクトリが無い: `ENOENT`
   - B の場所がディレクトリでも symlink でもない: `ENOTDIR`
   - B が symlink、他人が書ける、持ち主が違う、途中が他人に付け替えられる: `EPERM`
-  - `UsableCrossUID` と一緒の bind 系で、途中か B 自身が other に x を持たない: `EPERM`
+  - `UsableCrossUID` と一緒の bind 系で、途中か B 自身が other に x を持たない: `EPERM` (持っている B は初めて持った時の判定を使う。B 自身が持たないと覚えた時だけ、呼び出しのたびに見直す)
 
 ゼロ値の `Options{}` が既定で、`ListenEx` / `DialEx` は `Listen` / `Dial` と同じ経路を同じ順に試す。
 
@@ -259,7 +259,7 @@ OS の一時ディレクトリの掃除 ([ハブの調査](https://github.com/ka
 | Linux / Android / illumos | 107 バイトまで |
 | Apple の OS / FreeBSD / NetBSD / OpenBSD | 103 バイトまで |
 
-それを超えるパスは、まずソケットのディレクトリを引き (無ければ `ENOENT`、ディレクトリでなければ `ENOTDIR`)、短い綴りを作る経路 ([SPEC の「経路の名前」](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#経路の名前)) を左から順に試し、最初に使えた経路で bind / connect する。経路が実際に bind / connect して失敗したら、そのエラーを返して次の経路でやり直さない。
+それを超えるパスは、まずソケットのディレクトリを引き (無ければ `ENOENT`、ディレクトリでなければ `ENOTDIR`。パスを字句で畳まず、カーネルと同じに引く: `a/sym/..` は `a` でなく sym の先の親)、短い綴りを作る経路 ([SPEC の「経路の名前」](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#経路の名前)) を左から順に試し、最初に使えた経路で bind / connect する。経路が実際に bind / connect して失敗したら、そのエラーを返して次の経路でやり直さない。
 
 bind (`Listen`・`ListenEx`・`ListenUnixgram`・`ListenUnixgramEx`):
 
@@ -306,6 +306,7 @@ B の作り方 ([SPEC-routes の「B の作り方」](https://github.com/kawaz/s
 - 置き場を `O_NOFOLLOW` で開いて fd で掴み、`mkdirat(0700)` → 0711 にそろえる → 開いて実ディレクトリ・持ち主が自分かを確かめる。既にあれば同じく確かめ (他人が書けないことも)、外れたら同じ置き場の `sockat-<uid>.<乱数>` に落とす
 - `$XDG_RUNTIME_DIR`・`$TMPDIR` が空か相対パスの時は、その置き場を使わない
 - プロセスは最初に作れた B を以後も使う (パスの長さでは変わらない)。綴りが収まらないと先に分かる時は B を作らず、その経路を使えないとして飛ばす
+- `UsableCrossUID` のための判定 (途中と B 自身が other に x を持つか) は B を初めて持った時に覚える。B 自身が持たないと覚えた時だけ、`UsableCrossUID` の呼び出しのたびに B の fd で見直し、持っていれば以後は持つと覚える (同時に B を作る他のプロセスが 0711 にそろえる前に開いた B でも、後で使えるように)
 - ソケットのディレクトリの B は `/proc` を通す綴りでだけ使う (実パスの綴りは元のパスより長い)。`/proc` の無い OS では thread-cwd / at の D の置き場にだけなる
 - 持っている B・D が消されていたら、次の呼び出しで作り直す
 
@@ -338,6 +339,7 @@ widened が無いので、Apple の OS で relative に収まらず、thread-cwd
 
 ## 標準と違う点
 
+- **空のパスは `EINVAL`**。標準は空のパスの bind を、Linux ではカーネルが選ぶ abstract の名前に bind し (autobind)、connect は errno の無いエラーで断る
 - **NUL を含むパスは長さによらず `EINVAL`**。標準は NUL で黙って切り詰め、別のパスに bind する。Linux / Android では、先頭が NUL か `@` の abstract socket の名前を標準にそのまま渡す (`Spelling` は `Original`)。abstract socket の無い OS (illumos を含む) では先頭の NUL も `EINVAL`
 - **illumos では `@` で始まるパスを cwd の `@...` のファイルとして bind / connect する**。標準は先頭の `@` を abstract の名前に書き換えるが、illumos のカーネルには abstract socket が無い。sockat は `./` を付けて標準に渡すので、listener の `Addr()` は `./@...` を返し、`Spelling` は `CwdRelative`。listener の Close はファイルを消さない (他の OS の標準が `@` で始まるパスを消さないのとそろえる。消すなら `ListenEx` の `Remove`)。`./` を付けて上限を超える 106・107 バイトのパスは長いパスとして経路に回る
 
@@ -346,7 +348,7 @@ widened が無いので、Apple の OS で relative に収まらず、thread-cwd
 - **listener の `Addr()` (と accept した接続の `LocalAddr()`、相手の `RemoteAddr()`) は渡したパスを返さず、bind の綴りを返す**。後で使えるかは `Spelling` で分かる。`ss -x`・`lsof`・`/proc/net/unix` 等に出るアドレスも綴りになる (link-file の綴りにはファイル名が出ない)
 - **既定の `Listen` の listener を閉じた時に消える物が綴りで違う**。Go の `UnixListener.Close` は覚えている綴りを unlink する。link-dir の綴りは途中の E を辿ってソケットのファイルを消す (標準と同じ)。**link-file の綴りは E 自体が消え、ソケットのファイルは残る**。`Dangling` の綴りでは何も消さない (`SetUnlinkOnClose(false)` にしてある)。`ListenEx` の listener はどの綴りでも消さない
 - **名前で終わらないパス** (`dir/`、`dir/.`、`dir/..`) は何も作らずに `EINVAL`
-- **ディレクトリを先に引く**: link-dir と thread-cwd・at の E はソケットのディレクトリの realpath を指し、proc-direct・at-direct・thread-cwd-direct はディレクトリを引いてからファイル名で渡す。その間の rename や symlink の張り替えは反映されない
+- **ディレクトリを先に引く**: link-dir と thread-cwd・at の E はソケットのディレクトリの realpath (カーネルと同じに引いた物) を指し、proc-direct・at-direct・thread-cwd-direct はディレクトリを引いてからファイル名で渡す。その間の rename や symlink の張り替えは反映されない
 - **他の goroutine の `os.Chdir`**: relative (connect) の途中で cwd が変わったら、結果を捨ててエラーを返す。相対パスの `ListenEx` (短いパスも) は、realpath を引いてから bind するまでに cwd が変わったら、listener を閉じ、ファイルは消さずにエラーを返す
 - **状態がアプリの置き場の外に増える**: B・D・E が `/tmp`・`$XDG_RUNTIME_DIR`・`$TMPDIR` (とソケットのディレクトリ) に残る (「[置き場に残る物と `Sweep`](#置き場に残る物と-sweep)」)
 - **生きている D が消されうる環境**: systemd v242 より古い Linux と、B が macOS の `$TMPDIR` にある時。綴りが辿れなくなるだけ

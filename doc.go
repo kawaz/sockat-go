@@ -55,6 +55,12 @@
 // alphanumeric characters) and only when no live process holds them. B in the
 // socket's directory and a B fallen back to are removed by neither. B,
 // Options.Base's included, is sockat's alone: put nothing else in it.
+// sockat never removes a dead D on its own, neither at a resolve nor when a
+// process starts or ends. A long-lived process that binds long paths again
+// and again (a daemon making a socket per session, say) piles up the E of
+// [Listen] until it ends: use [ListenEx] instead, and for each socket no
+// longer needed call Bound.File's Remove (the socket file too) or Cleanup
+// (the E only).
 //
 // The SocketFile of ListenEx (and of ForBind.SocketFile) records the socket
 // file the path leads to: where its last component is a symlink already
@@ -120,6 +126,9 @@
 //
 // # What differs from the net package
 //
+//   - An empty path is EINVAL. The net package binds it, on Linux, to an
+//     abstract name the kernel picks, and fails a connect to it with an
+//     error that has no errno.
 //   - A path containing a NUL byte is EINVAL, whatever its length (the net
 //     package would cut the path short there and bind some other path). An
 //     abstract socket name (a leading NUL, or '@', on Linux and Android) is
@@ -144,8 +153,10 @@
 //     Bound.File's Remove, before closing the listener.
 //   - A long path that does not end with a file name ("dir/", "dir/.",
 //     "dir/..") is EINVAL, and nothing is created.
-//   - The directory is looked up first (resolved to a real path for E); a
-//     rename or a symlink repointed in between is not seen.
+//   - The directory is looked up first (resolved to a real path for E, as
+//     the kernel resolves it: the path is never folded on the string, so
+//     "a/sym/.." is the parent of where sym leads, not "a"); a rename or a
+//     symlink repointed in between is not seen.
 //   - Dial's relative route is exposed to another goroutine's os.Chdir: when
 //     the cwd changed during the call, the result is dropped and an error is
 //     returned.

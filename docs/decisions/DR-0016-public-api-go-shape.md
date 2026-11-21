@@ -62,13 +62,13 @@ package は `sockat` 1 つ (子 package を作らない)。
 | 各 `Ex` | `*RouteError`。`Unwrap` で上の `*net.OpError` に届く |
 | `ResolveForBind`・`ResolveForConnect` | `*RouteError`。`Err` は `*os.PathError` (`Op` は `resolve`、`Path` は呼び出し元のパス) |
 | `(*ForBind).SocketFile`・`Remove`・`Cleanup`・`Sweep`・`SweepBase` | `*os.PathError` (複数あれば `errors.Join`) |
-| 引数の誤り (SPEC「エラー」) | `syscall.EINVAL` を包んだ上の型 |
+| 引数の誤り (SPEC「エラー」と、「短いパス」の空のパス) | `syscall.EINVAL` を包んだ上の型 |
 | 一般のエラー (relative の途中で cwd が変わった) | errno を持たないエラーを包んだ上の型 |
 | `Options.Base` の確かめに外れた | `ENOENT` / `ENOTDIR` / `EPERM` を包んだ上の型。`Ex` では `RouteError.Route` は `""`、`Skipped` は空 |
 
 `SocketFile`:
 
-- `ListenEx`・`ListenUnixgramEx` は bind した直後にソケットのファイルの realpath と `(st_dev, st_ino)` を覚える。元のパスの最後の要素が既にある symlink の時は辿った先のソケットのファイルを覚え、辿った先がソケットでなければ覚えられない時と同じに扱う。覚えられなければ listener を閉じ、作った E を片付け、ソケットのファイルは消さずにエラーを返す
+- `ListenEx`・`ListenUnixgramEx` は bind した直後にソケットのファイルの realpath (カーネルと同じに引く。[DR-0018](DR-0018-route-orders-per-os.md)) と `(st_dev, st_ino)` を覚える。元のパスの最後の要素が既にある symlink の時は辿った先のソケットのファイルを覚え、辿った先がソケットでなければ覚えられない時と同じに扱う。覚えられなければ listener を閉じ、作った E を片付け、ソケットのファイルは消さずにエラーを返す
 - 相対パスでは、何かを引く前と、realpath と bind の後でプロセスの cwd の `(st_dev, st_ino)` を比べ、違えば覚えられない時と同じに扱う
 - `Remove` はそのパスが今も同じファイルの時だけ消し、その後 `Cleanup` もする。listener は閉じない。既に無い・置き換わっていた時は nil。エラーを返すのは確かめられない時 (`lstat` が `ENOENT` / `ENOTDIR` 以外で失敗) と消すのに失敗した時で、その時も `Cleanup` まで行う
 - `Remove`・`Cleanup` は 1 回目だけ働く。`ForBind` と、その `SocketFile()` が返す物は同じ E の片付けを共有する

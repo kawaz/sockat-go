@@ -1,14 +1,15 @@
-# DR-0002: 標準が受け付けるパスと abstract の名前は標準にそのまま渡す。それ以外の NUL は長さによらず EINVAL
+# DR-0002: 標準が受け付けるパスと abstract の名前は標準にそのまま渡す。空のパスとそれ以外の NUL は長さによらず EINVAL
 
 - Status: Accepted
 - Date: 2026-11-18
 
 ## Context
 
-Go の標準 (`syscall.SockaddrUnix`) は、macOS / BSD で 103 バイト、Linux / illumos で 107 バイトまでのパスを受け付ける。Linux / Android / illumos / Solaris の標準は、先頭の `@` を NUL に書き換え、先頭が NUL のパスを abstract socket の名前として渡す (`syscall_linux.go` / `syscall_solaris.go` の `SockaddrUnix.sockaddr`)。abstract namespace を持つカーネルは Linux / Android だけで、illumos のカーネルは abstract の名前を受け付けない (bind が `ENOENT`)。NUL を含むパスは黙って NUL で切り詰め、別のパスに bind する (`a\0b` → `a`。macOS と Linux で実測)。
+Go の標準 (`syscall.SockaddrUnix`) は、macOS / BSD で 103 バイト、Linux / illumos で 107 バイトまでのパスを受け付ける。Linux / Android / illumos / Solaris の標準は、先頭の `@` を NUL に書き換え、先頭が NUL のパスを abstract socket の名前として渡す (`syscall_linux.go` / `syscall_solaris.go` の `SockaddrUnix.sockaddr`)。abstract namespace を持つカーネルは Linux / Android だけで、illumos のカーネルは abstract の名前を受け付けない (bind が `ENOENT`)。NUL を含むパスは黙って NUL で切り詰め、別のパスに bind する (`a\0b` → `a`。macOS と Linux で実測)。空のパスは、Linux では bind がカーネルの選ぶ abstract の名前に bind し (autobind)、macOS では bind が `EINVAL`、connect はどちらでも errno の無い `missing address` になる (実測 2026-11-21)。
 
 ## Decision
 
+- 空のパスは、何も見ずに `EINVAL` (各関数のエラーの型で包む)
 - 標準が受け付ける長さ (`len(unix.RawSockaddrUnix{}.Path) - 1`) 以内は `net.ListenUnix` / `net.ListenUnixgram` / `net.DialUnix` をそのまま呼ぶ。何も足さない (環境変数も読まない)
 - Linux / Android で abstract socket の名前 (先頭が NUL、または Go の記法の `@`) は、長さによらず標準にそのまま渡す。NUL の検査もしない
 - abstract namespace の無い OS では、先頭が NUL のパスも長さによらず `EINVAL`。`@` で始まるパスは普通の相対パス
@@ -25,6 +26,7 @@ Go の標準 (`syscall.SockaddrUnix`) は、macOS / BSD で 103 バイト、Linu
 - illumos の標準は `@` を abstract に書き換えるので、そのまま渡すと cwd の `@...` のファイルでなく、存在しない abstract の名前に bind / connect する。`./@...` は同じ cwd の同じファイルを指す綴りで、標準が書き換えない最短の形
 - 綴りの `@` を abstract と読まれると、ファイルでなく abstract の名前空間に bind / connect してしまう
 - NUL で切り詰めると、利用者が渡したのと別のパスにソケットができる (ハブの裁定)
+- 空のパスを標準に渡すと、Linux では利用者の知らない abstract の名前に bind し、OS で振る舞いが割れる。resolve は空の綴りを返してしまう (SPEC「短いパス」の空のパスは引数の誤り)
 
 illumos で `./` を付けると、SPEC の「標準にそのまま渡す。何も足さない」と次の点が違う。どれも、そのまま渡すと bind / connect 自体が通らないことと引き換え:
 
@@ -44,3 +46,4 @@ illumos で `./` を付けると、SPEC の「標準にそのまま渡す。何�
 
 - 先頭以外の NUL を長さによらず引数の誤りにし、abstract (先頭が NUL、Go の `@`) は標準に渡すこと: kawaz 裁定 (HB-Q5、ハブの DR-0006) 2026-11-18
 - abstract namespace の無い OS で先頭の NUL を引数の誤り、`@` を普通のパスとすること: ハブの SPEC「短いパス」
+- 空のパスを引数の誤りとすること: ハブの SPEC「短いパス」(ハブ 80d6eec4、sockat-ts のレビュー)

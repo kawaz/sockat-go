@@ -38,6 +38,7 @@ resolve: `ResolveForBind` は link-dir と、bind が symlink を辿ると実測
 - FreeBSD の connect の link-file (SPEC で未確定) は作る。connect は最後の要素の symlink を辿る (SPEC-routes「link-file」)。publish の時の CI の FreeBSD の VM で確かめ、結果をハブに知らせる
 - 経路が実際に bind / connect して失敗したら、そのエラーを返して次の経路を試さない。その時、その呼び出しで作った E は返す前に消す。次へ進むのは経路自体が使えない時 (綴りが収まらない、B・D・E を作れない、手段が無い、`/proc` を使えない、link-file の bind で元のパスに物が無い、relative で cwd が変わっている) だけ
 - 長いパスは、経路を試す前にソケットのディレクトリを `stat` で引き、realpath を取る (無ければ `ENOENT`、ディレクトリでなければ `ENOTDIR`、realpath を引けなければそのエラー)。続いて `Options.Base` を確かめる (何も作らない)。どちらも `Skipped` に何も入れない
+- パスは字句で畳まない。realpath は、相対パスなら getcwd(3) の値の後に `/` とそのパスをそのまま足し、`filepath.EvalSymlinks` で要素ごとに辿る (`..` は辿り着いた実ディレクトリから上がる)。置き場・`Options.Base`・`SocketFile` の記録・symlink の先の解決も同じ関数 (`realDir`) を通す
 - ソケットのディレクトリの fd が要る経路 (proc-direct、at-direct、thread-cwd-direct) のために、Linux / Android は `O_PATH | O_DIRECTORY`、Apple の OS は `O_SEARCH` (カーネルが `EISDIR` / `EINVAL` を返したら `O_RDONLY`)、他は `O_RDONLY | O_DIRECTORY` で開く。開けなければその経路は使えない
 - `/proc` を使えるか (`procUsable`) は、ソケットのディレクトリの fd (開けなければ `/` を開いた fd) について、`<proc>/self/fd/<fd>` の `stat` が fd の `fstat` と同じ `(st_dev, st_ino)` かで決める
 - thread-cwd・thread-cwd-direct の手段は使い捨ての goroutine ([DR-0004](DR-0004-thread-cwd-route.md))、at・at-direct は `bindat` / `connectat` を自前のソケットで呼ぶ ([DR-0006](DR-0006-own-socket-into-net.md))
@@ -47,6 +48,7 @@ resolve: `ResolveForBind` は link-dir と、bind が symlink を辿ると実測
 
 - 列を OS (と Linux の `/proc`) だけで決めると、同じ呼び出しは同じ列を通り、`Skipped` を言語どうしで比べられる (ハブの適合試験)
 - bind が symlink を辿るかは実測した OS では分かっているので、辿らない OS で link-file を試して E を作り消す手間を省く。分からない OS は実行時に見分けるしかない
+- `a/sym/..` はカーネルでは sym の先の親で、文字列の上で畳むと `a` になる。E がそちらを指すと、ソケットが別の所にでき、`Remove` が別のサーバのソケットを消しうる。`filepath.Abs` は Clean で畳み、`$PWD` が cwd を指す時は `$PWD` (symlink を通った綴りでありうる) から始めるので、`../x` も symlink の親から上がってしまう
 - `/proc` が見えても PID の名前空間と `/proc` の mount が食い違う環境では、`/proc/self/fd/<fd>` が別の物を指しうる。`(st_dev, st_ino)` を比べれば無関係なディレクトリに connect しない
 - `Dangling` の綴りは誰にも辿れないので、D を置く B が他人に辿れるかは関係ない
 
@@ -56,6 +58,8 @@ resolve: `ResolveForBind` は link-dir と、bind が symlink を辿ると実測
 |---|---|
 | `/proc` を使えない Linux の connect で proc-direct を `Skipped` に入れてから relative へ進む | SPEC の connect の表は Linux を `/proc` を使えるかで 2 行に分けており、使えない行に proc-direct は無い (ハブの答え) |
 | その OS に手段の無い経路 (NetBSD 等の thread-cwd、FreeBSD 以外の at) も `Skipped` に入れる | 列に並ばない経路まで入れると、OS ごとに `Skipped` が膨らみ、言語どうしの比べ方が割れる |
+| `filepath.Abs` で絶対パスにしてから `filepath.EvalSymlinks` で辿る | Clean が `sym/..` を畳み、`$PWD` を cwd の綴りに使うので、カーネルと別のディレクトリを引く (macOS と Linux で実測。`nofold_test.go`) |
+| ディレクトリを開いて fd から実パスを引く (`F_GETPATH`・`/proc/self/fd`) | OS ごとに手段が割れ、`/proc` の無い Linux で引けない |
 | `/proc` を使えるかを、`/proc/self/fd/<fd>` を引けるかだけで決める | PID の名前空間と `/proc` の mount の食い違いで、引けても別の物を指しうる |
 | FreeBSD の connect の link-file を作らない | connect は最後の symlink をいつも辿るので、作らない理由が無い。at-direct (103 まで) を超えるファイル名に届く |
 
@@ -64,3 +68,4 @@ resolve: `ResolveForBind` は link-dir と、bind が symlink を辿ると実測
 - 列と経路: ハブの SPEC「bind の順」「connect の順」と DR-0017
 - `Skipped` に列の経路だけを入れること、`/proc` を `(st_dev, st_ino)` で確かめること、`UsableCrossUID` の時の thread-cwd・at の D の置き場、FreeBSD の connect の link-file を作って CI で確かめること: ハブの答え (2026-11-21、3 言語共通として SPEC に入った)
 - bind が symlink を辿るかの実測: ハブの findings (2026-11-19)
+- パスを字句で畳まないこと: ハブの SPEC「長いパス」(ハブ 80d6eec4、sockat-ts のレビュー)。realpath の引き方は実装側の判断 2026-11-21

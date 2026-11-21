@@ -431,6 +431,11 @@ func TestChildRelativeIsNotFoldedLexically(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The first route of the connect order without /proc and thread-cwd:
+	// relative where the system has it, at-direct on FreeBSD (which has no
+	// relative route). Either takes the socket's directory as the kernel
+	// resolves it, so the dial reaches the listener at the kernel's place.
+	first := stepNames(dialSteps(false))[0]
 	for i, d := range []decoy{decoyNone, decoyDirs, decoySocket} {
 		t.Run("relative, "+d.String(), func(t *testing.T) {
 			tail := f.longTail(t, directMax, "d"+string(rune('0'+i))+".sock", d)
@@ -441,8 +446,8 @@ func TestChildRelativeIsNotFoldedLexically(t *testing.T) {
 			if err != nil {
 				t.Fatalf("relative, %s: %v", d, err)
 			}
-			if r != routeRelative {
-				t.Fatalf("relative, %s: route %s", d, r)
+			if r != first {
+				t.Fatalf("relative, %s: route %s, want %s", d, r, first)
 			}
 			ping(t, l, conn)
 			conn.Close()

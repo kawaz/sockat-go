@@ -73,9 +73,6 @@ func openDir(dir string) (*os.File, error) {
 	return os.NewFile(uintptr(fd), dir), nil
 }
 
-// procUsable: no /proc here.
-func procUsable(*os.File, string) bool { return false }
-
 // newSocket creates a socket of o's type (stream, or datagram for
 // opListenGram and opDialGram) set up as the net package sets up its own:
 // close-on-exec and nonblocking.

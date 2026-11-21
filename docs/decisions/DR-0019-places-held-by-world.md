@@ -33,7 +33,7 @@
 綴りの長さと procB:
 
 - 綴りが収まらないと先に分かる時は B を作らない。見積もりは置き場の実パスと B の名前、最短の procB (`/proc/<pid>/fd/0`)、最短の E の名前で行い、B を持った後に実際の fd と次の E の名前で確かめ直す。収まらなければ次の置き場には移らず、その経路を使えないとする
-- `/proc/<pid>/fd` を引けない時は、procB は収まらないとして見積もる (procB を使えない)
+- 見積もりでも procB を使えるかを確かめる: `/` を開いた fd について `/proc/<pid>/fd/<fd>` の `stat` がその fd の `fstat` と同じ `(st_dev, st_ino)` でなければ (`/proc/<pid>/fd` を引けない時も)、procB は収まらないとして見積もる (procB を使えない。ハブの SPEC の用語、2026-11-22)
 - procB は、`/proc/<pid>/fd/<B の fd>` の `stat` が B の `(st_dev, st_ino)` と同じ時だけ使う。ソケットのディレクトリの B は procB の綴りでだけ使う
 
 `Sweep` / `SweepBase`:

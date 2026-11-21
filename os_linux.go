@@ -29,30 +29,6 @@ func dialSteps(proc bool) []dialStep {
 	}
 }
 
-// procUsable reports whether /proc can be used (SPEC "用語"): a stat of
-// <proc>/self/fd/<fd> has the (st_dev, st_ino) of the directory the fd holds,
-// for the fd of the socket's directory (sdir), or of / opened for the check
-// when sdir could not be opened. Where the PID namespace and the /proc
-// mounted disagree, or /proc is not there, it does not.
-func procUsable(sdir *os.File, proc string) bool {
-	fd := -1
-	if sdir != nil {
-		fd = int(sdir.Fd())
-	} else {
-		var err error
-		if fd, err = unix.Open("/", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0); err != nil {
-			return false
-		}
-		defer unix.Close(fd)
-	}
-	var held unix.Stat_t
-	if unix.Fstat(fd, &held) != nil {
-		return false
-	}
-	id, ok := statID(proc + "/self/fd/" + strconv.Itoa(fd))
-	return ok && id == fileID{uint64(held.Dev), uint64(held.Ino)}
-}
-
 // threadCwdPossible reports whether the thread-cwd route may be tried: not
 // under a seccomp filter (prctl(PR_GET_SECCOMP) other than 0, or failing),
 // which may answer unshare(2) by killing the process.
@@ -63,14 +39,20 @@ func threadCwdPossible() bool {
 
 // procDirect connects through <proc>/self/fd/<fd of the socket's
 // directory>/<name>, with no E: a connect leaves no spelling behind. Unusable
-// when the socket's directory was not opened or the spelling does not fit
-// sun_path (a file name of about 90 bytes or more). Only in the row of the
+// when the socket's directory was not opened, when <proc>/self/fd does not
+// show it (checked for the call's fd, apart from the row's check, SPEC-routes
+// "proc-direct"), or when the spelling does not fit sun_path (a file name of
+// about 90 bytes or more). Only in the row of the
 // connect order where /proc can be used (procUsable).
 func (c *dialCall) procDirect() (endpoint, error) {
 	if c.sdir == nil {
 		return nil, unusable("socket directory not opened")
 	}
-	via := c.w.cfg.proc + "/self/fd/" + strconv.Itoa(int(c.sdir.Fd())) + "/" + c.name
+	fds := c.w.cfg.proc + "/self/fd"
+	if !procShows(fds, int(c.sdir.Fd())) {
+		return nil, unusable("/proc does not show the socket directory")
+	}
+	via := fds + "/" + strconv.Itoa(int(c.sdir.Fd())) + "/" + c.name
 	if len(via) > directMax {
 		return nil, unusable("spelling too long")
 	}

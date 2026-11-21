@@ -38,9 +38,6 @@ const noWidenedRoute = "no widened route in sockat-go"
 // most 253 bytes.
 func (c *dialCall) widened() (endpoint, error) { return nil, unusable(noWidenedRoute) }
 
-// procUsable: no /proc here.
-func procUsable(*os.File, string) bool { return false }
-
 // threadCwdPossible: __pthread_fchdir is tried (threadChdir tells when the
 // kernel lacks it).
 func threadCwdPossible() bool { return true }

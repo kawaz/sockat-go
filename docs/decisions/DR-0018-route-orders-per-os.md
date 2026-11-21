@@ -40,7 +40,7 @@ resolve: `ResolveForBind` は link-dir と、bind が symlink を辿ると実測
 - 長いパスは、経路を試す前にソケットのディレクトリを `stat` で引き、realpath を取る (無ければ `ENOENT`、ディレクトリでなければ `ENOTDIR`、realpath を引けなければそのエラー)。続いて `Options.Base` を確かめる (何も作らない)。どちらも `Skipped` に何も入れない
 - パスは字句で畳まない。realpath は、相対パスなら getcwd(3) の値の後に `/` とそのパスをそのまま足し、`filepath.EvalSymlinks` で要素ごとに辿る (`..` は辿り着いた実ディレクトリから上がる)。置き場・`Options.Base`・`SocketFile` の記録・symlink の先の解決も同じ関数 (`realDir`) を通す
 - ソケットのディレクトリの fd が要る経路 (proc-direct、at-direct、thread-cwd-direct) のために、Linux / Android は `O_PATH | O_DIRECTORY`、Apple の OS は `O_SEARCH` (カーネルが `EISDIR` / `EINVAL` を返したら `O_RDONLY`)、他は `O_RDONLY | O_DIRECTORY` で開く。開けなければその経路は使えない
-- `/proc` を使えるか (`procUsable`) は、ソケットのディレクトリの fd (開けなければ `/` を開いた fd) について、`<proc>/self/fd/<fd>` の `stat` が fd の `fstat` と同じ `(st_dev, st_ino)` かで決める
+- connect の行を選ぶ `/proc` を使えるか (`procUsable`) は、`/` を開いた fd について、`<proc>/self/fd/<fd>` の `stat` が fd の `fstat` と同じ `(st_dev, st_ino)` かで決める。proc-direct はそれと別に、その呼び出しのソケットのディレクトリの fd で同じく確かめ、違えば使えない (ハブの SPEC の用語、2026-11-22)
 - thread-cwd・thread-cwd-direct の手段は使い捨ての goroutine ([DR-0004](DR-0004-thread-cwd-route.md))、at・at-direct は `bindat` / `connectat` を自前のソケットで呼ぶ ([DR-0006](DR-0006-own-socket-into-net.md))
 - thread-cwd・at の D は、`UsableCrossUID` の時も、それを見ない普段の B (置き場 1〜4 の順、`Options.Base` があればその B) に作る
 

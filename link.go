@@ -3,6 +3,8 @@ package sockat
 import (
 	"os"
 	"strconv"
+
+	"golang.org/x/sys/unix"
 )
 
 // The spellings through B (SPEC-routes "綴りの形"): procB,
@@ -29,16 +31,44 @@ func (w *world) procFD() string {
 }
 
 // procBShortest is the shortest procB can be (a one-digit fd), for the
-// estimate before B is opened. "" where there is no /proc, or no
-// /proc/<pid>/fd to look up (procB then cannot be used whatever B is).
+// estimate before B is opened. "" where /proc cannot be used for procB, as
+// procB itself checks it but with a directory opened for the check (SPEC
+// "用語"): where /proc/<pid>/fd does not show it, procB cannot be used
+// whatever B is.
 func (w *world) procBShortest() string {
-	if !hasProc {
-		return ""
-	}
-	if _, ok := statID(w.procFD()); !ok {
+	if !hasProc || !procShows(w.procFD(), -1) {
 		return ""
 	}
 	return w.procFD() + "/0"
+}
+
+// procUsable reports whether the connect takes the row of the connect order
+// where /proc can be used (SPEC "用語"): <proc>/self/fd shows / opened for
+// the check. Where the PID namespace and the /proc mounted disagree, or /proc
+// is not there, it does not. Whether proc-direct can be used for the call's
+// directory is checked apart (dialCall.procDirect).
+func procUsable(proc string) bool {
+	return hasProc && procShows(proc+"/self/fd", -1)
+}
+
+// procShows reports whether the entry <fds>/<fd> (fds a /proc/self/fd or a
+// /proc/<pid>/fd) has the (st_dev, st_ino) of the directory fd holds; for fd
+// -1, of / opened for the check.
+func procShows(fds string, fd int) bool {
+	if fd < 0 {
+		f, err := openDir("/")
+		if err != nil {
+			return false
+		}
+		defer f.Close()
+		fd = int(f.Fd())
+	}
+	var held unix.Stat_t
+	if unix.Fstat(fd, &held) != nil {
+		return false
+	}
+	id, ok := statID(fds + "/" + strconv.Itoa(fd))
+	return ok && id == fileID{uint64(held.Dev), uint64(held.Ino)}
 }
 
 // linkDirLen is the length of link-dir's spelling <bspell>/<D>/<E>/<name>.

@@ -19,9 +19,6 @@ func dialSteps(bool) []dialStep {
 	}
 }
 
-// procUsable: no /proc here.
-func procUsable(*os.File, string) bool { return false }
-
 // openDir opens dir O_RDONLY | O_DIRECTORY.
 func openDir(dir string) (*os.File, error) {
 	fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)

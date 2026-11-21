@@ -155,7 +155,7 @@ func (w *world) dialLong(o op, path string, opts Options, tr *trace) (endpoint, 
 		defer sdir.Close()
 	}
 	c := &dialCall{w: w, o: o, path: path, dir: dir, name: name, sdir: sdir, opts: opts}
-	for _, s := range dialSteps(procUsable(sdir, w.cfg.proc)) {
+	for _, s := range dialSteps(procUsable(w.cfg.proc)) {
 		ep, err := s.try(c)
 		if errors.Is(err, errUnusable) {
 			tr.add(s.route, reasonOf(err))

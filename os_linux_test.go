@@ -131,8 +131,8 @@ func TestTheConnectRowIsDecidedByWhetherProcCanBeUsed(t *testing.T) {
 	}
 }
 
-// /proc can be used only where <proc>/self/fd/<fd> is the directory the fd
-// holds (the same (st_dev, st_ino)): a /proc whose entry names another
+// /proc shows a directory only where <proc>/self/fd/<fd> is the directory the
+// fd holds (the same (st_dev, st_ino)), procShows: a /proc whose entry names another
 // directory (a PID namespace and a /proc mounted that disagree, stood in for
 // by a fake /proc) is not used, one whose entry is the directory is, and a
 // /proc with no such entry is not.
@@ -146,25 +146,93 @@ func TestProcIsUsableOnlyWhereItsFdEntryIsTheDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	entry := fdDir + "/" + strconv.Itoa(int(f.Fd()))
-	if procUsable(f, fake) {
+	if procShows(fdDir, int(f.Fd())) {
 		t.Fatal("usable with no entry for the fd")
 	}
 	if err := os.Mkdir(entry, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if procUsable(f, fake) {
+	if procShows(fdDir, int(f.Fd())) {
 		t.Fatal("usable with an entry that is another directory")
 	}
 	os.Remove(entry)
 	if err := os.Symlink(d, entry); err != nil {
 		t.Fatal(err)
 	}
-	if !procUsable(f, fake) {
+	if !procShows(fdDir, int(f.Fd())) {
 		t.Fatal("not usable with an entry that is the directory")
 	}
-	if procHere() && (!procUsable(f, "/proc") || !procUsable(nil, "/proc")) {
+	if procHere() && (!procShows("/proc/self/fd", int(f.Fd())) || !procUsable("/proc")) {
 		t.Fatal("the real /proc not usable")
 	}
+}
+
+// The checks of /proc are three (SPEC "用語", `/proc` を使える): the
+// connect's row is chosen by / opened for the check, and proc-direct checks
+// the fd of the call's socket directory on its own. A /proc whose
+// self/fd entries all name / (a fake one: the entry of the / opened for the
+// row matches, the one of the socket's directory does not) gives the row of
+// proc-direct, in which proc-direct is unusable for the directory: skipped
+// is standard, proc-direct and thread-cwd-direct (off), not relative (the
+// other row's), and the dial goes on to link-file. Run in a child whose cwd is a
+// temporary directory, so that its fds are few (the fake entries cover 0 to
+// 1023) and relative would not fit.
+func TestTheConnectRowIsChosenByRootAndProcDirectChecksTheSocketsDirectory(t *testing.T) {
+	t.Parallel()
+	if !inTmpCwd(t) {
+		return
+	}
+	fake := tmpDir(t)
+	fds := fake + "/self/fd"
+	if err := os.MkdirAll(fds, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for n := range 1024 {
+		if err := os.Symlink("/", fds+"/"+strconv.Itoa(n)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := nest(t, tmpDir(t), 600, directName)
+	l := listenAt(t, p)
+	w, _ := testWorld(t, func(c *config, _ testPlaces) { c.proc, c.threadCwd = fake, false })
+	conn, r, sk, err := dialTraced(t, w, p, Options{})
+	if err != nil || r != routeLinkFile || !slices.Equal(namesOf(t, sk), []route{routeStandard, routeProcDirect, routeThreadCwdDirect}) {
+		t.Fatalf("%s after %v, %v; want link-file after standard, proc-direct, thread-cwd-direct", r, sk, err)
+	}
+	ping(t, l, conn)
+}
+
+// The estimate of procB before B is made (SPEC-routes "綴りの形") checks /proc
+// as procB itself does, by the (st_dev, st_ino) of an fd's entry under
+// /proc/<pid>/fd, with a directory opened for the check: a /proc whose
+// /proc/<pid>/fd is there but has no entry that is the directory (a PID
+// namespace and a /proc that disagree, stood in for by a fake one) does not
+// count as a procB that fits. So where only procB would fit (the place's
+// real path too long for link-dir), no B is made in the place (SPEC-routes
+// "実体の置き場": none where the spelling is known not to fit), and the bind
+// goes on past link-dir (to thread-cwd, off here, as it makes a B of its own
+// wherever its spelling, relative to D, fits).
+func TestTheEstimateOfProcBChecksProcAsProcBDoes(t *testing.T) {
+	t.Parallel()
+	fake := tmpDir(t)
+	if err := os.MkdirAll(fmt.Sprintf("%s/%d/fd", fake, os.Getpid()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	deep := filepath.Dir(nest(t, tmpDir(t), 100, "x"))
+	w, _ := testWorld(t, func(c *config, _ testPlaces) {
+		c.proc, c.tmp, c.threadCwd = fake, deep, false
+		c.getenv = func(string) string { return "" }
+	})
+	markUntouched(t, deep)
+	tr := &trace{}
+	l, _, err := w.listen(nest(t, tmpDir(t), 300, "s.sock"), tr)
+	if err == nil {
+		t.Cleanup(func() { l.Close() })
+	}
+	if got := namesOf(t, tr.skipped); len(got) < 2 || got[1] != routeLinkDir {
+		t.Fatalf("skipped %v, %v; want link-dir passed over", tr.skipped, err)
+	}
+	assertUntouched(t, deep)
 }
 
 // Without /proc, a missing directory is still ENOENT (from looking it up,

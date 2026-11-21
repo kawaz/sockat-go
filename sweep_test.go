@@ -164,6 +164,43 @@ func TestSweepLeavesWhatIsNotADeadDOfSymlinks(t *testing.T) {
 	}
 }
 
+// Sweep passes over a B it cannot read (SPEC "sweep"): a B of ours whose mode
+// lets its owner search it but not read it cannot be listed, and that is no
+// error of Sweep's (as a place that fails its check is not), while the B of
+// the next place is still swept. A dead D in the unreadable B stays. As root,
+// who reads it all the same, in a child dropped to nobody.
+func TestSweepPassesOverABItCannotRead(t *testing.T) {
+	t.Parallel()
+	if !unprivileged(t) {
+		return
+	}
+	w, ps := testWorld(t, nil)
+	unread := ps.tmp + "/" + uidName()
+	next := ps.tmpdir + "/" + uidName()
+	for _, b := range []string{unread, next} {
+		if err := os.Mkdir(b, 0o711); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(b+"/deadD00000", 0o711); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(unread, 0o311); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(unread, 0o711) })
+	if err := w.sweep(); err != nil {
+		t.Fatalf("Sweep with an unreadable B: %v", err)
+	}
+	if exists(next + "/deadD00000") {
+		t.Fatal("the dead D of the next place's B is still there")
+	}
+	os.Chmod(unread, 0o711)
+	if !exists(unread + "/deadD00000") {
+		t.Fatal("the unreadable B was swept")
+	}
+}
+
 // Sweep and SweepBase only look at entries of B named as a D is (10 letters
 // and digits, as randomChars makes them): a directory of another name is not
 // one this library made, so it stays even when it is unlocked and holds only

@@ -109,6 +109,12 @@ func reasonOf(err error) string {
 	return "unusable"
 }
 
+// errEmptyPath is the error of an empty socket path: an invalid argument
+// (SPEC "短いパス"), which the net package would otherwise take to bind an
+// address of the kernel's choosing (an abstract name on Linux) or report
+// with an error of no errno.
+var errEmptyPath = fmt.Errorf("socket path must not be empty: %w", syscall.EINVAL)
+
 // errCwdChanged is returned when the cwd changed while binding / connecting
 // through a path relative to it.
 var errCwdChanged = errors.New("the current directory changed while binding / connecting through a path relative to it; the result was discarded")
@@ -125,7 +131,7 @@ func (w *world) listen(path string, opts Options, tr *trace) (*net.UnixListener,
 // bind binds (and listens, for opListen) at path, recording the routes found
 // unusable in tr (nil records nothing).
 //
-// A path the standard library accepts goes to it as is (stdSpelling), before
+// An empty path is EINVAL. A path the standard library accepts goes to it as is (stdSpelling), before
 // anything else is looked at (the environment and Options included), and
 // its listener removes the socket file on Close as the net package's does. So
 // does an abstract socket name (Linux, Android). A NUL anywhere else, a
@@ -140,6 +146,9 @@ func (w *world) bind(o op, path string, opts Options, tr *trace) (endpoint, boun
 		if err := givenShape(opts.Base); err != nil {
 			return nil, bound{}, opError(o, path, err)
 		}
+	}
+	if path == "" {
+		return nil, bound{}, opError(o, path, errEmptyPath)
 	}
 	if abstractName(path) {
 		ep, err := viaStd(o, path, true)

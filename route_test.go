@@ -288,6 +288,70 @@ func TestPathsWithoutAFileNameOrWithANULAreEINVALAndCreateNothing(t *testing.T) 
 	}
 }
 
+// An empty path is an invalid argument (SPEC "短いパス"): every function
+// refuses it with EINVAL in its own error type, and gives no socket. The net
+// package would otherwise bind an address of the kernel's choosing (an
+// abstract name on Linux, where ListenEx could then record no file) or fail
+// a dial with an error of no errno, and a resolve would spell the empty
+// path. Listen, Dial, ListenUnixgram and DialUnixgram return the
+// *net.OpError of the net package's shape (Op, Net, the caller's path as
+// Addr); each Ex a *RouteError with no route and nothing skipped that
+// unwraps to that *net.OpError; ResolveForBind and ResolveForConnect a
+// *RouteError around an *os.PathError of Op "resolve" for the path.
+func TestAnEmptyPathIsEINVALEverywhere(t *testing.T) {
+	t.Parallel()
+	wantNetError := func(what string, o op, err error) {
+		t.Helper()
+		var oe *net.OpError
+		if !errors.Is(err, syscall.EINVAL) || !errors.As(err, &oe) {
+			t.Fatalf("%s: %T %v, want a *net.OpError of EINVAL", what, err, err)
+		}
+		if oe.Op != o.netName() || oe.Net != o.network() || oe.Addr == nil || oe.Addr.String() != "" {
+			t.Fatalf("%s: Op %q Net %q Addr %v", what, oe.Op, oe.Net, oe.Addr)
+		}
+	}
+	wantRouteError := func(what string, o op, err error) {
+		t.Helper()
+		re := routeErr(t, err)
+		if re.Route != "" || len(re.Skipped) != 0 {
+			t.Fatalf("%s: route %q, skipped %v", what, re.Route, re.Skipped)
+		}
+		wantNetError(what, o, err)
+	}
+
+	l, err := Listen("")
+	wantNetError("Listen", opListen, err)
+	c, err := Dial("")
+	wantNetError("Dial", opDial, err)
+	g, err := ListenUnixgram("")
+	wantNetError("ListenUnixgram", opListenGram, err)
+	gc, err := DialUnixgram("")
+	wantNetError("DialUnixgram", opDialGram, err)
+	if l != nil || c != nil || g != nil || gc != nil {
+		t.Fatalf("a socket for the empty path: %v %v %v %v", l, c, g, gc)
+	}
+
+	le, lb, err := ListenEx("", Options{})
+	wantRouteError("ListenEx", opListen, err)
+	ce, _, err := DialEx("", Options{})
+	wantRouteError("DialEx", opDial, err)
+	ge, gb, err := ListenUnixgramEx("", Options{})
+	wantRouteError("ListenUnixgramEx", opListenGram, err)
+	gce, _, err := DialUnixgramEx("", Options{})
+	wantRouteError("DialUnixgramEx", opDialGram, err)
+	if le != nil || lb != nil || ce != nil || ge != nil || gb != nil || gce != nil {
+		t.Fatal("a socket or a Bound for the empty path")
+	}
+
+	fb, err := ResolveForBind("", Options{})
+	wantResolveError(t, "ResolveForBind", "", err, syscall.EINVAL)
+	fc, err := ResolveForConnect("", Options{})
+	wantResolveError(t, "ResolveForConnect", "", err, syscall.EINVAL)
+	if fb != nil || fc != nil {
+		t.Fatalf("a spelling for the empty path: %+v %+v", fb, fc)
+	}
+}
+
 // The addresses the kernel reports for a long path (getsockname /
 // getpeername) are the spelling it was given (B/D/E/<name>, E/<name> with E
 // gone, a /proc/self/fd path, a relative path), not the caller's path, which the

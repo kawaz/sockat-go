@@ -61,7 +61,7 @@ type ForConnect struct {
 // Options are as ListenEx takes them. The error is a *RouteError whose Err
 // is an *os.PathError (Op "resolve", Path path): for example ENOENT when the
 // directory of path does not exist, ENAMETOOLONG when no spelling fits,
-// EINVAL for a path that contains a NUL byte or for a long path that does
+// EINVAL for an empty path or a path that contains a NUL byte or for a long path that does
 // not end with a file name.
 func ResolveForBind(path string, opts Options) (*ForBind, error) {
 	return defaultWorld.resolveForBind(path, opts)
@@ -254,8 +254,8 @@ func (w *world) resolveConnect(path string, opts Options, tr *trace) (*ForConnec
 }
 
 // shortSpelling is what a resolve does before the routes, as listen and dial
-// do: EINVAL for an Options.Base of the wrong form or a NUL (an abstract
-// name's leading one aside), whatever the length; the spelling, with short
+// do: EINVAL for an Options.Base of the wrong form, an empty path or a NUL
+// (an abstract name's leading one aside), whatever the length; the spelling, with short
 // true, of an abstract name or a path the standard library accepts
 // (stdSpelling).
 func shortSpelling(path string, opts Options) (string, bool, error) {
@@ -263,6 +263,9 @@ func shortSpelling(path string, opts Options) (string, bool, error) {
 		if err := givenShape(opts.Base); err != nil {
 			return "", false, err
 		}
+	}
+	if path == "" {
+		return "", false, errEmptyPath
 	}
 	if abstractName(path) {
 		return path, true, nil

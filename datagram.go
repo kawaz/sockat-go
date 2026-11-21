@@ -15,7 +15,7 @@ import "net"
 //
 // The error is a *net.OpError, as from the net package (Net "unixgram"):
 // for example EADDRINUSE when path exists, ENOENT when its directory does
-// not, ENAMETOOLONG when no route reaches path, EINVAL for a path that
+// not, ENAMETOOLONG when no route reaches path, EINVAL for an empty path or a path that
 // contains a NUL byte or for a long path that does not end with a file name.
 func ListenUnixgram(path string) (*net.UnixConn, error) {
 	ep, _, err := defaultWorld.bind(opListenGram, path, Options{}, nil)
@@ -35,7 +35,7 @@ func ListenUnixgram(path string) (*net.UnixConn, error) {
 //
 // The error is a *net.OpError, as from the net package (Net "unixgram"):
 // for example ENOENT when nothing is at path, ECONNREFUSED when no socket is
-// bound to it, ENAMETOOLONG when no route reaches path, EINVAL for a path
+// bound to it, ENAMETOOLONG when no route reaches path, EINVAL for an empty path or a path
 // that contains a NUL byte or for a long path that does not end with a file
 // name.
 func DialUnixgram(path string) (*net.UnixConn, error) {

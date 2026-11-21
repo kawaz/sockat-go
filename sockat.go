@@ -20,7 +20,7 @@ import "net"
 //
 // The error is a *net.OpError, as from the net package: for example
 // EADDRINUSE when path exists, ENOENT when its directory does not,
-// ENAMETOOLONG when no route reaches path, EINVAL for a path that contains a
+// ENAMETOOLONG when no route reaches path, EINVAL for an empty path or a path that contains a
 // NUL byte or for a long path that does not end with a file name.
 func Listen(path string) (*net.UnixListener, error) {
 	l, _, err := defaultWorld.listen(path, Options{}, nil)
@@ -37,7 +37,7 @@ func Listen(path string) (*net.UnixListener, error) {
 //
 // The error is a *net.OpError, as from the net package: for example ENOENT
 // when nothing is at path, ECONNREFUSED when nobody listens on it,
-// ENAMETOOLONG when no route reaches path, EINVAL for a path that contains a
+// ENAMETOOLONG when no route reaches path, EINVAL for an empty path or a path that contains a
 // NUL byte or for a long path that does not end with a file name.
 func Dial(path string) (*net.UnixConn, error) {
 	c, _, err := defaultWorld.dial(path, Options{}, nil)

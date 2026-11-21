@@ -120,17 +120,22 @@ func (f *ForBind) SocketFile() (*SocketFile, error) {
 		return &SocketFile{clean: f.clean}, nil
 	}
 	pathErr := func(err error) error { return &os.PathError{Op: "socketfile", Path: f.path, Err: err} }
-	if f.Spelling.Kind == CwdRelative {
-		if now, ok := statID("."); !ok || now != f.cwd {
-			return nil, pathErr(errCwdChangedSinceResolve)
-		}
-	}
 	// The spelling's directory is resolved to a real path and its last
 	// component followed while it is a symlink: the E of link-file, and a
 	// symlink of the caller's at the path, which bind(2) follows on some
 	// systems (SPEC "ForBind の SocketFile"), so Remove leaves the caller's
 	// symlink and removes the socket.
-	file, err := realFile(f.Path)
+	file, err := socketFileReal(f.Path)
+	// A relative spelling is resolved against the process's cwd, which
+	// another goroutine may change at any time: the cwd is compared with the
+	// resolve's after the real path is found, so a change up to then is seen
+	// (a cwd changed and changed back is not). The real path is absolute, and
+	// nothing after this goes through the cwd.
+	if f.Spelling.Kind == CwdRelative {
+		if now, ok := statID("."); !ok || now != f.cwd {
+			return nil, pathErr(errCwdChangedSinceResolve)
+		}
+	}
 	if err != nil {
 		return nil, pathErr(errnoOf(err))
 	}
@@ -140,6 +145,15 @@ func (f *ForBind) SocketFile() (*SocketFile, error) {
 	}
 	return &SocketFile{file: file, id: id, clean: f.clean}, nil
 }
+
+// socketFileReal is the realFile of ForBind.SocketFile.
+//
+// Design rationale: a variable rather than a direct call only so that a test
+// (TestSocketFileOfACwdRelativeResolveChecksTheCwdAfterTheRealPath, in a
+// child process) can change the cwd between SocketFile's start and the real
+// path, which no input of SocketFile can bring about. Nothing else assigns
+// it.
+var socketFileReal = realFile
 
 // errCwdChangedSinceResolve is ForBind.SocketFile's error for a relative
 // spelling when the cwd changed since the resolve: the path may name an

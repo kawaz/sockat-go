@@ -375,6 +375,41 @@ func TestSocketFileOfACwdRelativeResolveChecksTheCwd(t *testing.T) {
 	}
 }
 
+// ForBind's SocketFile of a CwdRelative spelling compares the cwd with the
+// resolve's after the real path is found too (SPEC "remove": the cwd is
+// compared after the realpath that records the file), not only before: the
+// cwd is the process's, and another goroutine may change it between the
+// comparison and the realpath. Here it changes right then (socketFileReal,
+// in a child whose cwd is a fresh directory), to a directory holding an
+// unrelated socket of the same name: SocketFile must be the error of a
+// changed cwd, and not record (and so let Remove remove) that other socket.
+func TestSocketFileOfACwdRelativeResolveChecksTheCwdAfterTheRealPath(t *testing.T) {
+	t.Parallel()
+	if !inTmpCwd(t) {
+		return
+	}
+	w, _ := testWorld(t, nil)
+	f := resolveBindIn(t, w, "s.sock", Options{})
+	listenSpelling(t, f.Path)
+	other := tmpDir(t)
+	listenSpelling(t, other+"/s.sock")
+	socketFileReal = func(path string) (string, error) {
+		if err := os.Chdir(other); err != nil {
+			t.Fatal(err)
+		}
+		return realFile(path)
+	}
+	t.Cleanup(func() { socketFileReal = realFile })
+	sf, err := f.SocketFile()
+	var pe *os.PathError
+	if !errors.Is(err, errCwdChangedSinceResolve) || !errors.As(err, &pe) || pe.Op != "socketfile" {
+		t.Fatalf("with the cwd changed before the real path: %v (recorded %+v)", err, sf)
+	}
+	if !isSocket(other + "/s.sock") {
+		t.Fatal("the unrelated socket in the new cwd is gone")
+	}
+}
+
 // The public functions go through the process's world (in the tests, the
 // place TestMain made): a long path is spelt for a bind and for a connect,
 // the net package binds and connects by them, and their Cleanup leaves no E.

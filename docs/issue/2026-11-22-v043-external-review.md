@@ -1,6 +1,7 @@
 ---
 title: v0.4.3 — 外部レビューの残り (bind の前の realpath、CLI の EINVAL、macOS oldstable の主スレッド)
-status: open
+status: resolved
+close_reason: implemented
 category: task
 created: 2026-11-22
 ---
@@ -18,3 +19,7 @@ created: 2026-11-22
 ## 出し方
 
 3 件を直したら、just ci・just test-linux・BSD と illumos の compile・ハブの just conformance (全言語) を通し、`just bump-version patch` (0.4.3) → `just push` → Monitor で `just watch`。CI が全部通って tag が出たら、run の URL と版をハブの統括 (session 64eabc3d-e5db-421f-925d-659927ded2c3) に知らせる (パッチ版は各言語に任されている、PB-Q2)。
+
+## 結果
+
+v0.4.3 を 2026-11-21 に公開した (tag v0.4.3 = e0ee21fb、Release の run 44920374876 は 11 job とも success、macOS の Go oldstable の主スレッドの試験も通過、proxy.golang.org に掲載)。残った窓 (経路を組んだ時点の realpath) はハブ 307620d1 の決定で [2026-11-22-v044-remove-records-route-dir.md](../2026-11-22-v044-remove-records-route-dir.md) に回した。

@@ -4,12 +4,16 @@
 
 A Go library that binds and connects Unix domain sockets at paths longer than `sun_path` allows (104 bytes on macOS and the BSDs, 108 on Linux, the terminating NUL included).
 
-The language-independent behaviour is defined by the [sockat specification](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md); sockat-go is its Go implementation.
+The language-independent behaviour is defined by the [sockat specification](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md); sockat-go is its Go implementation. This README holds only the Go names and forms and the caveats specific to Go; for what is common to all languages it links to the sections of the specification.
 
 ```go
 l, err := sockat.Listen("/a/very/deep/directory/.../server.sock") // *net.UnixListener
 c, err := sockat.Dial("/a/very/deep/directory/.../server.sock")   // *net.UnixConn
 ```
+
+## Why
+
+The standard `net` package refuses a path that does not fit `sun_path` with `EINVAL`. A socket in a deep temporary directory (macOS's `$TMPDIR` alone is about 50 bytes, and `t.TempDir()` nests further; [golang/go#62614](https://github.com/golang/go/issues/62614)) runs into it at once. sockat hands the kernel a short spelling that names the same place.
 
 ## Usage
 
@@ -20,11 +24,11 @@ go get github.com/kawaz/sockat-go
 ```
 
 - The return values are the standard `*net.UnixListener` / `*net.UnixConn` themselves (assignable to `net.Listener` / `net.Conn` as they are)
-- A path short enough for the standard library is handed to it unchanged, so it behaves exactly as with the standard library
+- A path short enough for the standard library (up to 107 bytes on Linux / Android / illumos, 103 on Apple's systems and the BSDs) is handed to it unchanged, so it behaves exactly as with the standard library
 - For a long path too, the socket file is created at the path given
 - Errors are the standard `*net.OpError`: `errors.Is(err, syscall.ENOENT)` and the like work
 - The only dependency is `golang.org/x/sys`. Go: the two supported releases (1.26 and later)
-- A bind of a long path leaves D and E outside the application's own places (`/tmp/sockat-<uid>` and the like), so that the spelling the kernel keeps can still be followed later. They go with the system's cleaning of its temporary directories, or with `sockat.Sweep()`. Removing the D of a live process by hand only makes the spelling unfollowable; the socket at the path passed keeps working. Where tests run again and again, one call of `sockat.Sweep()` keeps dead D from piling up ([What stays in the places, and `Sweep`](#what-stays-in-the-places-and-sweep))
+- A long path differs from the standard library in some ways (the address the kernel returns, what stays outside the application's places, and so on). Read the specification's "[What differs from the standard for a long path](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#what-differs-from-the-standard-for-a-long-path)" and this README's "[Go-specific caveats](#go-specific-caveats)"
 
 ### Functions
 
@@ -47,7 +51,19 @@ go get github.com/kawaz/sockat-go
 - The `Ex` functions return the cleanup and the diagnostics along with the standard type. Their error is a `*sockat.RouteError`
 - DGRAM's `send_to` and SEQPACKET are open in the SPEC and not made
 
+| The SPEC's type | Go's type |
+|---|---|
+| `Bound` | `*Bound` (`File *SocketFile`, `Spelling`, `Route`, `Base`, `Skipped`) |
+| `Connected` / `Report` | The standard `*net.UnixConn` and `Report` (`Route`, `Skipped`) |
+| `ForBind` | `*ForBind` (`Path`, `Spelling`, `Cleanup()`, `SocketFile()`, diagnostics) |
+| `ForConnect` | `*ForConnect` (`Path`, `Cleanup()`, diagnostics) |
+| `SocketFile` | `*SocketFile` (`Remove()`, `Cleanup()`) |
+| The failure of `_ex` and resolve | `*RouteError` (`Route`, `Skipped`; `Unwrap` reaches the errno) |
+| An argument error | `EINVAL` |
+
 ### Removing the socket file (`ListenEx` and `SocketFile`)
+
+What `Remove()` and `Cleanup()` do (remove only while the path names the same file, do nothing after a success, try again after a failure) is in the specification's "[`remove`](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#remove)" and "[`remove` and `cleanup`](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#remove-and-cleanup)". The Go form:
 
 ```go
 l, b, err := sockat.ListenEx(path, sockat.Options{}) // l is a *net.UnixListener
@@ -58,33 +74,21 @@ defer l.Close()
 defer b.File.Remove() // removes the socket file (does not close l); runs before l.Close
 ```
 
-- `b.File` (a `*sockat.SocketFile`) records the socket file's real path (looked up as the kernel looks it up: for `a/sym/../s.sock`, the `s.sock` in the parent of where sym leads) and `(st_dev, st_ino)` right after the bind, and `Remove()` removes it only while the path still names that same file. When the file cannot be recorded, `ListenEx` closes the listener, cleans up the spelling's E, leaves the file, and returns an error
-- When the last component of the path is a symlink already there (on macOS and NetBSD the standard bind follows it and makes the socket at its end), what is recorded is the socket file it leads to, and `Remove()` removes that (not your symlink). When it leads to something that is not a socket, the file counts as one that cannot be recorded
-- **Call `Remove()` before closing the listener** (with the `defer` order above, `Remove` runs first). A replacement can be told apart only while the listener is open: the kernel then holds the socket file, so one removed and made again by another process has another `(st_dev, st_ino)` and `Remove` leaves it. One removed and made again after the close may get the same numbers on file systems that reuse them at once (Linux's ext4, the BSDs' UFS / FFS), and `Remove` may remove it
-- `Remove()` also does `Cleanup()` after removing the file. `Cleanup()` only cleans up the E (symlink) the spelling goes through; it does not remove the file. After a success, calling either again does nothing; after a failure, the next call tries again (when `Remove` removed the file but its `Cleanup` failed, the next `Remove` leaves the file side alone and tries the `Cleanup` again; a retried file side checks again that the path names the file bound). Concurrent calls remove one at a time. Neither is called for you
-- `Remove()` returns an error when the file cannot be checked (no permission, say) or the removal fails. When the file is already gone or has been replaced it returns nil. On an error it still does the `Cleanup`
-- A replacement in the instant between the check and the removal cannot be told apart (POSIX has no removal by inode)
-- The listener of `ListenEx` does not remove the file on Close (short paths included). Only `Remove` removes it
+- Call `Remove()` before closing the listener. Write the `defer` of `l.Close` first, and `Remove` runs first (`ExampleListenEx`)
+- The listener of `ListenEx` does not remove the file on Close (short paths included; `SetUnlinkOnClose(false)`). Only `Remove` removes it
+- `Remove()` returns the error of the file side and that of the `Cleanup` joined with `errors.Join`. Neither is called for you
 
 ### What the spelling is good for (`Spelling`)
 
-For a long path, the address the kernel keeps (the listener's `Addr()`, an accepted connection's `LocalAddr()`, the peer's `RemoteAddr()`) is not the path you passed but the spelling handed to the kernel at the bind. `Bound.Spelling` (and `ForBind.Spelling`) tells whether that spelling can be used later ([the SPEC's "Spelling properties"](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#spelling-properties-spelling)). Branch on it.
+For a long path, the listener's `Addr()`, an accepted connection's `LocalAddr()` and the peer's `RemoteAddr()` are not the path you passed but the bind's spelling. `Bound.Spelling` (and `ForBind.Spelling`) tells whether that spelling can be used later. The meaning of the values is in the specification's "[Spelling properties](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#spelling-properties-spelling)".
 
-| `Kind` | Spelling | Route |
-|---|---|---|
-| `Original` | The absolute path itself (an abstract name too) | standard |
-| `CwdRelative` | The relative path itself: after a change of the cwd it names another place (a risk the standard library has of its own) | standard |
-| `Linked` | Through B, D and E of the place, naming the same place as the path | link-dir, link-file |
-| `Dangling` | Through an E already cleaned up: it names nothing | thread-cwd, at |
-
-The fields that mean something only for `Linked` (false or zero for the other kinds):
-
-| Field | Meaning |
+| SPEC | Go |
 |---|---|
-| `Removable` | Whether unlinking the spelling removes the socket file. True for link-dir (the E on the way is followed), false for link-file (the last symlink is not followed, and the E is removed) |
-| `Until` | How long the spelling can be followed. `UntilProcess` (a spelling through `/proc/<pid>/fd/<B's fd>`: not after the process ends), `UntilCleanup` (a spelling through B's real path: until `Cleanup`) |
-| `UsableCrossUID` | Whether a peer of another uid can follow it. False for a spelling through `/proc`. For a real-path spelling, true when B and every directory on the way to it have search permission for others (B in `/tmp`) |
-| `UsableWithPrivateTmp` | Whether a peer can follow it when either side has a `/tmp` of its own (systemd's `PrivateTmp` and the like). True for a spelling through `/proc`. For a real-path spelling, false when B's place or the spelling goes through `/tmp` or `/var/tmp` |
+| `Original` / `CwdRelative` / `Linked` / `Dangling` | `Spelling.Kind`'s `sockat.Original` / `sockat.CwdRelative` / `sockat.Linked` / `sockat.Dangling` |
+| `removable` | `Spelling.Removable` |
+| `until` (`Process` / `Cleanup`) | `Spelling.Until` (`sockat.UntilProcess` / `sockat.UntilCleanup`) |
+| `usable_cross_uid` | `Spelling.UsableCrossUID` |
+| `usable_with_private_tmp` | `Spelling.UsableWithPrivateTmp` |
 
 ```go
 switch sp := b.Spelling; sp.Kind {
@@ -97,9 +101,12 @@ case sockat.Dangling:
 }
 ```
 
-`Spelling` compares with `==`, and the zero value of `Kind` is not used (a zero value on failure does not read as `Original`). `Kind.String()` and `Until.String()` give the SPEC's names (`"Linked"`, `"Process"` and so on).
+- The fields that mean something only for `Linked` are false or zero for the other kinds
+- `Spelling` compares with `==`, and the zero value of `Kind` is not used (a zero value on failure does not read as `Original`). `Kind.String()` and `Until.String()` give the SPEC's names (`"Linked"`, `"Process"` and so on)
 
 ### Diagnostics (`Route`, `Base`, `Skipped`) and `RouteError`
+
+The meaning of the fields is in the specification's "[Diagnostics](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#diagnostics)". They are all for diagnostics and their contents are not a promise: branch on `Spelling`.
 
 ```go
 c, rep, err := sockat.DialEx(path, sockat.Options{}) // c is a *net.UnixConn
@@ -113,28 +120,20 @@ if err != nil {
 log.Printf("dial %s: route %s after %v", path, rep.Route, rep.Skipped)
 ```
 
-- `Route` is the name of the route taken, `Skipped` the routes tried before it and found unusable (in the order tried) with the reasons. For a long path it includes `standard`. `Skipped` is never nil
-- `Bound.Base` is the B the spelling goes through (`proc`, `tmp`, `runtime`, `tmpdir`, `sockdir`, `given`), `""` when the spelling goes through no B (standard, thread-cwd, at)
-- All of them are for diagnostics (logs and the like), and their contents are not a promise. Branch on `Spelling`
-- The error of a failure is a `*sockat.RouteError`, with `Route` (the route that actually bound / connected and failed; empty for `ENAMETOOLONG`, when every route was unusable, and for a failure before any route, such as a missing directory) and `Skipped`. `Unwrap` reaches the same `*net.OpError` that `Listen` / `Dial` return, so `errors.Is(err, syscall.ENOENT)` and the like work
+- `Skipped` is never nil. `Bound.Base` is `""` when the spelling goes through no B
+- `*sockat.RouteError` reaches through `Unwrap` the same `*net.OpError` that `Listen` / `Dial` return, so `errors.Is(err, syscall.ENOENT)` and the like work
 
 ### `Options`
 
-| Field | Meaning |
+The meaning of the fields and their errors are in the specification's "[`Options`](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#options)" and "[Errors](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#errors)".
+
+| SPEC | Go |
 |---|---|
-| `UsableCrossUID bool` | Asks for a spelling a peer of another uid can follow too. Only the places where B and every directory on the way to it have search permission for others (`/tmp` and the like) are used, and no spelling through `/proc`. When that cannot be met, the bind does not fall back to a spelling that does not meet it but goes on to thread-cwd / at (`Dangling`). `Spelling.UsableCrossUID` tells whether it was met. Only the binds (`ListenEx`, `ListenUnixgramEx`, `ResolveForBind`) look at it |
-| `Base string` | The path of B itself (a place the application manages, such as `/tmp/app-1000/sockat`), `""` for none. B is made there, and a check that fails is an error rather than a fall back to the automatic places. The connects use it as B's place too. B is sockat's alone: put nothing else in it |
+| `usable_cross_uid` | `UsableCrossUID bool`. Only the binds (`ListenEx`, `ListenUnixgramEx`, `ResolveForBind`) look at it |
+| `base` | `Base string` (`""` for none) |
 
-The errors of `Base`:
-
-- Relative, or not ending with a name (`dir/`, `..`, `/`): `EINVAL`, whatever the length of the path
-- Checked only for a long path (a short path goes to the standard library, which does not look at it):
-  - A directory on the way is missing: `ENOENT`
-  - B's place is neither a directory nor a symlink: `ENOTDIR`
-  - B is a symlink, others can write to it, it is someone else's, or a directory on the way can be replaced by others: `EPERM`
-  - With `UsableCrossUID` of a bind, a directory on the way or B itself has no search permission for others: `EPERM` (for a B held, as judged when it was first held; only when B itself was judged to have none is it looked at again, at every call)
-
-The zero value `Options{}` is the default: `ListenEx` / `DialEx` then try the routes `Listen` / `Dial` do, in the same order.
+- The zero value `Options{}` is the default: `ListenEx` / `DialEx` then try the routes `Listen` / `Dial` do, in the same order
+- A `Base` of the wrong form (relative, or not ending with a name) is `EINVAL`, whatever the length of the path
 
 ### DGRAM
 
@@ -143,9 +142,9 @@ srv, err := sockat.ListenUnixgram(path) // *net.UnixConn
 c, err := sockat.DialUnixgram(path)     // *net.UnixConn (not bound)
 ```
 
-- `ListenUnixgram` binds by the routes `Listen` takes. The spelling the kernel keeps (`LocalAddr()`, the sender seen by a peer) is `Listen`'s, and a reply to it arrives while the spelling is `Linked`. As with the standard library, Close does not remove the file
+- `ListenUnixgram` binds by the routes `Listen` takes. As with the standard library, Close does not remove the file
 - `DialUnixgram` makes a socket that is not bound and connects it (the shape of the standard `net.DialUnix("unixgram", nil, ...)`), by the routes `Dial` tries
-- To send from, or connect, a bound socket to a long path, spell the path with `ResolveForConnect` and hand that to the standard library:
+- To send from, or connect, a bound socket to a long path, spell the path with `ResolveForConnect` and hand that to the standard library (`ExampleListenUnixgram`):
 
 ```go
 to, err := sockat.ResolveForConnect(serverPath, sockat.Options{})
@@ -158,7 +157,7 @@ _, err = cl.WriteToUnix(msg, &net.UnixAddr{Name: to.Path, Net: "unixgram"})
 
 ### resolve (`ResolveForBind` / `ResolveForConnect`)
 
-To hand a spelling to the standard library yourself (to pass a path to another library, to send datagrams to, and so on), use resolve, which spells a long path shorter. The spelling is just a path, so it can go to the standard library for any socket type and operation.
+For handing a spelling to the standard library yourself (to pass a path to another library, to send datagrams to, and so on). The spellings returned and when they cannot be made are in the specification's "[resolve](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#resolve)" and "[`SocketFile` of `ForBind`](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#socketfile-of-forbind)".
 
 ```go
 f, err := sockat.ResolveForBind(path, sockat.Options{})
@@ -188,78 +187,35 @@ defer f.Cleanup()
 c, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: f.Path, Net: "unix"}) // as often as you like
 ```
 
-| | `ResolveForBind` | `ResolveForConnect` |
-|---|---|---|
-| Spelling | link-dir's `B/D/E/<name>` first, then link-file's `B/D/E` only where bind is measured to follow a symlink (macOS, NetBSD) | link-file's `B/D/E`, whatever the length of the file name |
-| Returns | `*ForBind` (`Path`, `Spelling`, `Cleanup()`, `SocketFile()`, diagnostics) | `*ForConnect` (`Path`, `Cleanup()`, diagnostics) |
-| When it cannot | `ENAMETOOLONG` (a length only thread-cwd / at reach) | `ENAMETOOLONG` (no B can be made, for example) |
-
-- A path no longer than the standard library takes is returned as it is (`Spelling` `Original` / `CwdRelative`)
-- `ForBind.SocketFile()` follows the spelling when called and returns a `*SocketFile` that has recorded the socket file (where the last component of the path is a symlink, the file it leads to, as with `ListenEx`). It is an error before the bind (`ENOENT`), when what the spelling leads to is not a socket (`ENOTSOCK`), and, for a `CwdRelative` spelling, when the cwd is not the one of the resolve. The `Cleanup` of the `SocketFile` it returns cleans up the same E as the `ForBind`'s `Cleanup` (whichever succeeds first removes it, and both then do nothing)
-- `ForConnect` gives no `SocketFile` (the type rules out removing the wrong file). It does not look at `UsableCrossUID` (the spelling of a connect stays with no peer)
-- The error is a `*RouteError` around an `*os.PathError` (`Op` `resolve`, `Path` the path you passed)
-- Do not use a spelling after its cleanup
+- A listener you made by handing the spelling to `net.ListenUnix` is set `SetUnlinkOnClose(false)` and its file removed by the `SocketFile`'s `Remove` (the standard Close unlinks by the spelling; "[Go-specific caveats](#go-specific-caveats)")
+- `ForBind.SocketFile()` fails with `ENOENT` before the bind, and with `ENOTSOCK` when what the spelling leads to is not a socket
+- The error of a resolve is a `*RouteError` around an `*os.PathError` (`Op` `resolve`, `Path` the path you passed)
 
 ### What stays in the places, and `Sweep`
 
-The spelling of a long path goes through a directory D per process and a symlink E inside a place B per user. B, D and E stay outside the application's places (`/tmp` and the like) ([the SPEC's "What stays in the base"](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#what-stays-in-the-base)).
+A bind of a long path leaves B, D and E outside the application's places (`/tmp/sockat-<uid>` and the like). What stays, when it goes, what `Sweep` removes, and how a long-lived process cleans up are in the specification's "[What stays in the base](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#what-stays-in-the-base)" and "[`sweep`](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#sweep)". The Go forms:
 
-| | B | D | E |
-|---|---|---|---|
-| Where, and the name | The first that can be made of `/tmp/sockat-<uid>`, `$XDG_RUNTIME_DIR/sockat`, `$TMPDIR/sockat-<uid>`, `.sockat.<random>` in the socket's directory, in this order. `Options.Base` when given | 10 random characters, in B | resolve's E and thread-cwd's / at's E in D; the default connect's E right in B |
-| Made | Per user, shared across processes | One per (process, B). Only the binds and `ResolveForConnect` make it | Per resolve. Per call for thread-cwd / at and the default connect |
-| While alive | Not removed | The process keeps an fd on it with a shared lock (flock) | resolve's E stays until `Cleanup`. A per-call E is removed within the call |
-| Cleanup | Not by sockat (the application manages `Options.Base`'s B) | Not by sockat. The D of a process that has ended goes with the system's cleaning of its temporary directories. `Sweep`, when called, removes the D no longer locked | `Cleanup` (`Remove`) |
-
-- The default `Listen` returns no `SocketFile`, so its E stays until the process ends and goes with D in the system's cleaning. If the cleanup matters to you, use `ListenEx` or resolve
-- The default `Dial` leaves neither D nor E in the process (the E right in B is removed right after the connect)
-- B (one given as `Options.Base` too) is sockat's alone: put nothing else in it
-- `Sweep()` removes the dead D in those of `/tmp/sockat-<uid>`, `$XDG_RUNTIME_DIR/sockat` and `$TMPDIR/sockat-<uid>` that exist and pass the checks. It makes no B. `SweepBase(base)` removes the dead D in the B given as `Options.Base` (called by the application that manages that B). They remove only directories named as D is (10 alphanumeric characters), and touch neither the D of a live process, a D that holds anything but symlinks, nor the E right in B. Neither is called for you. sockat itself never removes dead D (not at a resolve, nor at the start or end of a process)
-- A long-lived process that binds long paths again and again (a daemon making a socket per session, say) piles up the E of the default `Listen` until it ends. Use `ListenEx` and clean up each socket no longer needed with `Remove()` (the file too) or `Cleanup()` (the E only)
-- A failure to clean up an E within a call changes neither whether the call succeeds nor the error it returns
-- **B in the socket's directory (`.sockat.<random>`) and a B fallen back to when the check failed (`sockat-<uid>.<random>`) are removed neither by `Sweep` nor by the system's cleaning.** Having random names, they are not reused by the next process and may pile up one per process. B in the socket's directory stays in your directory
-
-The system's cleaning of its temporary directories ([the hub's research](https://github.com/kawaz/sockat/blob/main/docs/research/2026-11-20-tmp-cleaners-and-persistent-base.md), Japanese):
-
-| Place | Dead D | Live D |
-|---|---|---|
-| Linux's `/tmp` | systemd-tmpfiles removes it after 10 days | A locked D is not removed (systemd v242 and later). **Before v242 (RHEL 8 and the like) it may be removed after 10 days** |
-| `$XDG_RUNTIME_DIR` | Stays until logout and reboot | Same |
-| macOS's `/tmp` | Stays until reboot | Not removed |
-| macOS's `$TMPDIR` | dirhelper may remove it after 3 days | **Same (may be removed)** |
-| FreeBSD, NetBSD, OpenBSD, illumos | By default not removed, or removed at reboot | Same |
-
-When a live D is removed, its spellings can no longer be followed, and that is all: they do not reach an unrelated file.
+- `sockat.Sweep()` removes the dead D of places 1 to 3, and `sockat.SweepBase(base)` the dead D in the B given as `Options.Base`. Neither is called for you. Where tests run again and again, call `sockat.Sweep()` once
+- The default `Listen` returns no `SocketFile`, so its E stays until the process ends. A long-lived process that binds long paths again and again uses `ListenEx`, and for each socket no longer needed calls `b.File.Remove()` (the file too) or `b.File.Cleanup()` (the E only)
 
 ## Patterns not to use
 
-Ways of using sockat that remove an unrelated file or fail to remove the file ([the SPEC's "Patterns not to use"](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#patterns-not-to-use)). The code that avoids them runs as tests (the Example functions in [example_long_test.go](./example_long_test.go)).
+Why not is in the specification's "[Patterns not to use](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#patterns-not-to-use)". Here are the Go forms and what to do instead. The code that avoids them runs as tests (the Example functions in [example_long_test.go](./example_long_test.go)).
 
-| Pattern | Why not | Instead |
-|---|---|---|
-| `os.Remove(l.Addr().String())` / `os.Stat(l.Addr().String())` without looking at `Spelling` | For a long path it is not the path you passed. A link-file spelling only removes the E and leaves the file, and a `Dangling` spelling names nothing | Keep the path you passed and use it. `b.File.Remove()` (`ExampleListenEx`) |
-| Using an old spelling (`ForBind.Path`, `ForConnect.Path`, `l.Addr()`) after its `Cleanup`, or after the process ends | Once cleaned up, B in `/tmp` can be made again under the same name by someone else. An `UntilProcess` spelling cannot be followed after the process ends | Use a spelling only for as long as `Spelling.Until` says |
-| Listening on a relative path, and removing it by that relative path after an `os.Chdir` | It hits a file somewhere else (`CwdRelative`) | Make the path absolute with `filepath.Abs` before the listen (`ExampleListenEx_absolutePath`). `b.File.Remove()` |
-| Counting on `l.Close()` alone to remove the socket file | For a long path, whether it does depends on the spelling ("[What differs from the standard library](#what-differs-from-the-standard-library)"). The listener of `ListenEx` never does | `b.File.Remove()`, or `os.Remove(path)` with the path you passed |
-| Counting on `b.File.Remove()` to close the listener too | `Remove` only removes the file | Write `defer l.Close()` yourself |
-| Calling `b.File.Remove()` after `l.Close()` | Another file made again after the close may not be told apart | Call it before closing the listener (write the `defer` of `l.Close` first) |
-| Having a peer of another uid follow a spelling through `/proc`, or one whose `Spelling.UsableCrossUID` is false | It cannot | Pass `Options{UsableCrossUID: true}` and check the `Spelling` returned (`ExampleSpelling`) |
-| Branching on the strings of `Route`, `Base`, or a `Skipped`'s `Name` / `Reason` | They are for diagnostics, and their contents are not a promise (routes are added and changed) | Branch on `Spelling` |
-
-## Why
-
-The standard `net` package refuses a path that does not fit `sun_path` with `EINVAL`. The file system has no such limit, yet a socket in a deep temporary directory (macOS's `$TMPDIR` alone is about 50 bytes, and `t.TempDir()` nests further; [golang/go#62614](https://github.com/golang/go/issues/62614)) runs into it at once. The limit is on the length of the argument passed to `bind(2)` / `connect(2)`, so sockat hands the kernel a short spelling that names the same place.
+| The Go form | Instead |
+|---|---|
+| `os.Remove(l.Addr().String())` / `os.Stat(l.Addr().String())` without looking at `Spelling` | Keep the path you passed and use it. `b.File.Remove()` (`ExampleListenEx`) |
+| Using an old spelling (`ForBind.Path`, `ForConnect.Path`, `l.Addr()`) after its `Cleanup`, or after the process ends | Use a spelling only for as long as `Spelling.Until` says |
+| Listening on a relative path, and removing it by that relative path after an `os.Chdir` | Make the path absolute with `filepath.Abs` before the listen (`ExampleListenEx_absolutePath`). `b.File.Remove()` |
+| Counting on `l.Close()` alone to remove the socket file | `b.File.Remove()`, or `os.Remove(path)` with the path you passed |
+| Counting on `b.File.Remove()` to close the listener too | Write `defer l.Close()` yourself |
+| Calling `b.File.Remove()` after `l.Close()` | Call it before closing the listener (write the `defer` of `l.Close` first) |
+| Having a peer of another uid follow a spelling through `/proc`, or one whose `Spelling.UsableCrossUID` is false | Pass `Options{UsableCrossUID: true}` and check the `Spelling` returned (`ExampleSpelling`) |
+| Branching on the strings of `Route`, `Base`, or a `Skipped`'s `Name` / `Reason` | Branch on `Spelling` |
 
 ## How a long path is reached
 
-The length handed to the standard library as it is:
-
-| System | Length |
-|---|---|
-| Linux / Android / illumos | Up to 107 bytes |
-| Apple's systems / FreeBSD / NetBSD / OpenBSD | Up to 103 bytes |
-
-A longer path has its socket directory looked up first (`ENOENT` when missing, `ENOTDIR` when not a directory; the path is not folded on the string but looked up as the kernel looks it up: `a/sym/..` is the parent of where sym leads, not `a`); then the routes that make a short spelling ([the SPEC's "Route names"](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#route-names)) are tried from left to right, and the first route that can be used binds / connects. When a route actually binds / connects and fails, that error is returned, and the next route does not try again.
+A path longer than the standard library takes tries the routes below from left to right, and the first route that can be used binds / connects. The route names and their order are in the specification's "[Routes for long paths and their order](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#routes-for-long-paths-and-their-order)", how each route and B are built in [SPEC-routes](https://github.com/kawaz/sockat/blob/main/docs/SPEC-routes.md#routes), and how far they reach in the hub's [reach table](https://github.com/kawaz/sockat/blob/main/pages/reach/README.md).
 
 Bind (`Listen`, `ListenEx`, `ListenUnixgram`, `ListenUnixgramEx`):
 
@@ -283,34 +239,13 @@ Connect (`Dial`, `DialEx`, `DialUnixgram`, `DialUnixgramEx`):
 | NetBSD / OpenBSD / illumos / other Unix | relative, link-file |
 | Windows | Not supported |
 
-resolve: `ResolveForBind` takes link-dir of the bind routes and (on macOS and NetBSD only) link-file; `ResolveForConnect` takes link-file only (on Linux spelt through `/proc`, then B's real path).
+resolve: `ResolveForBind` takes link-dir of the bind routes and (on macOS and NetBSD only) link-file; `ResolveForConnect` takes link-file only.
 
-The routes of a bind (they leave their spelling, so while it lives, a library above that removes by `l.Addr()` and the replies of DGRAM work as with the path itself):
+The means in Go:
 
-- **link-dir**: makes an E in D pointing to the socket's directory (its real path) and binds by `B/D/E/<name>`. B is spelt `/proc/<pid>/fd/<B's fd>` (on Linux with `/proc` usable, without `UsableCrossUID`) or by its real path. E stays until `Cleanup`. `Spelling` is `Linked` (`Removable`)
-- **link-file**: makes an E in D pointing to the socket file and binds by `B/D/E`. Usable only where bind follows a symlink in the last component (measured to on macOS and NetBSD; measured not to on Linux / Android, FreeBSD, OpenBSD and illumos, which do not try it; elsewhere a failed bind with nothing at the path moves on to the next route). Its spelling holds no file name, so it reaches a file name of any length. `Spelling` is `Linked` (not `Removable`)
-- **thread-cwd**: a throwaway goroutine locked to its own OS thread moves that thread's cwd (and no other's) into D and binds by `E/<name>`, through an E removed right after. The thread is thrown away after use (the goroutine ends without unlocking). Linux uses `unshare(CLONE_FS)` then `fchdir` (not under a seccomp filter, such as Docker's default); Apple's systems use `__pthread_fchdir`. `Spelling` is `Dangling`
-- **at**: thread-cwd's spelling, handed to `bindat(2)` with D's fd (FreeBSD). `Spelling` is `Dangling`
-
-The routes of a connect (the connecting socket is not bound and leaves no spelling with the peer, so the routes that need no writing and no thread come first):
-
-- **proc-direct**: opens the socket's directory and passes `/proc/self/fd/<fd>/<name>`
-- **relative**: passes the path relative to the cwd when it is short enough. It rewrites the string only, and does not change the cwd
-- **at-direct**: passes the socket's directory fd and the file name to `connectat(2)`
-- **thread-cwd-direct**: moves the cwd of a throwaway thread into the socket's directory and passes the file name. It makes neither D nor E
-- **link-file**: makes an E of a random name right in B pointing to the socket file, passes `B/E` by B's real path, and removes the E right after. It makes no D. It reaches a file name of any length
-
-How B is made ([the SPEC-routes' "Building B"](https://github.com/kawaz/sockat/blob/main/docs/SPEC-routes.md#building-b)):
-
-- The place is made a real path, and the directories from the root down to it are checked (each owned by root or by you, and not writable by others or sticky). A place that fails is not used
-- The place is opened `O_NOFOLLOW` and held by its fd; B is made by `mkdirat(0700)`, set to 0711, opened and checked to be a real directory of yours. One already there is checked the same way (and that others cannot write to it); when it fails, B falls back to `sockat-<uid>.<random>` in the same place
-- `$XDG_RUNTIME_DIR` and `$TMPDIR` are not used when empty or relative
-- A process keeps using the first B it could make (the length of the path does not change it). When a spelling is known beforehand not to fit, no B is made and the route is passed over as unusable
-- The judgement for `UsableCrossUID` (whether B and every directory on the way to it have search permission for others) is made when B is first held and kept. Only when B itself was judged to have none is it looked at again by B's fd at every call with `UsableCrossUID`, and once it has it, it is kept as having it (so that a B opened while another process making it at the same time had not yet set it to 0711 can serve later)
-- B in the socket's directory is used only for a spelling through `/proc` (its real-path spelling is longer than the path). Where there is no `/proc`, it serves only as the place of thread-cwd's / at's D
-- A B or D held but since removed is made again by the next call
-
-None of the routes changes the working directory of the process or of the calling thread, so any goroutine may call them.
+- **thread-cwd and thread-cwd-direct**: a throwaway goroutine locked to its own OS thread moves that thread's cwd (and no other's). The thread is thrown away with the goroutine after use, without unlocking. Linux uses `unshare(CLONE_FS)` then `fchdir` (not under a seccomp filter, such as Docker's default); Apple's systems use `__pthread_fchdir`
+- **at**: binds a socket of our own with FreeBSD's `bindat(2)` and hands it to the standard type with `net.FileListener`
+- None of the routes changes the working directory of the process or of the calling thread, so any goroutine may call them
 
 ### Routes that depart from the SPEC
 
@@ -318,45 +253,22 @@ None of the routes changes the working directory of the process or of the callin
 |---|---|---|
 | widened (after relative in the connect of Apple's systems) | None (listed in `Skipped` as `no widened route in sockat-go`; the next route is tried) | Handing a socket of our own to the standard type leaves `RemoteAddr()` nil, whose `String()` panics, when the peer bound in the widened form (`syscall` refuses an address longer than `sockaddr_un`) |
 
-Without widened, on Apple's systems, a connect to a path whose absolute or relative form is at most 253 bytes is `ENAMETOOLONG` when relative does not fit and neither thread-cwd-direct (no `__pthread_fchdir`, or a file name over 103 bytes) nor link-file (no B can be made) can be used. As the SPEC says, no route forks.
+With no widened and no fork, on Apple's systems, a connect to a path whose absolute or relative form is at most 253 bytes is `ENAMETOOLONG` when relative does not fit and neither thread-cwd-direct (no `__pthread_fchdir`, or a file name over 103 bytes) nor link-file (no B can be made) can be used.
 
-### Where a path stops being reached
+## Go-specific caveats
 
-The file name lengths reached in the usual environment (the thread cwd and `/proc` usable, the places the system's defaults and writable, no `Options`), as estimated by the hub's [reach table](https://github.com/kawaz/sockat/blob/main/pages/reach/README.md) (bytes; the directory is assumed deeper than the standard length):
-
-| System | `Listen` / `ListenEx` | `ResolveForBind` | `Dial` / `ResolveForConnect` |
-|---|---|---|---|
-| Linux / Android | Up to 96 (thread-cwd). Under a seccomp filter, what link-dir reaches (about 76) | About 76 | Up to 255 |
-| macOS | Up to 255 (link-file) | Up to 255 | Up to 255 |
-| FreeBSD | Up to 92 (at) | About 72 | Up to 255 (link-file is unconfirmed on FreeBSD; at-direct reaches 103) |
-| NetBSD | Up to 255 (link-file) | Up to 255 | Up to 255 |
-| OpenBSD | About 72 | About 72 | Up to 255 |
-| illumos | About 76 | About 76 | Up to 255 |
-
-- The file name link-dir reaches is the length that fits the sockaddr (107 on Linux and illumos, 103 elsewhere) − 15 − the length of B's real path (16 for `/tmp/sockat-1000`, 23 for macOS's `/private/tmp/sockat-501`). Through `/proc` it is about 73 (it varies with the digits of the pid)
-- Where no B can be made (no place writable, say), the routes through B (link-dir, link-file) cannot be used. A connect then reaches what the routes without B (proc-direct, relative, at-direct, thread-cwd-direct) reach
-- A path longer than `PATH_MAX` as a whole (1024 bytes on macOS, 4096 on Linux) cannot be opened by other system calls either; it is outside sockat's job and is `ENAMETOOLONG`
-
-## What differs from the standard library
+Where sockat-go takes a form other than the standard library's because of how Go's standard library behaves, and what it inherits from it. The differences common to all languages are in the specification's "[What differs from the standard for a long path](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#what-differs-from-the-standard-for-a-long-path)".
 
 - **An empty path is `EINVAL`.** The standard library binds an empty path, on Linux, to an abstract name the kernel picks (autobind), and refuses a connect to it with an error that has no errno
 - **A path containing a NUL byte is `EINVAL`, whatever its length.** The standard library silently cuts the path at the NUL and binds another path. On Linux / Android, an abstract socket name (a leading NUL or `@`) is handed to the standard library as it is (`Spelling` `Original`). Where there are no abstract sockets (illumos included), a leading NUL is `EINVAL` too
 - **On illumos, a path that starts with `@` is bound / connected as the file `@...` in the cwd.** The standard library rewrites a leading `@` into an abstract name, but the illumos kernel has no abstract sockets. sockat hands the path to it with `./` in front, so the listener's `Addr()` is `./@...` and `Spelling` is `CwdRelative`. Closing the listener does not remove the file (as the standard library elsewhere leaves a path that starts with `@`; to remove it, use `ListenEx`'s `Remove`). A path of 106 or 107 bytes, which no longer fits with `./`, goes through the routes as a long path
-
-Only for a long path:
-
-- **The listener's `Addr()` (and an accepted connection's `LocalAddr()`, the peer's `RemoteAddr()`) is not the path you passed but the bind's spelling.** `Spelling` tells whether it can be used later. The address shown by `ss -x`, `lsof`, `/proc/net/unix` and the like is the spelling too (a link-file spelling holds no file name)
-- **What closing the default `Listen`'s listener removes depends on the spelling.** Go's `UnixListener.Close` unlinks the spelling it keeps. Through a link-dir spelling, the E on the way is followed and the socket file is removed (as with the standard library). **Through a link-file spelling, the E itself is removed and the socket file stays.** Through a `Dangling` spelling nothing is removed (it is set `SetUnlinkOnClose(false)`). The listener of `ListenEx` removes nothing, whatever the spelling
-- **A path that does not end with a file name** (`dir/`, `dir/.`, `dir/..`) is `EINVAL`, and nothing is created
-- **The directory is looked up first**: the E of link-dir and of thread-cwd / at points to the socket's directory's real path (looked up as the kernel looks it up), and proc-direct, at-direct and thread-cwd-direct look the directory up before passing the file name. A rename or a symlink repointed in between is not seen
-- **Another goroutine's `os.Chdir`**: when the cwd changes during relative (a connect), the result is dropped and an error is returned. A relative `ListenEx` (short paths too) whose cwd changes between the resolving of the real path and the bind closes the listener, leaves the file, and returns an error
-- **State piles up outside the application's places**: B, D and E stay in `/tmp`, `$XDG_RUNTIME_DIR`, `$TMPDIR` (and the socket's directory) ("[What stays in the places, and `Sweep`](#what-stays-in-the-places-and-sweep)")
-- **Where a live D may be removed**: Linux with systemd older than v242, and B in macOS's `$TMPDIR`. Its spellings can then no longer be followed, and that is all
-- **A peer with `PrivateTmp`**: when the peer's `/tmp` is a private one, it cannot follow a spelling through `/tmp`. On Linux the spelling through `/proc` is taken first, so this rarely happens. `Spelling.UsableWithPrivateTmp` tells whether it can
+- **The standard `UnixListener.Close` unlinks the spelling it keeps.** For the default `Listen`'s listener of a long path, through a link-dir spelling the E on the way is followed and the socket file is removed (as with the standard library). **Through a link-file spelling, the E itself is removed and the socket file stays.** Through a `Dangling` spelling nothing is removed (it is set `SetUnlinkOnClose(false)`). The listener of `ListenEx` removes nothing, whatever the spelling, short paths included (`SetUnlinkOnClose(false)`; only `Remove` removes the file)
+- **No route for macOS's widened sockaddr.** Why, and what stops being reached: "[Routes that depart from the SPEC](#routes-that-depart-from-the-spec)"
 
 ## Documentation
 
-- [sockat specification](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md) — the language-independent behaviour (operations, resolve, spelling properties, cleanup, routes, errors)
+- [sockat specification](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md) — the language-independent behaviour (operations, resolve, spelling properties, cleanup, what stays in the base, routes, what differs from the standard, patterns not to use, errors)
+- [Per-language caveats](https://github.com/kawaz/sockat/blob/main/pages/langs.md) — the caveats specific to each language's implementation
 - [docs/decisions/](./docs/decisions/INDEX.md) — the design decisions of the Go implementation (DRs, in Japanese)
 - [pkg.go.dev](https://pkg.go.dev/github.com/kawaz/sockat-go) — API
 

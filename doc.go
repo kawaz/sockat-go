@@ -35,96 +35,26 @@
 // to the net package yourself. [Sweep] and [SweepBase] remove what processes
 // that have ended left in the places.
 //
-// The language-independent specification is at
-// https://github.com/kawaz/sockat/blob/main/docs/SPEC.md.
+// # The specification
 //
-// # The places B, D and E
+// The behaviour common to all languages is defined by the specification,
+// https://github.com/kawaz/sockat/blob/main/docs/SPEC.md, and not repeated
+// here. Read in it, in particular:
 //
-// The spelling of a long path goes through B, a directory of this user's
-// processes shared across them: the first of /tmp/sockat-<uid>,
-// $XDG_RUNTIME_DIR/sockat, $TMPDIR/sockat-<uid> and .sockat.<random> in the
-// socket's directory that can be made, or [Options].Base. Every directory on
-// the way to the place must be owned by root or the user and not writable by
-// others (or sticky); a B already there that fails its checks is passed over
-// for sockat-<uid>.<random> in the same place. In B, each process makes one
-// directory D of a random name and holds it, with a shared lock, for as long
-// as it lives; in D go the symlinks E the spellings go through. B and D are
-// not removed by sockat: a dead process's D goes with the system's cleaning
-// of its temporary directories, or with [Sweep] (and [SweepBase] for
-// Options.Base's B), which removes only directories named as D is (10
-// alphanumeric characters) and only when no live process holds them. B in the
-// socket's directory and a B fallen back to are removed by neither. B,
-// Options.Base's included, is sockat's alone: put nothing else in it.
-// sockat never removes a dead D on its own, neither at a resolve nor when a
-// process starts or ends. A long-lived process that binds long paths again
-// and again (a daemon making a socket per session, say) piles up the E of
-// [Listen] until it ends: use [ListenEx] instead, and for each socket no
-// longer needed call Bound.File's Remove (the socket file too) or Cleanup
-// (the E only).
+//   - What differs from the standard for a long path: the address the kernel
+//     returns is the spelling, state is left outside the application's
+//     places, a live D may be removed, a peer with PrivateTmp
+//   - Patterns not to use, with the Go forms in the README and the Example
+//     functions of this package
+//   - What stays in the base, and sweep: B, D and E, what Sweep removes, and
+//     how a long-lived process cleans up with ListenEx
+//   - Routes for long paths and their order; how each route is built is in
+//     SPEC-routes.md next to it
 //
-// The SocketFile of ListenEx (and of ForBind.SocketFile) records the socket
-// file the path leads to: where its last component is a symlink already
-// there (bind follows it on macOS and NetBSD), the file at its end, which
-// Remove removes, leaving the symlink.
+// The routes each system tries in Go are listed in the README,
+// https://github.com/kawaz/sockat-go#how-a-long-path-is-reached.
 //
-// # How a long path is reached
-//
-// The socket's directory is looked up first (ENOENT, ENOTDIR). Then the
-// routes are tried in this order, the first one that can be used taking the
-// call (the names are the specification's); a route that binds or connects
-// and fails returns that error, and no later route tries again:
-//
-//	| System              | Bind                                      |
-//	|---------------------|-------------------------------------------|
-//	| Linux, Android      | link-dir (via /proc, then B), thread-cwd  |
-//	| Apple's systems     | link-dir, link-file, thread-cwd           |
-//	| FreeBSD             | link-dir, at                              |
-//	| NetBSD              | link-dir, link-file                       |
-//	| OpenBSD, illumos    | link-dir                                  |
-//	| other Unix          | link-dir, link-file (told at run time)    |
-//
-//	| System              | Connect                                                    |
-//	|---------------------|------------------------------------------------------------|
-//	| Linux with /proc    | proc-direct, thread-cwd-direct, link-file                  |
-//	| Linux without /proc | relative, thread-cwd-direct, link-file                     |
-//	| Apple's systems     | relative, widened (not made), thread-cwd-direct, link-file |
-//	| FreeBSD             | at-direct, link-file                                       |
-//	| NetBSD, OpenBSD,    | relative, link-file                                        |
-//	| illumos, other Unix |                                                            |
-//
-// A bind leaves its spelling, so whatever later unlinks or looks up the
-// address the kernel keeps reaches the path while the spelling lives.
-// Link-dir binds by B/D/E/<name>, E a symlink to the socket's directory, B
-// spelt /proc/<pid>/fd/<B's fd> (Linux, not with UsableCrossUID) or by its
-// real path; unlinking that spelling removes the socket file. Link-file binds
-// by B/D/E, E a symlink to the socket file, where bind(2) follows a symlink
-// in the last component (macOS and NetBSD do; Linux, FreeBSD, OpenBSD and
-// illumos do not and do not try it; elsewhere a failed bind with nothing at
-// the path moves on); it reaches a file name of any length, and unlinking the
-// spelling removes E, not the file. For a file name no spelling through B
-// fits, thread-cwd binds by E/<name> from a throwaway goroutine locked to its
-// own OS thread whose cwd (and no other's) is D, through an E removed right
-// after (Linux: unshare(CLONE_FS), not under a seccomp filter such as
-// Docker's default; macOS: __pthread_fchdir), and at hands the same spelling
-// to bindat(2) with D's fd (FreeBSD). The goroutine ends without unlocking,
-// so the thread is thrown away.
-//
-// A connect leaves no spelling with the peer, so the routes that need no
-// writing and no thread come first: proc-direct passes
-// /proc/self/fd/<dirfd>/<name>, relative the path relative to the cwd,
-// at-direct the socket's directory fd to connectat(2). Thread-cwd-direct
-// passes the file name from a throwaway thread whose cwd is the socket's
-// directory. Link-file makes an E right in B, connects by its real path B/E,
-// and removes E right after; a connect makes no D.
-//
-// sockat does not fork. The specification's widened sockaddr (Apple's
-// systems) is not made: handed to the net package, a socket connected that
-// way to a peer bound that way has a nil RemoteAddr. None of the routes
-// changes the working directory of the process or of the calling thread, and
-// all of them can be used from any goroutine. When no route can be used, the
-// error is ENAMETOOLONG.
-//
-// # What differs from the net package
+// # Go-specific caveats
 //
 //   - An empty path is EINVAL. The net package binds it, on Linux, to an
 //     abstract name the kernel picks, and fails a connect to it with an
@@ -141,28 +71,21 @@
 //     the file (as the net package elsewhere leaves a path that starts with
 //     '@'), and a path of 106 or 107 bytes, which no longer fits, is treated
 //     as a long path.
-//   - For a long path, the listener's Addr (and its accepted connections'
-//     LocalAddr, and the peer's RemoteAddr) is the spelling the bind handed to
-//     the kernel, not the path you passed. [Spelling] tells what it is good
-//     for: do not unlink or stat it without looking.
-//   - Closing [Listen]'s listener of a long path unlinks that spelling, as the
-//     net package does: through link-dir's the socket file is removed,
-//     through link-file's the symlink E is removed and the file stays, and
-//     through a Dangling one (thread-cwd, at) nothing is. The listener of
-//     [ListenEx] removes nothing on Close, short paths included: use
-//     Bound.File's Remove, before closing the listener.
-//   - A long path that does not end with a file name ("dir/", "dir/.",
-//     "dir/..") is EINVAL, and nothing is created.
-//   - The directory is looked up first (resolved to a real path for E, as
-//     the kernel resolves it: the path is never folded on the string, so
-//     "a/sym/.." is the parent of where sym leads, not "a"); a rename or a
-//     symlink repointed in between is not seen.
-//   - Dial's relative route is exposed to another goroutine's os.Chdir: when
-//     the cwd changed during the call, the result is dropped and an error is
-//     returned.
-//   - B, D and E stay outside the application's places. A live D may be
-//     removed where systemd is older than v242 and in macOS's $TMPDIR; its
-//     spellings then name nothing. A peer with a private /tmp (systemd's
-//     PrivateTmp) cannot follow a spelling through /tmp:
-//     Spelling.UsableWithPrivateTmp tells.
+//   - net.UnixListener's Close unlinks the address it keeps. For [Listen]'s
+//     listener of a long path that is the spelling: through link-dir's the
+//     socket file is removed, through link-file's the symlink E is removed
+//     and the file stays, and through a Dangling one (thread-cwd, at) nothing
+//     is (SetUnlinkOnClose(false)). The listener of [ListenEx] removes
+//     nothing on Close, short paths included: use Bound.File's Remove, before
+//     closing the listener. A listener you make yourself from
+//     [ForBind].Path wants SetUnlinkOnClose(false) and the Remove of
+//     [ForBind.SocketFile].
+//   - The specification's widened sockaddr (Apple's systems) is not made:
+//     handed to the net package, a socket connected that way to a peer bound
+//     that way has a nil RemoteAddr, whose String panics.
+//   - The thread-cwd routes run on a throwaway goroutine locked to its OS
+//     thread, which ends without unlocking so that the runtime throws the
+//     thread away. None of the routes changes the working directory of the
+//     process or of the calling goroutine's thread, and sockat does not fork:
+//     every function can be called from any goroutine.
 package sockat

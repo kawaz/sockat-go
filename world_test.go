@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -152,38 +153,61 @@ func TestAnExistingBOfOursIsUsedWithItsMode(t *testing.T) {
 	}
 }
 
-// What is at B's name but fails the check (a symlink, even to a directory
-// of ours; a file; a directory others can write to) is not used: B falls
-// back to sockat-<euid>.<10 random letters or digits> in the same place
-// (SPEC-routes "B の作り方" step 5), and what was there is left as it was.
-// Someone who can write to B, or who put the symlink there, could otherwise
-// redirect the spellings through it.
-func TestABAtTheNameThatFailsTheCheckFallsBackToARandomName(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name string
-		make func(t *testing.T, at string)
-	}{
-		{"symlink", func(t *testing.T, at string) {
-			if err := os.Symlink(tmpDir(t), at); err != nil {
-				t.Fatal(err)
-			}
-		}},
-		{"file", func(t *testing.T, at string) {
-			if err := os.WriteFile(at, nil, 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}},
-		{"group-writable", func(t *testing.T, at string) {
-			if err := os.Mkdir(at, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Chmod(at, 0o770); err != nil {
-				t.Fatal(err)
-			}
-		}},
+// occupiers are the ways a B of a default name can be taken (occupied) by
+// what is not a private directory of ours: a symlink (even to a directory
+// of ours), a file, a directory others of the group can write to. Each makes
+// one at at.
+var occupiers = []struct {
+	name string
+	make func(t *testing.T, at string)
+}{
+	{"symlink", func(t *testing.T, at string) {
+		if err := os.Symlink(tmpDir(t), at); err != nil {
+			t.Fatal(err)
+		}
+	}},
+	{"file", func(t *testing.T, at string) {
+		if err := os.WriteFile(at, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}},
+	{"group-writable", func(t *testing.T, at string) {
+		if err := os.Mkdir(at, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(at, 0o770); err != nil {
+			t.Fatal(err)
+		}
+	}},
+}
+
+// occupyAll takes the B of the default name in each of the places 1 to 3
+// of ps (by the occupiers in turn: a symlink in /tmp, a file in
+// $XDG_RUNTIME_DIR, a group-writable directory in $TMPDIR), leaves the
+// places marked untouched, and returns the real paths of what took them, in
+// the order of the places.
+func occupyAll(t *testing.T, ps testPlaces) []string {
+	t.Helper()
+	var at []string
+	for i, p := range []place{{kindTmp, ps.tmp}, {kindRuntime, ps.runtime}, {kindTmpdir, ps.tmpdir}} {
+		occupiers[i].make(t, p.path+"/"+bName(p.kind))
+		markUntouched(t, p.path)
+		at = append(at, mustRealDir(t, p.path)+"/"+bName(p.kind))
 	}
-	for _, c := range cases {
+	return at
+}
+
+// What is at B's name but fails the check (a symlink, even to a directory
+// of ours; a file; a directory others can write to) occupies the place: it
+// is not used, nothing is made in that place (no B of another name either),
+// what was there is left as it was, and B is made in the next place
+// (SPEC-routes "B の作り方" step 5). Someone who can write to B, or who put
+// the symlink there, could otherwise redirect the spellings through it; and
+// a B of another name made instead would be left behind by every process
+// that met the occupied place, where no sweep looks.
+func TestAnOccupiedBPassesItsPlaceOverForTheNext(t *testing.T) {
+	t.Parallel()
+	for _, c := range occupiers {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			w, ps := testWorld(t, nil)
@@ -193,13 +217,12 @@ func TestABAtTheNameThatFailsTheCheckFallsBackToARandomName(t *testing.T) {
 			if err := unix.Lstat(at, &before); err != nil {
 				t.Fatal(err)
 			}
-			b := autoOf(w, false)
-			if b == nil {
-				t.Fatal("no B")
+			markUntouched(t, ps.tmp)
+			b, err := w.autoBase(false, anyFits)
+			if err != nil || b == nil || b.kind != kindRuntime || b.real != mustRealDir(t, ps.runtime)+"/sockat" {
+				t.Fatalf("B %v, %v; want the next place's", b, err)
 			}
-			if !regexp.MustCompile(`/` + uidName() + `\.` + randomRE + `$`).MatchString(b.real) {
-				t.Fatalf("B %s, want the fallback name", b.real)
-			}
+			assertUntouched(t, ps.tmp)
 			var after unix.Stat_t
 			if err := unix.Lstat(at, &after); err != nil || after.Mode != before.Mode || after.Ino != before.Ino {
 				t.Fatalf("what was at %s changed: %v", at, err)
@@ -208,11 +231,37 @@ func TestABAtTheNameThatFailsTheCheckFallsBackToARandomName(t *testing.T) {
 	}
 }
 
-// A B owned by another user is not used either (it falls back to the random
-// name), and a place one of whose directories on the way is owned by
-// another user is passed over for the next place: that user could rename
-// what is in it. Needs root to give a directory away, so it runs in the
-// Linux container.
+// With the B of every place 1 to 3 occupied there is no B of those places:
+// errNoBase, which tells every B found occupied in the order of the places
+// (for the routes' reason, SPEC "診断"), nothing is made in any place, and
+// nothing is remembered: once a place is free, the next call makes B there.
+func TestWithEveryPlaceOccupiedThereIsNoBAndTheErrorTellsThem(t *testing.T) {
+	t.Parallel()
+	w, ps := testWorld(t, nil)
+	at := occupyAll(t, ps)
+	b, err := w.autoBase(false, anyFits)
+	if b != nil || !errors.Is(err, errNoBase) || !slices.Equal(occupiedIn(err), at) {
+		t.Fatalf("B %v, %v (occupied %q); want errNoBase telling %q", b, err, occupiedIn(err), at)
+	}
+	if r := reasonOf(err); !strings.Contains(r, "no base") || !strings.Contains(r, occupiedReason(at)) {
+		t.Fatalf("reason %q", r)
+	}
+	for _, p := range []string{ps.tmp, ps.runtime, ps.tmpdir} {
+		assertUntouched(t, p)
+	}
+	if err := os.Remove(at[2]); err != nil {
+		t.Fatal(err)
+	}
+	if b := autoOf(w, false); b == nil || b.kind != kindTmpdir {
+		t.Fatalf("B %v once $TMPDIR is free", b)
+	}
+}
+
+// A B owned by another user occupies its place too (it is passed over for
+// the next place, with nothing made in it), and a place one of whose
+// directories on the way is owned by another user is passed over for the
+// next place: that user could rename what is in it. Needs root to give a
+// directory away, so it runs in the Linux container.
 func TestABOrAPlaceOfAnotherOwnerIsNotUsed(t *testing.T) {
 	t.Parallel()
 	if os.Geteuid() != 0 {
@@ -227,10 +276,12 @@ func TestABOrAPlaceOfAnotherOwnerIsNotUsed(t *testing.T) {
 		if err := os.Chown(at, 65534, 65534); err != nil {
 			t.Fatal(err)
 		}
+		markUntouched(t, ps.tmp)
 		b := autoOf(w, false)
-		if b == nil || !regexp.MustCompile(`/`+uidName()+`\.`+randomRE+`$`).MatchString(b.real) {
-			t.Fatalf("B %v, want the fallback name", b)
+		if b == nil || b.kind != kindRuntime {
+			t.Fatalf("B %v, want the next place ($XDG_RUNTIME_DIR)", b)
 		}
+		assertUntouched(t, ps.tmp)
 	})
 	t.Run("place", func(t *testing.T) {
 		w, ps := testWorld(t, nil)

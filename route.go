@@ -100,8 +100,16 @@ type unusable string
 func (u unusable) Error() string        { return "sockat: route unusable: " + string(u) }
 func (u unusable) Is(target error) bool { return target == errUnusable }
 
-// reasonOf is the reason an unusable error gives, for the trace.
+// reasonOf is the reason an unusable error gives, for the trace: with the B
+// of a default name found occupied, when it tells one.
 func reasonOf(err error) string {
+	if o := occupiedIn(err); o != nil {
+		var u unusable
+		if errors.As(err, &u) {
+			return string(u) + "; " + occupiedReason(o)
+		}
+		return occupiedReason(o)
+	}
 	var u unusable
 	if errors.As(err, &u) {
 		return string(u)

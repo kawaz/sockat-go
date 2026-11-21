@@ -17,8 +17,8 @@ import (
 // and so is one that holds anything but symlinks, and the symlinks right in
 // those directories. Nothing is made: a place with no such directory, or one
 // that fails its checks (another owner, writable by others), is passed over.
-// Directories of other names (made where the default one failed its checks,
-// or in a socket's directory) are not looked at.
+// Directories of other names (those in a socket's directory) are not looked
+// at.
 //
 // It is never called for you. The error is an *os.PathError (several joined
 // with errors.Join) for what could not be read or removed.

@@ -28,8 +28,8 @@ type config struct {
 	// bindFollows is whether bind(2) here follows a symlink in the last
 	// component (link-file of a bind; the systems' table, bindFollowsHere).
 	bindFollows follows
-	// random names D, the E made for one call and a B fallen back to:
-	// randomChars outside the tests.
+	// random names D, the E made for one call and the B in a socket's
+	// directory: randomChars outside the tests.
 	random func() (string, error)
 
 	// threadCwd is whether to try the routes through a thread's own cwd

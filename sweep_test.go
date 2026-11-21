@@ -104,10 +104,9 @@ func TestSweepRemovesTheDOfAnEndedProcessOnly(t *testing.T) {
 // What sweep leaves in a B besides live D: a symlink right in B (the E of a
 // connect that may be under way), a D holding anything but symlinks (a file,
 // a directory), and this process's own D (locked by the process). A dead D
-// that holds only symlinks goes. The directories of other names, the B
-// fallen back to (sockat-<euid>.<random>) and the B of a socket's directory
-// (.sockat.<random>), are not looked at, even with a dead D in them. A place
-// with no B gets none.
+// that holds only symlinks goes. The B of a socket's directory
+// (.sockat.<random>) is not looked at, even with a dead D in it. A place with
+// no B gets none.
 func TestSweepLeavesWhatIsNotADeadDOfSymlinks(t *testing.T) {
 	t.Parallel()
 	w, ps := testWorld(t, nil)
@@ -141,7 +140,7 @@ func TestSweepLeavesWhatIsNotADeadDOfSymlinks(t *testing.T) {
 	ln(b.real + "/deadD00000/0")
 	ln(b.real + "/deadD00000/1")
 	sd := tmpDir(t)
-	others := []string{ps.tmp + "/" + uidName() + ".AbCdEfGhIj", sd + "/.sockat.AbCdEfGhIj"}
+	others := []string{sd + "/.sockat.AbCdEfGhIj"}
 	for _, o := range others {
 		mk(o)
 		mk(o + "/deadD00000")

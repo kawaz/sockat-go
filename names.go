@@ -9,7 +9,7 @@ import (
 )
 
 // linkRandomLen is the length of a random name: D's, an E made for one call,
-// and the random part of a B fallen back to (SPEC-routes "D と E").
+// and the random part of the B in a socket's directory (SPEC-routes "D と E").
 const linkRandomLen = 10
 
 // linkAttempts is how many names createAt tries before giving up. Each try
@@ -26,7 +26,8 @@ const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789
 
 // randomChars returns linkRandomLen random letters and digits (alphabet) from
 // the system's secure generator (crypto/rand): the random names of D, of the
-// E made for one call, and of the B fallen back to (SPEC-routes "D と E").
+// E made for one call, and of the B in a socket's directory (SPEC-routes
+// "D と E").
 func randomChars() (string, error) {
 	var random [linkRandomLen]byte
 	if _, err := rand.Read(random[:]); err != nil {

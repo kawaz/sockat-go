@@ -401,6 +401,96 @@ func TestUsableCrossUIDTakesABOthersCanFollowOrNoneThroughB(t *testing.T) {
 	}
 }
 
+// With the B of every place 1 to 3 occupied (SPEC-routes "B の作り方" step
+// 5), a default bind makes nothing in those places and holds no B of them;
+// what it can use is the B of the socket's directory (the place 4): procB's
+// link-dir where /proc can be used, otherwise the routes whose spelling is
+// Dangling (thread-cwd, at) where the system has them, otherwise none
+// (ENAMETOOLONG). Every route through B the bind found unusable (link-dir,
+// link-file) tells the occupied B in its reason, so that whoever reads the
+// diagnostics learns why the places were not used.
+func TestADefaultBindWithEveryPlaceOccupiedUsesTheSocketsDirectory(t *testing.T) {
+	t.Parallel()
+	w, ps := testWorld(t, nil)
+	at := occupyAll(t, ps)
+	p := nest(t, tmpDir(t), 300, "s.sock")
+	tr := &trace{}
+	ep, bd, err := w.listen(p, Options{}, tr)
+	if ep != nil {
+		defer ep.Close()
+	}
+	for _, sk := range tr.skipped {
+		if (sk.name == routeLinkDir || sk.name == routeLinkFile) && !strings.Contains(sk.reason, occupiedReason(at)) {
+			t.Errorf("%s skipped for %q, which does not tell the occupied B %q", sk.name, sk.reason, at)
+		}
+	}
+	switch {
+	case err != nil:
+		wantErrno(t, "every place occupied", err, syscall.ENAMETOOLONG)
+		if names := namesOf(t, tr.skipped); !slices.Contains(names, routeLinkDir) {
+			t.Fatalf("skipped %v, want link-dir in it", names)
+		}
+	case bd.route == routeLinkDir:
+		if !procHere() || bd.base != kindSockdir {
+			t.Fatalf("link-dir through %q", bd.base)
+		}
+	case bd.route == routeThreadCwd || bd.route == routeAt:
+		if names := namesOf(t, tr.skipped); !slices.Contains(names, routeLinkDir) {
+			t.Fatalf("skipped %v, want link-dir in it", names)
+		}
+	default:
+		t.Fatalf("route %s", bd.route)
+	}
+	if err == nil && len(w.sockdir) != 1 {
+		t.Fatalf("the B of the socket's directory: %v", w.sockdir)
+	}
+	if w.auto != nil || w.autoCross != nil {
+		t.Fatalf("a B of the places 1 to 3 is held: %v %v", w.auto, w.autoCross)
+	}
+	for _, pl := range []string{ps.tmp, ps.runtime, ps.tmpdir} {
+		assertUntouched(t, pl)
+	}
+}
+
+// With UsableCrossUID, a B others can follow is looked for in the places
+// whose directories all have search permission for others (here /tmp's,
+// made 0711 with its parent); occupied there, it is passed over with nothing
+// made in it, and there is no other such place, so link-dir is unusable and
+// its reason tells the occupied B. The bind does not fall back to a spelling
+// others cannot follow (thread-cwd / at, Dangling, where the system has
+// them; ENAMETOOLONG otherwise).
+func TestAnOccupiedBShowsInTheReasonOfAUsableCrossUIDBind(t *testing.T) {
+	t.Parallel()
+	w, ps := testWorld(t, nil)
+	root, _, _ := splitPath(ps.tmp)
+	for _, d := range []string{root, ps.tmp} {
+		if err := os.Chmod(d, 0o711); err != nil {
+			t.Fatal(err)
+		}
+	}
+	occupiers[0].make(t, ps.tmp+"/"+uidName())
+	markUntouched(t, ps.tmp)
+	at := []string{mustRealDir(t, ps.tmp) + "/" + uidName()}
+	p := nest(t, tmpDir(t), 300, "s.sock")
+	l, b, err := w.listenEx(p, Options{UsableCrossUID: true})
+	var sks []Skip
+	if err != nil {
+		wantErrno(t, "no B others can follow", err, syscall.ENAMETOOLONG)
+		sks = routeErr(t, err).Skipped
+	} else {
+		defer l.Close()
+		if b.Spelling.Kind != Dangling {
+			t.Fatalf("%+v", b)
+		}
+		sks = b.Skipped
+	}
+	i := slices.IndexFunc(sks, func(s Skip) bool { return s.Name == string(routeLinkDir) })
+	if i < 0 || !strings.Contains(sks[i].Reason, occupiedReason(at)) {
+		t.Fatalf("skipped %+v, want link-dir telling %q", sks, at)
+	}
+	assertUntouched(t, ps.tmp)
+}
+
 // Forced past link-dir (a file name no spelling through B fits, and on
 // macOS link-file turned off by the table), a bind takes thread-cwd (Linux,
 // macOS) or at (FreeBSD): the socket file is at the path and talks, the

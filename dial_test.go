@@ -90,6 +90,29 @@ func TestALinkFileDialLeavesNothingInBAndKeepsB(t *testing.T) {
 	assertUntouched(t, ps.tmpdir)
 }
 
+// With the B of every place 1 to 3 occupied, a dial that only link-file
+// could carry makes nothing in those places (no B of another name either)
+// and is ENAMETOOLONG: the socket's directory is no place for a connect's
+// B. link-file, skipped last, tells the occupied B in its reason.
+func TestADialWithEveryPlaceOccupiedTellsItInLinkFilesReason(t *testing.T) {
+	t.Parallel()
+	w, ps := testWorld(t, nil)
+	at := occupyAll(t, ps)
+	p := nest(t, tmpDir(t), 300, farName)
+	listenAt(t, p)
+	_, r, sks, err := dialTraced(t, w, p, Options{})
+	wantErrno(t, "every place occupied", err, syscall.ENAMETOOLONG)
+	if len(sks) == 0 || r != "" || sks[len(sks)-1].name != routeLinkFile || !strings.Contains(sks[len(sks)-1].reason, occupiedReason(at)) {
+		t.Fatalf("route %q, skipped %+v; want link-file last telling %q", r, sks, at)
+	}
+	if w.auto != nil {
+		t.Fatalf("a B is held: %+v", w.auto)
+	}
+	for _, pl := range []string{ps.tmp, ps.runtime, ps.tmpdir} {
+		assertUntouched(t, pl)
+	}
+}
+
 // The B of link-file follows the places in order (/tmp, $XDG_RUNTIME_DIR,
 // $TMPDIR): each place that cannot have B (missing here) is passed over.
 // With none of them, link-file cannot be used and the dial is ENAMETOOLONG

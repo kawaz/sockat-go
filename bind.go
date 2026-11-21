@@ -153,7 +153,8 @@ func (w *world) bindLong(o op, path string, opts Options, tr *trace) (endpoint, 
 // directory's. fits estimates, before a B is made, whether a spelling of the
 // route through it can fit: where it cannot, the route is unusable, and no
 // other place is tried for it (the process's B does not depend on the length
-// of the path).
+// of the path). A route left unusable after a B of a default name was found
+// occupied tells it in its reason (occupiedErr).
 func (c *bindCall) base(cross bool, fits fitsFunc) (*base, error) {
 	if c.opts.Base != "" {
 		return c.w.givenBase(c.opts.Base, fits)
@@ -162,16 +163,17 @@ func (c *bindCall) base(cross bool, fits fitsFunc) (*base, error) {
 	if !errors.Is(err, errNoBase) {
 		return b, err
 	}
+	occupied := occupiedIn(err)
 	if cross {
-		return nil, unusable("no base others can follow")
+		return nil, withOccupied(unusable("no base others can follow"), occupied)
 	}
 	if !fits(kindSockdir, "") {
-		return nil, errSpellingTooLong
+		return nil, withOccupied(errSpellingTooLong, occupied)
 	}
 	if b := c.w.sockdirBase(c.real, c.dirID); b != nil {
 		return b, nil
 	}
-	return nil, errNoBase
+	return nil, withOccupied(errNoBase, occupied)
 }
 
 // linked is a spelling through a resolve E, made for a bind or a resolve:

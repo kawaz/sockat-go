@@ -118,6 +118,41 @@ var errSpellingTooLong = unusable("spelling too long")
 // errNoBase is no B of the places 1 to 3 being there or makeable.
 var errNoBase = unusable("no base")
 
+// occupiedErr is an unusable error of a route through B (err) for a call
+// that found the B of a default name in one of the places 1 to 3 taken by
+// something not ours (paths): the reason tells it (SPEC "診断"), as the cause
+// of a B in a later place, or of none.
+type occupiedErr struct {
+	err   error
+	paths []string
+}
+
+func (e occupiedErr) Error() string { return e.err.Error() + "; " + occupiedReason(e.paths) }
+func (e occupiedErr) Unwrap() error { return e.err }
+
+// occupiedReason is what a reason adds for the B of a default name found
+// taken at paths.
+func occupiedReason(paths []string) string {
+	return "B occupied by another owner: " + strings.Join(paths, ", ")
+}
+
+// withOccupied is err telling the B found taken at paths, when there are any.
+func withOccupied(err error, paths []string) error {
+	if len(paths) == 0 {
+		return err
+	}
+	return occupiedErr{err, paths}
+}
+
+// occupiedIn is the paths of the B found taken that err tells, if any.
+func occupiedIn(err error) []string {
+	var o occupiedErr
+	if errors.As(err, &o) {
+		return o.paths
+	}
+	return nil
+}
+
 // autoBase is the world's B of the places 1 to 3 (cross: autoCross, one
 // others can follow): the first place in order where B is or can be made
 // (with cross, the first such place that lets others search all the way),
@@ -127,6 +162,11 @@ var errNoBase = unusable("no base")
 // through it: where it cannot fit, no B is made and the error is
 // errSpellingTooLong; the next place is not tried for it (it is not the
 // process's B). errNoBase when no place has or can make one.
+//
+// A place whose B of the default name is there but fails B's check (not a
+// directory of ours, or writable by others: occupied) cannot be used, and
+// the next place is tried (SPEC-routes "B の作り方" step 5); nothing is made
+// in it. The error then tells the B found occupied (occupiedErr).
 func (w *world) autoBase(cross bool, fits fitsFunc) (*base, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -143,6 +183,7 @@ func (w *world) autoBase(cross bool, fits fitsFunc) (*base, error) {
 			return w.auto, nil
 		}
 	}
+	var occupied []string
 	for _, p := range w.autoPlaces() {
 		real, err := realDir(p.path)
 		if err != nil || !w.ancestorsPass(real) {
@@ -152,9 +193,12 @@ func (w *world) autoBase(cross bool, fits fitsFunc) (*base, error) {
 			continue
 		}
 		if !fits(p.kind, real+"/"+bName(p.kind)) {
-			return nil, errSpellingTooLong
+			return nil, withOccupied(errSpellingTooLong, occupied)
 		}
 		b, err := w.makeBase(p, real, false)
+		if errors.Is(err, errNotOurs) {
+			occupied = append(occupied, joinUnder(real, bName(p.kind)))
+		}
 		if err != nil {
 			continue
 		}
@@ -173,7 +217,7 @@ func (w *world) autoBase(cross bool, fits fitsFunc) (*base, error) {
 		w.auto = b
 		return b, nil
 	}
-	return nil, errNoBase
+	return nil, withOccupied(errNoBase, occupied)
 }
 
 // dropGoneAuto forgets the B of the places 1 to 3 the world holds when it
@@ -236,8 +280,8 @@ func (w *world) ancestorsPass(real string) bool {
 // crossPlace reports whether a B named name in the place real (whose
 // ancestors passed the check) can be one others can follow, before it is
 // made: every directory down to real has search permission for others, and a
-// B of ours already there has it too (one that fails B's check is passed
-// over for a fresh B of mode 0711, which has).
+// B of ours already there has it too. One there that fails B's check
+// (occupied) is left for makeBase to find, which tells it.
 func crossPlace(real, name string) bool {
 	if checkAncestors(real, true) != nil {
 		return false
@@ -422,10 +466,9 @@ func (w *world) sockdirBase(real string, id fileID) *base {
 //
 // The place's ancestors are checked once per process. B is named
 // sockat-<euid> (sockat in $XDG_RUNTIME_DIR, .sockat.<random> in the socket's
-// directory); one already there that fails the check (not a directory of
-// ours, or writable by others) is passed over for sockat-<euid>.<random>.
-// given makes the error of B an Options.Base error rather than a reason to
-// fall back.
+// directory, the last element of the path for Options.Base); one already
+// there that fails the check (not a directory of ours, or writable by
+// others) is errNotOurs, and nothing is made.
 func (w *world) makeBase(p place, real string, given bool) (*base, error) {
 	if !w.ancestorsPass(real) {
 		return nil, checkAncestors(real, false)
@@ -446,9 +489,6 @@ func (w *world) makeBase(p place, real string, given bool) (*base, error) {
 	default:
 		name = bName(p.kind)
 		fd, err = makeOrOpen(pfd, name)
-		if errors.Is(err, errNotOurs) {
-			name, fd, err = w.makeFresh(pfd, "sockat-"+strconv.Itoa(os.Geteuid())+".")
-		}
 	}
 	if err != nil {
 		return nil, err

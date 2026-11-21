@@ -19,12 +19,13 @@
   - `checked`: 途中の確かめが済んだ置き場の実パス (プロセスで 1 度だけ確かめる)
 - B と D の fd は `int` で持ち、close-on-exec で、閉じない (`*os.File` にすると finalizer が閉じる)。消されていたと分かった B・D は外して作り直すが、外した方の fd も閉じない (渡した E の `Cleanup` が D の fd で unlink するので、閉じた番号が使い回されると別の所を消す)
 - 作れなかった置き場は覚えず、次の呼び出しで試し直す。D を作れなかった B は、その呼び出しの後の経路で作り直さず、別の B も探さない
+- 占拠された置き場 (既定の名前の B が確かめに外れた所) は覚えず、呼び出しごとに確かめ直す。その呼び出しで B を使う経路が使えなかった時は、`Skipped` の `Reason` に `B occupied by another owner: <占拠した物の実パス>` を足す (置き場 1〜3 で B が見つからなかった後の、ソケットのディレクトリの B での理由と `UsableCrossUID` の理由にも)
 - B・D が消されたかは、fd の `fstat` の `st_nlink` が 0 か、名前の `lstat` (`AT_SYMLINK_NOFOLLOW`) と fd の `(st_dev, st_ino)` が違うかで見る。macOS (APFS) では消したディレクトリの `st_nlink` が 2 のままなので、名前の確かめを省かない
 - `Options.Base` の安全の確かめ (途中・持ち主・他人が書けない) は呼び出しのたびに行う。`UsableCrossUID` のための other の x の判定は、B を初めて持った時点の物を、途中 (`ancestorsX`) と B 自身 (`ownX`) に分けて覚える。途中は見直さない。B 自身が持たないと覚えた時は、`UsableCrossUID` の呼び出しのたびに B の fd の `fstat` で見直し、持っていればそれ以後は持つと覚える。`ownX` は `world` の lock の外 (綴りの `Spelling`) からも読むので `atomic.Bool`
 
 作り方 (SPEC-routes のとおり):
 
-- B: 置き場を realpath → 途中を確かめる → 置き場を `O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC` で開く → `mkdirat(0700)` → `fchmodat(0711)` → 同じフラグで開いて `fstat` (実ディレクトリ・持ち主が実効 uid)。`EEXIST` なら開いて確かめ (他人が書けないことも)、mode は変えない。外れたら同じ置き場の `sockat-<実効 uid>.<乱数 10>` に落とす (`Options.Base` はエラー)。そろえられない・開けない時は作った自分の空のディレクトリを消す
+- B: 置き場を realpath → 途中を確かめる → 置き場を `O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC` で開く → `mkdirat(0700)` → `fchmodat(0711)` → 同じフラグで開いて `fstat` (実ディレクトリ・持ち主が実効 uid)。`EEXIST` なら開いて確かめ (他人が書けないことも)、mode は変えない。外れたら (占拠) その置き場に何も作らず次の置き場へ進む (`Options.Base` はエラー)。そろえられない・開けない時は作った自分の空のディレクトリを消す
 - D: B の fd を基準に乱数 10 文字で `mkdirat(0700)` → `fchmodat(0711)` → 開いて確かめる → `flock(LOCK_SH)` → 名前を引き直して fd と同じ物か確かめ、違えば (間に他のプロセスの `Sweep` が消した) 作り直す (16 回まで)
 - E: resolve の E は B ごとのカウンタを 36 進にした名前、thread-cwd・at と既定の connect の E は乱数 10 文字。illumos / Solaris は `golang.org/x/sys/unix` に `Symlinkat` が無いので、D (か B) の実パスから組んだパスで `unix.Symlink` を呼ぶ
 - 乱数は英数 62 種の文字で、`crypto/rand` から作る
@@ -60,5 +61,6 @@
 ## 判断の出所
 
 - B・D・E の作り方、置き場の順、見積もりで次の置き場に移らないこと、消された B・D を作り直すこと、`Sweep` の対象: ハブの SPEC・SPEC-routes・DR-0017 と、ハブの答え (2026-11-21)
+- 占拠された B で次の置き場へ進むこと、理由に占拠と分かることを入れること: ハブの SPEC・SPEC-routes「B の作り方」・DR-0017 (kawaz 裁定 2026-11-21、RV-Q1 = a)。理由の文言と、どの理由に足すか: 実装側の判断 2026-11-21
 - B 自身の other の x が無いと覚えた時に `fstat` で見直すこと: ハブの SPEC-routes「実体の置き場」(ハブ 80d6eec4)。持つと分かった後は覚えて見直さないこと: 実装側の判断 2026-11-21
 - world に持つこと、fd を `int` で持ち閉じないこと、procB の見積もりで `/proc/<pid>/fd` を引けない時の扱い、illumos の `Symlink`: 実装側の判断 2026-11-21 (illumos の扱いはハブの答えで了承)

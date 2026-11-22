@@ -25,7 +25,7 @@ c, err := sockat.Dial(path)
 
 You get back the same types as the standard (`*net.UnixListener` / `*net.UnixConn`), and short paths go to the standard unchanged, as before. Only for a long path does sockat quietly set up a short way to the same place and connect through it. You don't need to shorten paths yourself or care about each OS's limit.
 
-## Install
+## Installation
 
 ```sh
 go get github.com/kawaz/sockat-go

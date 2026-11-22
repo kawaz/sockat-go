@@ -27,7 +27,7 @@ Go の標準の listener は Close で、覚えているアドレスの綴りを
 | `ListenEx` | どれも (短いパスも) | `false` | 何も消さない。消すのは `Bound.File` の `Remove` だけ |
 
 - DGRAM (`ListenUnixgram`・`ListenUnixgramEx`) の `*net.UnixConn` は標準が元から Close で消さないので、何もしない
-- `Listen` の doc と README の「標準と違う点」に、link-file の綴りでは閉じてもファイルが残ることを書く
+- `Listen` の doc と利用マニュアルの「Go に固有の注意」に、link-file の綴りでは閉じてもファイルが残ることを書く
 
 ## 理由
 

@@ -27,7 +27,7 @@ SPEC は Apple の OS の connect の順で、relative の次に 253 バイト�
 
 ## Consequences
 
-- Apple の OS の connect 系は、上の「失う」場面で `ENAMETOOLONG`。SPEC どおりの実装 (元のパスも相対パスも 253 を超えると届かない) より手前で届かなくなる。README の「SPEC から外れる経路」に書く
+- Apple の OS の connect 系は、上の「失う」場面で `ENAMETOOLONG`。SPEC どおりの実装 (元のパスも相対パスも 253 を超えると届かない) より手前で届かなくなる。利用マニュアルの「SPEC から外れる経路」に書く
 
 ## 判断の出所
 

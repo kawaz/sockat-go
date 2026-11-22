@@ -44,15 +44,15 @@
 //   - What differs from the standard for a long path: the address the kernel
 //     returns is the spelling, state is left outside the application's
 //     places, a live D may be removed, a peer with PrivateTmp
-//   - Patterns not to use, with the Go forms in the README and the Example
-//     functions of this package
+//   - Patterns not to use, with the Go forms in the user manual and the
+//     Example functions of this package
 //   - What stays in the base, and sweep: B, D and E, what Sweep removes, and
 //     how a long-lived process cleans up with ListenEx
 //   - Routes for long paths and their order; how each route is built is in
 //     SPEC-routes.md next to it
 //
-// The routes each system tries in Go are listed in the README,
-// https://github.com/kawaz/sockat-go#how-a-long-path-is-reached.
+// The routes each system tries in Go are listed in the user manual,
+// https://github.com/kawaz/sockat-go/blob/main/docs/MANUAL.md#how-a-long-path-is-reached.
 //
 // # Go-specific caveats
 //

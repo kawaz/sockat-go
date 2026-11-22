@@ -72,7 +72,7 @@ package は `sockat` 1 つ (子 package を作らない)。
 - 相対パスでは、何かを引く前と、bind と覚えるための realpath (経路が返した物を覚える時は bind と覚える物の確かめ) の両方の後でプロセスの cwd の `(st_dev, st_ino)` を比べ、違えば覚えられない時と同じに扱う
 - `Remove` はそのパスが今も同じファイルの時だけ消し、その後 `Cleanup` もする。listener は閉じない。既に無い・置き換わっていた時は nil。エラーを返すのは確かめられない時 (`lstat` が `ENOENT` / `ENOTDIR` 以外で失敗) と消すのに失敗した時で、その時も `Cleanup` まで行う
 - `Remove`・`Cleanup` は 1 回目だけ働く。`ForBind` と、その `SocketFile()` が返す物は同じ E の片付けを共有する
-- doc と README で `Remove` を listener を閉じる前に呼ぶよう勧め、例の `defer` もその順にする
+- doc と利用マニュアルで `Remove` を listener を閉じる前に呼ぶよう勧め、例の `defer` もその順にする
 
 ## 理由
 

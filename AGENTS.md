@@ -7,7 +7,7 @@ sockat-go は、`sun_path` の上限を超えるパスでも Unix domain socket 
 ## 必読
 
 - [docs/decisions/](docs/decisions/INDEX.md) — Go 版の設計 (公開 API の形、listener の Close、OS ごとの経路の列、置き場の B・D の持ち方、スレッド cwd、広げた sockaddr を使わない理由、試験の置き場)。経路に手を入れる前に読む
-- [README-ja.md](README-ja.md) — 利用者に約束している振る舞い (Spelling、片付け、置き場に残る物、標準と違う点、どこから届かなくなるか)
+- [docs/MANUAL-ja.md](docs/MANUAL-ja.md) — 利用者に約束している振る舞い (Spelling、片付け、置き場に残る物、標準と違う点、どこから届かなくなるか)。[README-ja.md](README-ja.md) は困っている利用者への入口で、置き換えるだけで解決することだけを書く
 - ハブの [DR-0017](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0017-resolve-through-persistent-base.md)・[SPEC](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md)・[SPEC-routes](https://github.com/kawaz/sockat/blob/main/docs/SPEC-routes-ja.md) — 置き場と経路の作り方の正本
 
 ## 構成
@@ -35,7 +35,7 @@ sockat-go は、`sun_path` の上限を超えるパスでも Unix domain socket 
 | `abstract_*.go` / `stdat_*.go` / `at_none.go` / `symlinkat*.go` | build tag ごとの定数と関数 (abstract の名前、標準が `@` を読むか、at の有無、illumos の `Symlinkat` の代わり) |
 | `internal/argerr` | sockat が自分で見つけた引数の誤りの目印 (`Error()`・`errors.Is` は変えない)。適合試験の CLI が OS の `EINVAL` と分けるのに使う |
 | `internal/cmd/sockat-conform` | 適合試験の CLI (ハブの conformance.md。`ListenEx` / `DialEx` に `Options` を渡す) |
-| `*_test.go` | 経路を強制するパッケージ内の試験 (`main_test.go` の `TestMain` が試験専用の置き場を用意する)。`example_long_test.go` は公開 API だけを使う外の試験で、README の推奨コードを動かす |
+| `*_test.go` | 経路を強制するパッケージ内の試験 (`main_test.go` の `TestMain` が試験専用の置き場を用意する)。`example_long_test.go` は公開 API だけを使う外の試験で、利用マニュアル (`docs/MANUAL-ja.md`) の推奨コードを動かす |
 
 ## 守ること
 
@@ -64,5 +64,5 @@ sockat-go は、`sun_path` の上限を超えるパスでも Unix domain socket 
 
 - jj colocate。commit は `jj commit -m "..." <files...>` でパスを指定する
 - push は `just push` だけ (lint・試験・翻訳ペアの鮮度・version の上げ忘れを検査してから push する)
-- README は日本語版 (`README-ja.md`) が正本。英語版は日本語版を直した同じ変更で直す
+- README と利用マニュアルは日本語版 (`README-ja.md`、`docs/MANUAL-ja.md`) が正本。英語版は日本語版を直した同じ変更で直す
 - 試験以外の `.go` / `go.mod` / `go.sum` を変えたら `just bump-version` で `VERSION` を上げる。main に `VERSION` が push されると、CI を通してから release workflow が tag と GitHub Release を作る (tag を手で打たない)

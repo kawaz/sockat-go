@@ -48,7 +48,7 @@ package は `sockat` 1 つ (子 package を作らない)。
 | `Skip` | `Name`・`Reason` |
 | `SocketFile` | 非公開の項目だけ。method `Remove() error` と `Cleanup() error` |
 | `ForBind` | `Path`、`Spelling`、診断の `Route`・`Base`・`Skipped`。method `Cleanup() error` と `SocketFile() (*SocketFile, error)` |
-| `ForConnect` | `Path`、診断の `Route`・`Skipped`。method `Cleanup() error` |
+| `ForConnect` | `Path`、`Spelling` (`Original`・`CwdRelative`・`Linked`。[DR-0020](DR-0020-absolutize-relative-path.md))、診断の `Route`・`Skipped`。method `Cleanup() error` |
 | `Spelling` | `Kind SpellingKind` と、`Linked` の時だけ意味を持つ `Removable bool`・`Until Until`・`UsableCrossUID bool`・`UsableWithPrivateTmp bool` (他の `Kind` では false かゼロ値) |
 | `SpellingKind` | `Original` (1 から)・`CwdRelative`・`Linked`・`Dangling`。`String()` は SPEC の名前 |
 | `Until` | `UntilProcess` (1 から)・`UntilCleanup`。`String()` は `"Process"` / `"Cleanup"` |
@@ -68,8 +68,8 @@ package は `sockat` 1 つ (子 package を作らない)。
 
 `SocketFile`:
 
-- `ListenEx`・`ListenUnixgramEx` は bind した直後にソケットのファイルの realpath (カーネルと同じに引く。[DR-0018](DR-0018-route-orders-per-os.md)) と `(st_dev, st_ino)` を覚える。覚える場所はハブの SPEC「[remove](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#remove)」のとおりで、link-dir・thread-cwd・at は経路が E に指させた実ディレクトリ (`bindCall.real`、経路を組む時に引いた物) とファイル名を、経路が bind の結果と一緒に返し (`bound.file`)、元のパスを引き直さない。standard と link-file は bind の後に元のパスの realpath を引く (bind の前に引くと、間に途中の symlink が張り替わった時に bind したのと別のファイルを覚え、`Remove` がそれを消す)。元のパスの最後の要素が既にある symlink の時は辿った先のソケットのファイルを覚え、辿った先がソケットでなければ覚えられない時と同じに扱う。覚えられなければ listener を閉じ、作った E を片付け、ソケットのファイルは消さずにエラーを返す
-- 相対パスでは、何かを引く前と、bind と覚えるための realpath (経路が返した物を覚える時は bind と覚える物の確かめ) の両方の後でプロセスの cwd の `(st_dev, st_ino)` を比べ、違えば覚えられない時と同じに扱う
+- `ListenEx`・`ListenUnixgramEx` は bind した直後にソケットのファイルの realpath (カーネルと同じに引く。[DR-0018](DR-0018-route-orders-per-os.md)) と `(st_dev, st_ino)` を覚える。覚える場所はハブの SPEC「[remove](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#remove)」のとおりで、link-dir・thread-cwd・at は経路が E に指させた実ディレクトリ (`bindCall.real`、経路を組む時に引いた物) とファイル名を、経路が bind の結果と一緒に返し (`bound.file`)、元のパスを引き直さない。standard と link-file は bind の後に、標準に渡した綴り (元のパスか絶対パスの候補) と E の指す先の realpath を引く (`bound.lookup`。bind の前に引くと、間に途中の symlink が張り替わった時に bind したのと別のファイルを覚え、`Remove` がそれを消す)。元のパスの最後の要素が既にある symlink の時は辿った先のソケットのファイルを覚え、辿った先がソケットでなければ覚えられない時と同じに扱う。覚えられなければ listener を閉じ、作った E を片付け、ソケットのファイルは消さずにエラーを返す
+- 綴りが `CwdRelative` の時 (相対パスを相対のまま標準に渡した時、[DR-0020](DR-0020-absolutize-relative-path.md)) は、何かを引く前と、bind と覚えるための realpath の両方の後でプロセスの cwd の `(st_dev, st_ino)` を比べ、違えば覚えられない時と同じに扱う。絶対の綴りで bind した相対パスは、覚える物が cwd によらないので比べない
 - `Remove` はそのパスが今も同じファイルの時だけ消し、その後 `Cleanup` もする。listener は閉じない。既に無い・置き換わっていた時は nil。エラーを返すのは確かめられない時 (`lstat` が `ENOENT` / `ENOTDIR` 以外で失敗) と消すのに失敗した時で、その時も `Cleanup` まで行う
 - `Remove`・`Cleanup` は 1 回目だけ働く。`ForBind` と、その `SocketFile()` が返す物は同じ E の片付けを共有する
 - doc と利用マニュアルで `Remove` を listener を閉じる前に呼ぶよう勧め、例の `defer` もその順にする

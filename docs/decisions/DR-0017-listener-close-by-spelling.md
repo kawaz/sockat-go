@@ -19,8 +19,8 @@ Go の標準の listener は Close で、覚えているアドレスの綴りを
 
 | 呼び出し | 通った経路 | `SetUnlinkOnClose` | Close で起きること |
 |---|---|---|---|
-| `Listen` | standard | 触らない | 標準のまま (元のパスのファイルが消える) |
-| `Listen` | standard (illumos の `./@...`、[DR-0002](DR-0002-standard-handles-paths-it-accepts.md)) | `false` | 何も消さない |
+| `Listen` | standard (元の絶対パス、または相対パスや長い絶対パスの絶対パスの候補、[DR-0020](DR-0020-absolutize-relative-path.md)) | 触らない | 標準のまま (綴りは絶対パスで、元のパスのファイルが消える) |
+| `Listen` | standard (経路が全部使えず相対のまま渡した相対パス、[DR-0020](DR-0020-absolutize-relative-path.md)) | 触らない (illumos の `./@...` は `false`、[DR-0002](DR-0002-standard-handles-paths-it-accepts.md)) | 標準のまま (`./@...` は何も消さない) |
 | `Listen` | link-dir | 触らない | 途中の E を辿り、元のパスのファイルが消える |
 | `Listen` | link-file | 触らない | E が消え、ソケットのファイルは残る |
 | `Listen` | thread-cwd・at (`Dangling`) | `false` | 何も消さない |

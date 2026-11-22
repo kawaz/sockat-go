@@ -10,12 +10,12 @@ Go の標準 (`syscall.SockaddrUnix`) は、macOS / BSD で 103 バイト、Linu
 ## Decision
 
 - 空のパスは、何も見ずに `EINVAL` (各関数のエラーの型で包む)
-- 標準が受け付ける長さ (`len(unix.RawSockaddrUnix{}.Path) - 1`) 以内は `net.ListenUnix` / `net.ListenUnixgram` / `net.DialUnix` をそのまま呼ぶ。何も足さない (環境変数も読まない)
+- 標準が受け付ける長さ (`len(unix.RawSockaddrUnix{}.Path) - 1`) 以内の絶対パスは `net.ListenUnix` / `net.ListenUnixgram` / `net.DialUnix` をそのまま呼ぶ。何も足さない (環境変数も読まない)。相対パスは、connect 系ではその長さ以内ならそのまま呼び、bind 系と resolve では絶対パスの候補にしてから扱う ([DR-0020](DR-0020-absolutize-relative-path.md)、ハブの [DR-0019](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0019-absolutize-relative-path-on-bind.md))
 - Linux / Android で abstract socket の名前 (先頭が NUL、または Go の記法の `@`) は、長さによらず標準にそのまま渡す。NUL の検査もしない
 - abstract namespace の無い OS では、先頭が NUL のパスも長さによらず `EINVAL`。`@` で始まるパスは普通の相対パス
-- illumos / Solaris では、`@` で始まるパスを `./` を前に付けて標準に渡す。`./` を付けて標準が受け付ける長さを超える時は、長いパスとして経路に回す
+- illumos / Solaris では、`@` で始まる相対パスを相対のまま標準に渡す時 (connect 系と、bind 系・resolve の名前で終わらない短いパスと経路が全部使えない時、[DR-0020](DR-0020-absolutize-relative-path.md)) は `./` を前に付ける。connect 系で `./` を付けて標準が受け付ける長さを超える時は、長いパスとして経路に回す。bind 系と resolve で相対のまま渡す時に超えれば `ENAMETOOLONG`
 - 経路が作る綴り (relative の相対パス、thread-cwd-direct のファイル名) が `@` で始まる時は `./` を前に付ける
-- `ListenEx` 等と resolve の `Spelling` は、abstract の名前では `Original`、illumos の `./@...` では `CwdRelative`
+- `ListenEx` 等と resolve の `Spelling` は、abstract の名前では `Original`、相対のまま渡した illumos の `./@...` では `CwdRelative`
 - それ以外で NUL を含むパスは、長さによらず何も作らずに `EINVAL`
 
 ## 理由
@@ -28,10 +28,10 @@ Go の標準 (`syscall.SockaddrUnix`) は、macOS / BSD で 103 バイト、Linu
 - NUL で切り詰めると、利用者が渡したのと別のパスにソケットができる (ハブの裁定)
 - 空のパスを標準に渡すと、Linux では利用者の知らない abstract の名前に bind し、OS で振る舞いが割れる。resolve は空の綴りを返してしまう (SPEC「短いパス」の空のパスは引数の誤り)
 
-illumos で `./` を付けると、SPEC の「標準にそのまま渡す。何も足さない」と次の点が違う。どれも、そのまま渡すと bind / connect 自体が通らないことと引き換え:
+illumos で相対のまま渡す `@...` に `./` を付けると、SPEC の「標準にそのまま渡す。何も足さない」と次の点が違う。どれも、そのまま渡すと bind / connect 自体が通らないことと引き換え:
 
-- カーネルが覚える綴りと listener の `Addr()` が `./@...` になる。同じ cwd の同じファイルを指すので、`Spelling` は他の相対パスと同じ `CwdRelative`
-- 106・107 バイトの `@...` は `./` を付けると標準に入らず、経路に回る (Listen は link-dir、Dial は relative → link-file、[DR-0018](DR-0018-route-orders-per-os.md))
+- カーネルが覚える綴りと listener の `Addr()` が `./@...` になる。同じ cwd の同じファイルを指すので、`Spelling` は他の相対のまま渡した相対パスと同じ `CwdRelative`
+- 106・107 バイトの `@...` は `./` を付けると標準に入らず、connect は経路に回る (relative → link-file、[DR-0018](DR-0018-route-orders-per-os.md))
 - listener の Close は `./@...` のファイルを消さない (`SetUnlinkOnClose(false)`、[DR-0017](DR-0017-listener-close-by-spelling.md))。他の OS の Go の標準が `@` で始まるアドレスのファイルを Close で消さない (`net/unixsock_posix.go` の `ln.path[0] != '@'`) のとそろえ、相対の綴りで消して間に変わった cwd の別のファイルを消す危険を sockat が足さないため (ハブの統括の判断 2026-11-19)
 
 ## 却下した案
@@ -40,7 +40,7 @@ illumos で `./` を付けると、SPEC の「標準にそのまま渡す。何�
 |---|---|
 | NUL を含む短いパスは標準に任せる | 標準は別のパスに bind する。長いパスと振る舞いが割れる |
 | illumos の `@...` を自前のソケットで `@...` のまま bind / connect する | x/sys/unix の `SockaddrUnix` も同じ書き換えをするので sockaddr を手で組んで bind を呼ぶことになる。listener の `Addr()` が `@...` になり、それを標準に渡すと abstract と読まれる。標準の listener の Close も `@` で始まるアドレスのファイルを消さない |
-| illumos の `@...` を絶対パスにして標準に渡す | `./` より長くなり、標準に入らなくなる範囲が広がる。相対パスの意味 (cwd 基準) も失う |
+| connect 系で illumos の `@...` を絶対パスにして標準に渡す | `./` より長くなり、標準に入らなくなる範囲が広がる。connect の綴りは相手に残らないので、絶対にする意味も無い (bind 系と resolve は `@` によらず相対パスを絶対にする。[DR-0020](DR-0020-absolutize-relative-path.md)) |
 
 ## 判断の出所
 

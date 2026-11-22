@@ -6,9 +6,9 @@ sockat-go は、`sun_path` の上限を超えるパスでも Unix domain socket 
 
 ## 必読
 
-- [docs/decisions/](docs/decisions/INDEX.md) — Go 版の設計 (公開 API の形、listener の Close、OS ごとの経路の列、置き場の B・D の持ち方、スレッド cwd、広げた sockaddr を使わない理由、試験の置き場)。経路に手を入れる前に読む
+- [docs/decisions/](docs/decisions/INDEX.md) — Go 版の設計 (公開 API の形、listener の Close、OS ごとの経路の列、置き場の B・D の持ち方、相対パスを絶対にすること、スレッド cwd、広げた sockaddr を使わない理由、試験の置き場)。経路に手を入れる前に読む
 - [docs/MANUAL-ja.md](docs/MANUAL-ja.md) — 利用者に約束している振る舞い (Spelling、片付け、置き場に残る物、標準と違う点、どこから届かなくなるか)。[README-ja.md](README-ja.md) は困っている利用者への入口で、置き換えるだけで解決することだけを書く
-- ハブの [DR-0017](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0017-resolve-through-persistent-base.md)・[SPEC](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md)・[SPEC-routes](https://github.com/kawaz/sockat/blob/main/docs/SPEC-routes-ja.md) — 置き場と経路の作り方の正本
+- ハブの [DR-0017](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0017-resolve-through-persistent-base.md)・[DR-0019](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0019-absolutize-relative-path-on-bind.md)・[SPEC](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md)・[SPEC-routes](https://github.com/kawaz/sockat/blob/main/docs/SPEC-routes-ja.md) — 置き場と経路の作り方の正本
 
 ## 構成
 
@@ -20,7 +20,8 @@ sockat-go は、`sun_path` の上限を超えるパスでも Unix domain socket 
 | `sweep.go` | 公開 API の `Sweep` / `SweepBase` (B の中の死んだ D を消す) |
 | `options.go` / `spelling.go` | `Options`・`Bound`・`Report`・`Skip`・`RouteError` と `Spelling`・`SpellingKind`・`Until` |
 | `socketfile.go` | `SocketFile` (bind した直後に覚える、`Remove`・`Cleanup`) と E の片付けの共有 |
-| `route.go` | 入口 (`bind`・`connect`: 短いパス、NUL、abstract、illumos の `@`)、`viaStd`、エラーの形、経路の名前、試した経路の記録 |
+| `route.go` | 入口 (`bind`・`connect`: 短いパス、NUL、abstract、illumos の `@`、bind の相対パスの候補と相対のまま渡す場面)、`viaStd`、エラーの形、経路の名前、試した経路の記録 |
+| `absolute.go` | 相対パスの絶対パスの候補 (実パス、`$PWD`)、PATH_MAX を超える cwd の見分け |
 | `world.go` | `config` (環境の読み方) と `world` (プロセスが持つ B)、`defaultWorld` |
 | `base.go` | B (置き場の順、途中の確かめ、作る・確かめる、`UsableCrossUID` の B、`Options.Base`、消された B の作り直し) |
 | `dir.go` | D (作る・flock・作り直す) と E (resolve の E、呼び出しごとの E) |
@@ -40,7 +41,8 @@ sockat-go は、`sun_path` の上限を超えるパスでも Unix domain socket 
 ## 守ること
 
 - **振る舞いを変える時は、先にハブの SPEC を直す。** sockat-go の docs と実装はその後に追従させる
-- **標準が受け付けるパスには何も足さない。** `net.ListenUnix` / `net.ListenUnixgram` / `net.DialUnix` をそのまま呼ぶ (DR-0002。例外は NUL の `EINVAL` と illumos の `@`)
+- **標準が受け付ける絶対パスには何も足さない。** `net.ListenUnix` / `net.ListenUnixgram` / `net.DialUnix` をそのまま呼ぶ (DR-0002。例外は NUL の `EINVAL` と illumos の `@`)
+- **bind 系と resolve は相対パスを絶対パスの候補にしてから扱う。connect 系は相対のまま渡す。** 候補は実パス → `$PWD` の綴りの順で、`$PWD` は `.` と同じ物の時だけ、字句で畳んだディレクトリは `(st_dev, st_ino)` で確かめてから使う。標準に渡す長さを超える絶対パスも経路の前に実パスの候補を見る。相対のまま標準に渡すのは、どの経路も使えない時だけ (`CwdRelative`。ハブの DR-0019、DR-0020)
 - **経路の本当の失敗は次の経路でやり直さない。** 次へ進むのは経路自体が使えない時だけ。失敗した時はその呼び出しで作った E を消してから返す (DR-0018)
 - **bind は link-dir・link-file・thread-cwd / at だけ。** 綴りが後で無関係なファイルに当たる経路 (proc-direct、relative、at-direct) と widened を bind に使わない。link-file は bind が symlink を辿らないと実測した OS では試さない (DR-0018)
 - **`Skipped` にはその呼び出しの列に並ぶ経路だけを入れる。** Linux の connect の行は `/proc` を使えるかで呼び出しの初めに 1 度だけ選ぶ (DR-0018)
@@ -48,7 +50,7 @@ sockat-go は、`sun_path` の上限を超えるパスでも Unix domain socket 
 - **B と D の fd は `int` で持ち、閉じない。** 消されて外した B・D の fd も閉じない (DR-0019)
 - **綴りが収まらないと見積もった時は B を作らず、次の置き場にも移らない。** プロセスの B はパスの長さで変わらない (DR-0019)
 - **スレッド cwd の goroutine は、cwd を移しうる所まで進んだら `UnlockOSThread` しない。** cwd が変わったスレッドは goroutine と一緒に捨てる。主スレッドでは cwd を移さない (runtime は主スレッドを捨てない) (DR-0004)
-- **既定の `Listen` は `SetUnlinkOnClose` を触らず、`Dangling` と illumos の `./@` だけ `false`。`ListenEx` 系はどれも `false`** (DR-0017)
+- **既定の `Listen` は `SetUnlinkOnClose` を触らず、`Dangling` と相対のまま渡した illumos の `./@` だけ `false`。`ListenEx` 系はどれも `false`** (DR-0017)
 - **経路は公開 API に出さない。** 試験はパッケージ内で `config` を差し替えた `world` で各経路を強制する (DR-0009)
 - **試験は本物の `/tmp/sockat-<uid>` を使わない。** 公開 API の試験も `TestMain` が向けた試験専用の置き場を使う (DR-0009)
 - 公開 API・doc・エラーの文言は英語。DR と日本語の docs は日本語

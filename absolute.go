@@ -82,14 +82,15 @@ func pwdCandidate(dir, name string) (string, bool) {
 // to spell): then no route can be used for the path, rather than the call
 // failing (SPEC "相対パスを絶対パスにする").
 //
-// Design rationale: SPEC names ENAMETOOLONG, the error of realpath(3).
-// realDir is getcwd through syscall.Getwd, with a buffer of PATH_MAX, and
-// filepath.EvalSymlinks. Past PATH_MAX, syscall.Getwd fails ENAMETOOLONG on
-// Linux and EINVAL on macOS (both measured with Go 1.27, 2026-11-22: Linux
-// from about 4200 bytes, macOS from 1027), and an lstat of the joined path
-// ENAMETOOLONG. ERANGE, POSIX's getcwd(3) error for a buffer too small, is
-// taken the same (not measured: the other systems). syscall.Getwd has no
-// other EINVAL to give here (its buffer is never empty), and an lstat none.
+// Design rationale: SPEC names ENAMETOOLONG and ERANGE, the errors of
+// realpath(3) past PATH_MAX. realDir is not realpath(3) but getcwd through
+// syscall.Getwd, with a buffer of PATH_MAX, and filepath.EvalSymlinks. Past
+// PATH_MAX, syscall.Getwd fails ENAMETOOLONG on Linux and EINVAL on macOS
+// (both measured with Go 1.27, 2026-11-22: Linux from about 4200 bytes,
+// macOS from 1027), and an lstat of the joined path ENAMETOOLONG; so EINVAL
+// is taken too. ERANGE, POSIX's getcwd(3) error for a buffer too small, is
+// for the other systems (not measured). syscall.Getwd has no other EINVAL to
+// give here (its buffer is never empty), and an lstat none.
 func pastPathMax(err error) bool {
 	return errors.Is(err, syscall.ENAMETOOLONG) || errors.Is(err, syscall.ERANGE) || errors.Is(err, syscall.EINVAL)
 }

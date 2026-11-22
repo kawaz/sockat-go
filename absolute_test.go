@@ -396,22 +396,27 @@ func TestARelativePathNoRouteReachesIsBoundAsItIs(t *testing.T) {
 	}
 }
 
-// A cwd deeper than PATH_MAX has no real path (realpath(3) fails
-// ENAMETOOLONG; in Go, getcwd fails ENAMETOOLONG on Linux and EINVAL on
-// macOS) and no $PWD that stat can follow, so a relative path has
-// no absolute candidate and no route can be used for it (each needs the
-// socket's directory's real path): that is no error, and a short relative
-// path is handed to the standard library as it is, CwdRelative, with nothing
-// skipped, since no route was tried (SPEC "相対パスを絶対パスにする"). The
-// resolves spell it as it is, CwdRelative. Run on Linux and macOS only, the
-// systems on which the errno of getcwd past PATH_MAX was measured
-// (pastPathMax). In a child whose cwd is a fresh directory, from which it
-// descends.
+// A cwd deeper than PATH_MAX has no real path, its length being the cause
+// (SPEC names ENAMETOOLONG and ERANGE; Go's getcwd fails ENAMETOOLONG on
+// Linux and EINVAL on macOS, pastPathMax), and no $PWD that stat can follow,
+// so a relative path has no absolute candidate and no route can be used for
+// it (each needs the socket's directory's real path): that is no error, and
+// a short relative path is handed to the standard library as it is, as the
+// standard library would bind it (SPEC "相対パスを絶対パスにする" 5):
+// CwdRelative, route standard, nothing skipped since no route was tried,
+// and the socket file in the cwd; a stream bind and a datagram one alike, the
+// public Listen and ListenUnixgram included. The resolves spell it as it is,
+// CwdRelative. A relative path too long for the standard library is
+// ENAMETOOLONG, with no route and nothing skipped. ListenEx and
+// ListenUnixgramEx bind it too but cannot record the socket file (its real
+// path cannot be had), so they fail as when a file cannot be recorded: an
+// error reaching errNotRecorded with the route that bound, the listener
+// closed, and the socket file left. The getcwd error is checked to be one of
+// a cwd past PATH_MAX on every system, its errno in the failure (measured on
+// Linux and macOS only). In a child whose cwd is a fresh directory, from which
+// it descends.
 func TestACwdPastPathMaxBindsARelativePathAsItIs(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-		t.Skip("the errno of getcwd past PATH_MAX is measured on Linux and macOS only (pastPathMax)")
-	}
 	if !inTmpCwd(t) {
 		return
 	}
@@ -419,7 +424,9 @@ func TestACwdPastPathMaxBindsARelativePathAsItIs(t *testing.T) {
 	for i := 0; ; i++ {
 		if _, err := syscall.Getwd(); err != nil {
 			if !pastPathMax(err) {
-				t.Fatalf("getcwd at %d levels: %v, not an error of a cwd past PATH_MAX", i, err)
+				var no syscall.Errno
+				errors.As(err, &no)
+				t.Fatalf("%s: getcwd at %d levels: %v (errno %d), not an error of a cwd past PATH_MAX", runtime.GOOS, i, err, int(no))
 			}
 			break
 		}
@@ -434,17 +441,22 @@ func TestACwdPastPathMaxBindsARelativePathAsItIs(t *testing.T) {
 		}
 	}
 	w, ps := testWorld(t, nil)
-	tr := &trace{}
-	ep, b, err := w.bind(opListen, "s.sock", Options{}, tr, eShared)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ep.Close()
-	if b.route != routeStandard || b.spelling != (Spelling{Kind: CwdRelative}) || len(tr.skipped) != 0 || localAddr(ep) != "s.sock" {
-		t.Fatalf("%+v, skipped %v, address %q, want CwdRelative through standard", b, tr.skipped, localAddr(ep))
-	}
-	if !isSocket("s.sock") {
-		t.Fatal("no socket file in the cwd")
+	for _, c := range []struct {
+		o    op
+		name string
+	}{{opListen, "s.sock"}, {opListenGram, "g.sock"}} {
+		tr := &trace{}
+		ep, b, err := w.bind(c.o, c.name, Options{}, tr, eShared)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ep.Close()
+		if b.route != routeStandard || b.spelling != (Spelling{Kind: CwdRelative}) || len(tr.skipped) != 0 || localAddr(ep) != c.name {
+			t.Fatalf("%s: %+v, skipped %v, address %q, want CwdRelative through standard", c.name, b, tr.skipped, localAddr(ep))
+		}
+		if !isSocket(c.name) {
+			t.Fatalf("%s: no socket file in the cwd", c.name)
+		}
 	}
 	f := resolveBindIn(t, w, "r.sock", Options{})
 	fc := resolveConnectIn(t, w, "r.sock", Options{})
@@ -454,7 +466,118 @@ func TestACwdPastPathMaxBindsARelativePathAsItIs(t *testing.T) {
 	if fc.Path != "r.sock" || fc.Spelling != (Spelling{Kind: CwdRelative}) || len(fc.Skipped) != 0 {
 		t.Fatalf("resolve for connect: %+v, want the path itself, CwdRelative", fc)
 	}
+	long := strings.Repeat("n", directMax+1)
+	tr := &trace{}
+	_, b, err := w.bind(opListen, long, Options{}, tr, eShared)
+	wantOpError(t, "a long relative path", opListen, long, err, syscall.ENAMETOOLONG)
+	if b.route != "" || len(tr.skipped) != 0 {
+		t.Fatalf("a long relative path: %+v, skipped %v, want no route and nothing skipped", b, tr.skipped)
+	}
 	assertPlacesEmpty(t, w, ps)
+
+	lp := listenPublic(t, "p.sock")
+	if !isSocket("p.sock") || lp.Addr().String() != "p.sock" {
+		t.Fatalf("Listen: address %q", lp.Addr())
+	}
+	cg, err := ListenUnixgram("pg.sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cg.Close()
+	if !isSocket("pg.sock") {
+		t.Fatal("ListenUnixgram: no socket file in the cwd")
+	}
+	lx, bx, err := ListenEx("x.sock", Options{})
+	if re := routeErr(t, err); !errors.Is(err, errNotRecorded) || lx != nil || bx != nil || re.Route != string(routeStandard) {
+		t.Fatalf("ListenEx: %v, %v, route %q: %v", lx, bx, re.Route, err)
+	}
+	gx, bg, err := ListenUnixgramEx("xg.sock", Options{})
+	if re := routeErr(t, err); !errors.Is(err, errNotRecorded) || gx != nil || bg != nil || re.Route != string(routeStandard) {
+		t.Fatalf("ListenUnixgramEx: %v, %v, route %q: %v", gx, bg, re.Route, err)
+	}
+	for _, n := range []string{"x.sock", "xg.sock"} {
+		if !isSocket(n) {
+			t.Fatalf("%s: the socket file bound was not left", n)
+		}
+	}
+}
+
+// A short relative path whose directory is missing is ENOENT, found when its
+// real-path candidate looks the directory up and then by the routes' lookup
+// of the socket's directory, before any route: no route, nothing skipped,
+// nothing made (SPEC "エラー"); for a bind and both resolves.
+func TestARelativePathWhoseDirectoryIsMissingIsENOENT(t *testing.T) {
+	t.Parallel()
+	if !inTmpCwd(t) {
+		return
+	}
+	w, ps := testWorld(t, nil)
+	const p = "none/s.sock"
+	tr := &trace{}
+	_, b, err := w.bind(opListen, p, Options{}, tr, eOwn)
+	wantOpError(t, "bind", opListen, p, err, syscall.ENOENT)
+	if b.route != "" || len(tr.skipped) != 0 {
+		t.Fatalf("bind: %+v, skipped %v, want no route and nothing skipped", b, tr.skipped)
+	}
+	_, err = w.resolveForBind(p, Options{})
+	if re := wantResolveError(t, "resolve for bind", p, err, syscall.ENOENT); len(re.Skipped) != 0 {
+		t.Fatalf("resolve for bind: skipped %v", re.Skipped)
+	}
+	_, err = w.resolveForConnect(p, Options{})
+	if re := wantResolveError(t, "resolve for connect", p, err, syscall.ENOENT); len(re.Skipped) != 0 {
+		t.Fatalf("resolve for connect: skipped %v", re.Skipped)
+	}
+	assertPlacesEmpty(t, w, ps)
+}
+
+// Options.Base and the absolute candidates (SPEC "相対パスを絶対パスにする"):
+// a candidate handed to the standard library uses no B, so Options.Base is
+// not looked at (beyond its form), as for a short absolute path; here one
+// whose parent is missing does not stop a short relative path nor a long
+// absolute one whose real path fits, both Original through standard. A
+// relative path that takes the routes (a deep cwd) has Options.Base checked
+// as a long path has, and its error is returned (ENOENT, no route, nothing
+// skipped) rather than taken for routes unusable, which would bind the
+// relative path as it is. In a child whose cwd is a fresh directory.
+func TestOptionsBaseIsNotLookedAtForAnAbsoluteCandidate(t *testing.T) {
+	t.Parallel()
+	if !inTmpCwd(t) {
+		return
+	}
+	bad := Options{Base: tmpDir(t) + "/missing/b"}
+	w, ps := testWorld(t, nil)
+	r := tmpDir(t)
+	l := longDir(t)
+	symlink(t, r, l+"/l")
+	for _, p := range []string{"s.sock", l + "/l/a.sock"} {
+		tr := &trace{}
+		ep, b, err := w.bind(opListen, p, bad, tr, eOwn)
+		if err != nil {
+			t.Fatalf("%d bytes: %v", len(p), err)
+		}
+		ep.Close()
+		if b.route != routeStandard || b.spelling != (Spelling{Kind: Original}) {
+			t.Fatalf("%d bytes: %+v, want Original through standard", len(p), b)
+		}
+		f := resolveBindIn(t, w, strings.TrimSuffix(p, ".sock")+"-r.sock", bad)
+		if f.Spelling != (Spelling{Kind: Original}) {
+			t.Fatalf("resolve %d bytes: %+v, want Original", len(p), f)
+		}
+	}
+	assertPlacesEmpty(t, w, ps)
+
+	deep := longDir(t)
+	if err := os.Chdir(deep); err != nil {
+		t.Fatal(err)
+	}
+	tr := &trace{}
+	_, b, err := w.bind(opListen, "s.sock", bad, tr, eOwn)
+	wantOpError(t, "a deep cwd", opListen, "s.sock", err, syscall.ENOENT)
+	if b.route != "" || len(tr.skipped) != 0 || exists(deep+"/s.sock") {
+		t.Fatalf("a deep cwd: %+v, skipped %v, want the Options.Base error before any route", b, tr.skipped)
+	}
+	_, err = w.resolveForBind("s.sock", bad)
+	wantResolveError(t, "resolve in a deep cwd", "s.sock", err, syscall.ENOENT)
 }
 
 // A bind of an absolute candidate that fails (here EADDRINUSE: a file is at

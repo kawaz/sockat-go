@@ -43,8 +43,13 @@ type bound struct {
 	// at): the name in the real directory its E points to (bindCall.made),
 	// which ListenEx records rather than looking the path up again (SPEC
 	// "remove"). "" for standard and link-file, whose file ListenEx looks up
-	// after the bind.
+	// after the bind, at lookup.
 	file string
+	// lookup is where the file of standard and link-file is looked up after
+	// the bind: the spelling handed to the standard library (the path, or its
+	// absolute candidate), and the socket file link-file's E points to (the
+	// path made absolute against the cwd).
+	lookup string
 }
 
 // bindCall is one bind, or one resolve, of a long path.
@@ -64,11 +69,13 @@ type bindCall struct {
 	noD map[*base]bool
 }
 
-// newBindCall looks up the socket's directory of path, longer than
-// directMax, first (stat, then its real path), so a missing one is ENOENT
-// and one that is not a directory ENOTDIR, before anything else is decided
-// or made; then Options.Base is checked (with UsableCrossUID as opts has
-// it), making nothing.
+// newBindCall looks up the socket's directory of path, one that takes the
+// routes (a longer absolute path, or a relative one no absolute candidate
+// fits), first (stat, then its real path), so a missing one is ENOENT and one
+// that is not a directory ENOTDIR, before anything else is decided or made.
+// A relative path whose directory has no real path within PATH_MAX
+// (pastPathMax: a cwd too deep) is no error: no route can be used for it
+// (SPEC "相対パスを絶対パスにする").
 func (w *world) newBindCall(path string, opts Options) (*bindCall, error) {
 	dir, name, err := splitPath(path)
 	if err != nil {
@@ -83,15 +90,36 @@ func (w *world) newBindCall(path string, opts Options) (*bindCall, error) {
 	}
 	real, err := realDir(dir)
 	if err != nil {
-		return nil, err
-	}
-	if opts.Base != "" {
-		if err := w.checkGiven(opts.Base, opts.UsableCrossUID); err != nil {
-			return nil, err
+		if !isAbs(path) && pastPathMax(err) {
+			return nil, unusable("no real path within PATH_MAX")
 		}
+		return nil, err
 	}
 	return &bindCall{w: w, path: path, name: name, real: real,
 		dirID: fileID{uint64(st.Dev), uint64(st.Ino)}, opts: opts}, nil
+}
+
+// realCandidate is the real-path candidate of a long absolute path (SPEC
+// "相対パスを絶対パスにする"): the socket's directory's real path, looked up
+// by newBindCall, and the file name, when it fits directMax; "" otherwise,
+// and for a relative path (relCandidate saw its candidates before).
+func (c *bindCall) realCandidate() string {
+	if !isAbs(c.path) {
+		return ""
+	}
+	if s := joinUnder(c.real, c.name); len(s) <= directMax {
+		return s
+	}
+	return ""
+}
+
+// checkBase checks Options.Base (with UsableCrossUID as the call's Options
+// have it) before any route is tried, making nothing.
+func (c *bindCall) checkBase() error {
+	if c.opts.Base == "" {
+		return nil
+	}
+	return c.w.checkGiven(c.opts.Base, c.opts.UsableCrossUID)
 }
 
 // ownD is b's D for a route of this call: errUnusable when it could not be
@@ -134,16 +162,30 @@ func (w *world) bindOrder() []bindStep {
 	return steps
 }
 
-// bindLong binds (and listens, for opListen) at path, longer than
-// directMax, by the first route of the bind order that can be used
-// (newBindCall first). ENAMETOOLONG when no route can be used.
+// bindLong binds (and listens, for opListen) at path, a longer absolute path
+// or a relative one no absolute candidate fits, by the first route of the
+// bind order that can be used: newBindCall first, then, for an absolute
+// path, its real-path candidate (bound through the standard library when it
+// fits), then Options.Base's check. An unusable error when no route can be
+// used, which bind turns into ENAMETOOLONG or, for a relative path, its bind
+// as it is.
 func (w *world) bindLong(o op, path string, opts Options, tr *trace, e eUse) (endpoint, bound, error) {
 	c, err := w.newBindCall(path, opts)
 	if err != nil {
 		return nil, bound{}, err
 	}
+	if s := c.realCandidate(); s != "" {
+		return bindCandidate(o, path, s)
+	}
+	if err := c.checkBase(); err != nil {
+		return nil, bound{}, err
+	}
 	c.o, c.e = o, e
-	tr.add(routeStandard, "path too long")
+	if isAbs(path) {
+		tr.add(routeStandard, "path too long")
+	} else {
+		tr.add(routeStandard, "no absolute path fits")
+	}
 	for _, s := range w.bindOrder() {
 		ep, b, err := s.try(c)
 		if errors.Is(err, errUnusable) {
@@ -152,7 +194,7 @@ func (w *world) bindLong(o op, path string, opts Options, tr *trace, e eUse) (en
 		}
 		return ep, b, err
 	}
-	return nil, bound{}, errNameTooLong(o)
+	return nil, bound{}, unusable("no route")
 }
 
 // base is the B for a route of this call: Options.Base's when given (its
@@ -313,8 +355,10 @@ func (c *bindCall) linkFile() (endpoint, bound, error) {
 		if unix.Lstat(target, &st) != nil {
 			return nil, bound{}, unusable("bind did not follow the symlink")
 		}
+		return ep, bd, err
 	}
-	return ep, bd, err
+	bd.lookup = target
+	return ep, bd, nil
 }
 
 // bindThrough binds by ln's spelling for the route r and returns what the
@@ -402,11 +446,13 @@ func (w *world) listenEx(path string, opts Options) (*net.UnixListener, *Bound, 
 // (bindEx), reported, with the socket file recorded for Bound.File.
 func (w *world) bindReported(o op, path string, opts Options) (endpoint, *Bound, error) {
 	tr := &trace{}
-	// A relative path is resolved against the cwd more than once (by the
-	// route's lookup of the socket's directory, by the bind, by realFile
-	// after it), and the cwd is the process's: another goroutine may change
-	// it in between. It is read before anything looks the path up and
-	// compared after both the bind and the record (SPEC "remove").
+	// A relative path bound as it is (CwdRelative: no absolute spelling could
+	// be used) is resolved against the cwd more than once (by the bind, by
+	// realFile after it), and the cwd is the process's: another goroutine may
+	// change it in between. It is read before anything looks the path up and,
+	// for CwdRelative, compared after both the bind and the record (SPEC
+	// "remove"). A relative path bound through an absolute spelling is
+	// recorded through that spelling, which does not depend on the cwd.
 	rel := !abstractName(path) && !isAbs(path)
 	var cwd fileID
 	cwdOK := true
@@ -427,16 +473,18 @@ func (w *world) bindReported(o op, path string, opts Options) (endpoint, *Bound,
 		// the real directory the route was built with), so a symlink on the
 		// way changed after the route was built does not have it name another
 		// file than the one bound (another socket there, which Remove would
-		// remove). Standard and link-file bind through the path itself: their
-		// file is the path's real path looked up after the bind, not before,
-		// for the same reason with a symlink changed before the bind.
+		// remove). Standard and link-file bind through the path itself (or its
+		// absolute candidate): their file is the real path of b.lookup looked
+		// up after the bind, not before, for the same reason with a symlink
+		// changed before the bind.
 		file := b.file
 		var err error
 		if file == "" {
-			file, err = realFile(path)
+			file, err = realFile(b.lookup)
 		}
+		cwdRel := b.spelling.Kind == CwdRelative
 		var id fileID
-		ok := err == nil && cwdOK
+		ok := err == nil && (cwdOK || !cwdRel)
 		if ok {
 			// Where bind(2) follows a symlink in the last component, the
 			// socket is where it leads, and the symlink is the caller's: what
@@ -445,7 +493,7 @@ func (w *world) bindReported(o op, path string, opts Options) (endpoint, *Bound,
 			file, id, err = socketAt(file)
 			ok = err == nil
 		}
-		if ok && rel {
+		if ok && cwdRel {
 			// Another cwd means the bind may have resolved path elsewhere
 			// than file, which would then name an unrelated file of the same
 			// name. (A cwd changed and changed back is not seen.)

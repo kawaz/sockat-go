@@ -229,58 +229,51 @@ func TestChildRemoveAfterAChdir(t *testing.T) {
 	}
 }
 
-// A relative path is resolved against the cwd twice, once for the real path
-// ListenEx records and once by the bind, and another goroutine may change the
-// cwd in between. Then the bind lands below the new cwd while the record would
-// name the same name below the old one: an unrelated file there, which remove
-// would remove. So when the cwd differs after the bind, ListenEx treats the
-// file as not recorded (SPEC bind_ex): it returns a *RouteError reaching
-// errNotRecorded and no listener or Bound, leaves the file of the same name
-// in the old cwd as it was, and does not remove the socket file it bound in
-// the new cwd either (a file not recorded is left). Without a change of the
-// cwd, the same relative path listens and remove removes its socket as
-// before. Both a short path (the net package) and a long one (link-dir) are
-// checked, in a child process each, since the cwd belongs to the whole
-// process.
-func TestListenExWhoseCwdChangesBeforeTheBindRecordsNothing(t *testing.T) {
+// A relative path bound as it is (CwdRelative: here no absolute spelling
+// fits and no route can be used, noRouteWorld) is resolved against the cwd
+// twice, once by the bind and once for the real path ListenEx records, and
+// another goroutine may change the cwd in between. Then the bind lands below
+// the new cwd while the record would name the same name below the old one: an
+// unrelated file there, which remove would remove. So when the cwd differs
+// after the bind, ListenEx treats the file as not recorded (SPEC "remove"):
+// it returns a *RouteError reaching errNotRecorded and no listener or Bound,
+// leaves the file of the same name in the old cwd as it was, and does not
+// remove the socket file it bound in the new cwd either (a file not recorded
+// is left). Without a change of the cwd, the same relative path listens,
+// CwdRelative, and remove removes its socket. In a child process each, since
+// the cwd belongs to the whole process.
+func TestListenExOfACwdRelativeBindWhoseCwdChangesBeforeTheBindRecordsNothing(t *testing.T) {
 	t.Parallel()
-	long := strings.Repeat(strings.Repeat("d", 60)+"/", 3) + "s.sock"
-	if len(long) <= directMax {
-		t.Fatalf("%d bytes is not long", len(long))
-	}
-	rels := []string{"s.sock", long}
-	for _, rel := range rels {
-		d := tmpDir(t)
-		for _, cwd := range []string{"a", "b"} {
-			if err := os.MkdirAll(filepath.Dir(filepath.Join(d, cwd, rel)), 0o700); err != nil {
-				t.Fatal(err)
-			}
-		}
-		old, moved := filepath.Join(d, "a", rel), filepath.Join(d, "b", rel)
-
-		// Unchanged cwd: listens, and remove (in the child) removes it.
-		runChild(t, "TestChildListenExWithACwdChange", d+"/a", "SOCKAT_REL="+rel, "SOCKAT_CHDIR=")
-		if exists(old) {
-			t.Fatalf("%d bytes: the socket file is still there after remove", len(rel))
-		}
-
-		// Changed cwd: not recorded; neither file is touched.
-		if err := os.WriteFile(old, []byte("old"), 0o600); err != nil {
+	d := tmpDir(t)
+	for _, cwd := range []string{"a", "b"} {
+		if err := os.Mkdir(filepath.Join(d, cwd), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		runChild(t, "TestChildListenExWithACwdChange", d+"/a", "SOCKAT_REL="+rel, "SOCKAT_CHDIR="+d+"/b")
-		if b, err := os.ReadFile(old); err != nil || string(b) != "old" {
-			t.Fatalf("%d bytes: the file in the old cwd: %q, %v", len(rel), b, err)
-		}
-		if !isSocket(moved) {
-			t.Fatalf("%d bytes: the socket file bound in the new cwd is not there", len(rel))
-		}
+	}
+	old, moved := filepath.Join(d, "a", noRouteName), filepath.Join(d, "b", noRouteName)
+
+	// Unchanged cwd: listens, and remove (in the child) removes it.
+	runChild(t, "TestChildListenExWithACwdChange", d+"/a", "SOCKAT_CHDIR=")
+	if exists(old) {
+		t.Fatal("the socket file is still there after remove")
+	}
+
+	// Changed cwd: not recorded; neither file is touched.
+	if err := os.WriteFile(old, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runChild(t, "TestChildListenExWithACwdChange", d+"/a", "SOCKAT_CHDIR="+d+"/b")
+	if b, err := os.ReadFile(old); err != nil || string(b) != "old" {
+		t.Fatalf("the file in the old cwd: %q, %v", b, err)
+	}
+	if !isSocket(moved) {
+		t.Fatal("the socket file bound in the new cwd is not there")
 	}
 }
 
 func TestChildListenExWithACwdChange(t *testing.T) {
 	asChild(t)
-	rel, to := os.Getenv("SOCKAT_REL"), os.Getenv("SOCKAT_CHDIR")
+	to := os.Getenv("SOCKAT_CHDIR")
 	bindEx = func(w *world, o op, path string, opts Options, tr *trace, e eUse) (endpoint, bound, error) {
 		if to != "" {
 			if err := os.Chdir(to); err != nil {
@@ -290,10 +283,13 @@ func TestChildListenExWithACwdChange(t *testing.T) {
 		return w.bind(o, path, opts, tr, e)
 	}
 	t.Cleanup(func() { bindEx = (*world).bind })
-	l, b, err := ListenEx(rel, Options{})
+	l, b, err := noRouteWorld(t).listenEx(noRouteName, Options{})
 	if to == "" {
 		if err != nil {
 			t.Fatal(err)
+		}
+		if b.Spelling.Kind != CwdRelative {
+			t.Fatalf("%+v, want CwdRelative", b)
 		}
 		l.Close()
 		if err := b.File.Remove(); err != nil {
@@ -305,6 +301,63 @@ func TestChildListenExWithACwdChange(t *testing.T) {
 	if !errors.Is(err, errNotRecorded) || l != nil || b != nil || re.Route == "" {
 		t.Fatalf("%v, %v, route %q: %v", l, b, re.Route, err)
 	}
+}
+
+// A relative path bound through an absolute spelling (its absolute
+// candidate, through the standard library, or a route's spelling through B)
+// is recorded through that spelling, which does not depend on the cwd (SPEC
+// "remove": the cwd is compared only for CwdRelative). So a cwd changed by
+// another goroutine right after the bind, to a directory holding an unrelated
+// socket of the same name, neither fails ListenEx (as a cwd compared would
+// make it) nor has it record that other socket (as a lookup of the relative
+// path after the bind would): Remove removes the socket bound, in the old
+// cwd, and leaves the other one. Both a short path (Original, standard) and a
+// long one (Linked, link-dir) are checked, in a child process each.
+func TestListenExOfARelativePathRecordsWhereItBoundWhateverTheCwdAfter(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat(strings.Repeat("d", 60)+"/", 3) + "s.sock"
+	for _, rel := range []string{"s.sock", long} {
+		d := tmpDir(t)
+		for _, cwd := range []string{"a", "b"} {
+			if err := os.MkdirAll(filepath.Dir(filepath.Join(d, cwd, rel)), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		other := filepath.Join(d, "b", rel)
+		listenAt(t, other)
+		runChild(t, "TestChildListenExWithACwdChangeAfterTheBind", d+"/a", "SOCKAT_REL="+rel, "SOCKAT_CHDIR="+d+"/b")
+		if exists(filepath.Join(d, "a", rel)) {
+			t.Fatalf("%d bytes: the socket file bound is still there after remove", len(rel))
+		}
+		if !isSocket(other) {
+			t.Fatalf("%d bytes: the unrelated socket in the new cwd is gone", len(rel))
+		}
+	}
+}
+
+func TestChildListenExWithACwdChangeAfterTheBind(t *testing.T) {
+	asChild(t)
+	rel, to := os.Getenv("SOCKAT_REL"), os.Getenv("SOCKAT_CHDIR")
+	bindEx = func(w *world, o op, path string, opts Options, tr *trace, e eUse) (endpoint, bound, error) {
+		ep, b, err := w.bind(o, path, opts, tr, e)
+		if err := os.Chdir(to); err != nil {
+			t.Fatal(err)
+		}
+		return ep, b, err
+	}
+	t.Cleanup(func() { bindEx = (*world).bind })
+	w, _ := testWorld(t, nil)
+	l, b, err := w.listenEx(rel, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k := b.Spelling.Kind; k != Original && k != Linked {
+		t.Fatalf("%d bytes: %+v, want an absolute spelling", len(rel), b)
+	}
+	if err := b.File.Remove(); err != nil {
+		t.Fatal(err)
+	}
+	l.Close()
 }
 
 // ListenEx records the socket file (its real path and (st_dev, st_ino)) the

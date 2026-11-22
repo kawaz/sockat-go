@@ -11,9 +11,10 @@ import (
 // ResolveForBind: hand Path to the net package (net.ListenUnix,
 // net.ListenUnixgram, ...) in place of the path.
 type ForBind struct {
-	// Path is the spelling to bind: the path itself where the net package
-	// takes it, otherwise a shorter spelling through B, D and E naming the
-	// same place for as long as Spelling says.
+	// Path is the spelling to bind: an absolute path naming the same place
+	// where the net package takes it (the path itself, when absolute),
+	// otherwise a shorter spelling through B, D and E naming the same place
+	// for as long as Spelling says.
 	Path string
 	// Spelling is what Path is good for afterwards (it is the spelling the
 	// kernel keeps for the socket bound by it). Branch on it.
@@ -34,10 +35,18 @@ type ForBind struct {
 // (*net.UnixConn).WriteToUnix, ...) in place of the path, as many times as
 // you like, and call Cleanup once done.
 type ForConnect struct {
-	// Path is the spelling to connect to: the path itself where the net
-	// package takes it, otherwise a shorter spelling through B, D and E
-	// naming the same socket file until Cleanup.
+	// Path is the spelling to connect to: an absolute path naming the same
+	// socket file where the net package takes it (the path itself, when
+	// absolute), otherwise a shorter spelling through B, D and E naming the
+	// same socket file for as long as Spelling says.
 	Path string
+	// Spelling is what Path is good for afterwards, for as long as you keep
+	// it: Original (an absolute path), CwdRelative (the path itself,
+	// relative: no absolute spelling could be used, and it names another
+	// socket once the cwd changes) or Linked (through B, D and E: Removable
+	// is false, as Path names E, a symlink to the socket file; Until says how
+	// long it can be followed).
+	Spelling Spelling
 	// Route and Skipped are as Report's: for diagnostics, not a promise.
 	Route   string
 	Skipped []Skip
@@ -46,10 +55,14 @@ type ForConnect struct {
 }
 
 // ResolveForBind spells path so that the net package can bind it: path
-// itself where the net package takes it (Spelling Original, or CwdRelative
-// for a relative path), otherwise a spelling through a directory of this
+// itself where the net package takes it, and for a relative path, or a
+// longer one, an absolute path naming the same place that the net package
+// takes (its directory's real path, or $PWD's spelling of it, with the file
+// name; Spelling Original); otherwise a spelling through a directory of this
 // user's processes (B, see Listen) that names the same place for as long as
-// its Spelling says (Linked). Nothing is bound.
+// its Spelling says (Linked). Nothing is bound. The spelling of a relative
+// path does not depend on the cwd, as Listen binds it, except where nothing
+// else can be used: then it is the relative path itself (CwdRelative).
 //
 // Bind Path yourself, then call SocketFile for a SocketFile that removes the
 // socket file; call Cleanup (or the SocketFile's Remove or Cleanup) once the
@@ -66,12 +79,18 @@ func ResolveForBind(path string, opts Options) (*ForBind, error) {
 	return defaultWorld.resolveForBind(path, opts)
 }
 
-// ResolveForConnect spells path so that the net package can connect to it:
-// path itself where the net package takes it, otherwise a spelling through a
-// directory of this user's processes (B, see Listen) and a symlink to the
-// socket file, which names it until Cleanup. Nothing is connected, and
-// nothing about the socket file is looked at: the spelling names whatever is
-// at path when it is used.
+// ResolveForConnect spells path so that the net package can connect to it,
+// as ResolveForBind does (Spelling tells what the spelling is good for): path
+// itself where the net package takes it, and for a relative path, or a
+// longer one, an absolute path naming the same socket file that the net
+// package takes (Original); otherwise a spelling through a directory of this
+// user's processes (B, see Listen) and a symlink to the socket file, which
+// names it until Cleanup (Linked), or, where nothing else can be used, the
+// relative path itself (CwdRelative). Nothing is connected, and nothing
+// about the socket file is looked at: the spelling names whatever is at path
+// when it is used. Unlike Dial, which connects through a relative path as it
+// is, it spells a relative path absolute: the spelling may be used after the
+// cwd changed.
 //
 // Options.Base is as DialEx takes it; UsableCrossUID is not looked at (the
 // spelling of a connect stays with no peer). The error is a *RouteError
@@ -172,32 +191,31 @@ func (w *world) resolveForBind(path string, opts Options) (*ForBind, error) {
 
 // resolveBind spells path for a bind (resolveForBind), checking it as
 // listen does: an Options.Base of the wrong form, a NUL other than an
-// abstract name's leading one, are EINVAL whatever the length; a path the
-// standard library accepts, and an abstract name, are spelt as they are; a
-// longer one takes the spellings of the bind order (link-dir, then link-file
-// where bind(2) is measured to follow a symlink: whether it follows cannot be
-// told before the bind).
+// abstract name's leading one, are EINVAL whatever the length; an absolute
+// path the standard library accepts, and an abstract name, are spelt as they
+// are, a relative path by its first absolute candidate that fits (resolveStd);
+// otherwise, after a long absolute path's real-path candidate, the spellings
+// of the bind order (link-dir, then link-file where bind(2) is measured to
+// follow a symlink: whether it follows cannot be told before the bind).
+// A relative path for which none can be used is spelt as it is when it fits
+// (CwdRelative), as bind binds it.
 func (w *world) resolveBind(path string, opts Options, tr *trace) (*ForBind, error) {
 	f := &ForBind{path: path, clean: &cleaner{}}
-	s, short, err := shortSpelling(path, opts)
+	if !abstractName(path) && !isAbs(path) {
+		// The cwd for a CwdRelative spelling's SocketFile to compare with,
+		// read before anything looks the path up. A cwd that cannot be
+		// looked up leaves the zero fileID, which no cwd SocketFile looks up
+		// later has.
+		f.cwd, _ = statID(".")
+	}
+	c, s, kind, err := w.resolveCall(path, opts, tr)
 	if err != nil {
 		return nil, err
 	}
-	if short {
-		f.Path, f.Route, f.Spelling = s, string(routeStandard), Spelling{Kind: Original}
-		if !abstractName(path) && !isAbs(path) {
-			// A cwd that cannot be looked up now leaves the zero fileID,
-			// which no cwd SocketFile looks up later has.
-			f.Spelling.Kind = CwdRelative
-			f.cwd, _ = statID(".")
-		}
+	if c == nil {
+		f.Path, f.Route, f.Spelling = s, string(routeStandard), Spelling{Kind: kind}
 		return f, nil
 	}
-	c, err := w.newBindCall(path, opts)
-	if err != nil {
-		return nil, err
-	}
-	tr.add(routeStandard, "path too long")
 	ln, err := c.linkDirSpelling()
 	r := routeLinkDir
 	if errors.Is(err, errUnusable) && w.cfg.bindFollows == followsYes {
@@ -211,7 +229,12 @@ func (w *world) resolveBind(path string, opts Options, tr *trace) (*ForBind, err
 	}
 	if errors.Is(err, errUnusable) {
 		tr.add(r, reasonOf(err))
-		return nil, syscall.ENAMETOOLONG
+		s, err := asIsOrTooLong(path, tr)
+		if err != nil {
+			return nil, err
+		}
+		f.Path, f.Route, f.Spelling = s, string(routeStandard), Spelling{Kind: CwdRelative}
+		return f, nil
 	}
 	if err != nil {
 		return nil, err
@@ -231,65 +254,123 @@ func (w *world) resolveForConnect(path string, opts Options) (*ForConnect, error
 	return f, nil
 }
 
-// resolveConnect spells path for a connect (resolveForConnect), checked as
-// resolveBind checks it: a longer path takes link-file only, through the
-// process's D, B spelt by procB (where /proc can be used) or its real path.
+// resolveConnect spells path for a connect (resolveForConnect), checked and
+// made absolute as resolveBind does it: a path that takes the routes takes
+// link-file only, through the process's D, B spelt by procB (where /proc can
+// be used) or its real path.
 func (w *world) resolveConnect(path string, opts Options, tr *trace) (*ForConnect, error) {
 	f := &ForConnect{clean: &cleaner{}}
-	s, short, err := shortSpelling(path, opts)
+	c, s, kind, err := w.resolveCall(path, opts, tr)
 	if err != nil {
 		return nil, err
 	}
-	if short {
-		f.Path, f.Route = s, string(routeStandard)
+	if c == nil {
+		f.Path, f.Route, f.Spelling = s, string(routeStandard), Spelling{Kind: kind}
 		return f, nil
 	}
-	c, err := w.newBindCall(path, opts)
-	if err != nil {
-		return nil, err
+	var ln linked
+	if target, ok := absTarget(path); ok {
+		ln, err = c.linkFileSpelling(target, hasProc)
+	} else {
+		err = unusable("cwd unreadable")
 	}
-	tr.add(routeStandard, "path too long")
-	target, ok := absTarget(path)
-	if !ok {
-		tr.add(routeLinkFile, "cwd unreadable")
-		return nil, syscall.ENAMETOOLONG
-	}
-	ln, err := c.linkFileSpelling(target, hasProc)
 	if errors.Is(err, errUnusable) {
 		tr.add(routeLinkFile, reasonOf(err))
-		return nil, syscall.ENAMETOOLONG
+		s, err := asIsOrTooLong(path, tr)
+		if err != nil {
+			return nil, err
+		}
+		f.Path, f.Route, f.Spelling = s, string(routeStandard), Spelling{Kind: CwdRelative}
+		return f, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	f.Path, f.Route, f.clean.e = ln.spelling, string(routeLinkFile), ln.e
+	f.Path, f.Route, f.Spelling, f.clean.e = ln.spelling, string(routeLinkFile), ln.sp, ln.e
 	return f, nil
 }
 
-// shortSpelling is what a resolve does before the routes, as listen and dial
-// do: EINVAL for an Options.Base of the wrong form, an empty path or a NUL
-// (an abstract name's leading one aside), whatever the length; the spelling, with short
-// true, of an abstract name or a path the standard library accepts
-// (stdSpelling).
-func shortSpelling(path string, opts Options) (string, bool, error) {
+// resolveStd is what a resolve does before the routes, as bind does: EINVAL
+// for an Options.Base of the wrong form, an empty path or a NUL (an abstract
+// name's leading one aside), whatever the length; the spelling and its kind
+// (Original) of an abstract name, an absolute path the standard library
+// accepts, and the first absolute candidate of a relative path that fits
+// (relCandidate); a short relative path not ending with a file name as it is
+// (stdSpelling, CwdRelative), having no candidate. Kind 0 for a path that
+// takes the routes.
+func resolveStd(path string, opts Options) (string, SpellingKind, error) {
 	if opts.Base != "" {
 		if err := givenShape(opts.Base); err != nil {
-			return "", false, err
+			return "", 0, err
 		}
 	}
 	if path == "" {
-		return "", false, errEmptyPath
+		return "", 0, errEmptyPath
 	}
 	if abstractName(path) {
-		return path, true, nil
+		return path, Original, nil
 	}
 	if strings.IndexByte(path, 0) >= 0 {
-		return "", false, errNULInPath
+		return "", 0, errNULInPath
 	}
-	if s := stdSpelling(path); len(s) <= directMax {
-		return s, true, nil
+	if isAbs(path) {
+		if len(path) <= directMax {
+			return path, Original, nil
+		}
+		return "", 0, nil
 	}
-	return "", false, nil
+	if dir, name, err := splitPath(path); err != nil {
+		if fitsAsIs(path) {
+			return stdSpelling(path), CwdRelative, nil
+		}
+	} else if s := relCandidate(dir, name); s != "" {
+		return s, Original, nil
+	}
+	return "", 0, nil
+}
+
+// resolveCall is a resolve of path up to its routes: what resolveStd spells,
+// or else the call of the routes (newBindCall), with a long absolute path's
+// real-path candidate spelt when it fits, and Options.Base checked
+// otherwise. With no call, the spelling and its kind are returned: a relative
+// path for which no route can be used (its directory has no real path within
+// PATH_MAX) is spelt as it is (asIsOrTooLong).
+func (w *world) resolveCall(path string, opts Options, tr *trace) (*bindCall, string, SpellingKind, error) {
+	if s, kind, err := resolveStd(path, opts); err != nil || kind != 0 {
+		return nil, s, kind, err
+	}
+	c, err := w.newBindCall(path, opts)
+	if errors.Is(err, errUnusable) {
+		s, err := asIsOrTooLong(path, tr)
+		return nil, s, CwdRelative, err
+	}
+	if err != nil {
+		return nil, "", 0, err
+	}
+	if s := c.realCandidate(); s != "" {
+		return nil, s, Original, nil
+	}
+	if err := c.checkBase(); err != nil {
+		return nil, "", 0, err
+	}
+	if isAbs(path) {
+		tr.add(routeStandard, "path too long")
+	} else {
+		tr.add(routeStandard, "no absolute path fits")
+	}
+	return c, "", 0, nil
+}
+
+// asIsOrTooLong is the spelling of a resolve of path whose routes are all
+// unusable: a relative path as it is (stdSpelling, with standard, the route
+// taken, out of tr) when it fits (SPEC "相対パスを絶対パスにする" 5),
+// otherwise ENAMETOOLONG.
+func asIsOrTooLong(path string, tr *trace) (string, error) {
+	if !isAbs(path) && fitsAsIs(path) {
+		tr.dropStandard()
+		return stdSpelling(path), nil
+	}
+	return "", syscall.ENAMETOOLONG
 }
 
 // resolveError is the error of a resolve of path: an *os.PathError of Op

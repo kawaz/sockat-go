@@ -5,8 +5,11 @@ import "net"
 // ListenUnixgram creates a datagram socket bound to path, like
 // net.ListenUnixgram("unixgram", ...) but for a path of any length.
 //
-// A path that the net package accepts goes to net.ListenUnixgram unchanged.
-// A longer path is bound by the routes Listen takes, and the spelling the
+// An absolute path that the net package accepts goes to
+// net.ListenUnixgram unchanged. A relative path is bound through an absolute
+// path naming the same place, as Listen binds it, so that a reply to the
+// sender's address arrives whatever the cwd of the replier. A longer path is
+// bound by the routes Listen takes, and the spelling the
 // kernel keeps for it (the socket's LocalAddr(), and the address the peers
 // see as the sender) is the one Listen's would be: a reply sent to it
 // arrives for as long as the spelling can be followed (ListenUnixgramEx

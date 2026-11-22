@@ -2,10 +2,11 @@ package sockat
 
 import "strconv"
 
-// Spelling is what the spelling of a bind is good for afterwards: the
-// spelling the kernel keeps for the socket (the listener's Addr(), and the
-// peer's RemoteAddr()), which code may later unlink or look up (SPEC
-// "Spelling properties"). Branch on it rather than on the diagnostics.
+// Spelling is what the spelling of a bind or a resolve is good for
+// afterwards: the spelling the kernel keeps for the socket (the listener's
+// Addr(), and the peer's RemoteAddr()), which code may later unlink or look
+// up, and the spelling a resolve hands you to keep (SPEC "綴りの性質
+// Spelling"). Branch on it rather than on the diagnostics.
 //
 // It compares with ==. The fields other than Kind mean something only for
 // Kind == Linked, and are false or zero otherwise.
@@ -29,11 +30,16 @@ type Spelling struct {
 type SpellingKind int
 
 const (
-	// Original: the path itself, absolute.
+	// Original: an absolute path naming the same place as the path: the
+	// path itself when absolute, or one made of its directory's real path
+	// (or $PWD's spelling of it) and the file name. It does not depend on the
+	// cwd.
 	Original SpellingKind = iota + 1
-	// CwdRelative: the path itself, relative: after a change of the cwd it
-	// names another place (the net package's own risk, reported all the
-	// same).
+	// CwdRelative: the path itself, relative, given only where no absolute
+	// spelling could be used (no absolute candidate fit and no route could
+	// be used, as with a cwd past PATH_MAX; or a short path not ending with a
+	// file name): after a change of the cwd it names another place (the net
+	// package's own risk, reported all the same).
 	CwdRelative
 	// Linked: through B, D and E, naming the same place as the path.
 	Linked

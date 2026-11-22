@@ -613,19 +613,25 @@ func TestALeadingNULIsEINVALWhereThereAreNoAbstractNames(t *testing.T) {
 
 // Where the kernel has no abstract socket names (all but Linux and Android),
 // a path that starts with '@' is a relative path like any other (SPEC "短いパス"):
-// a short one is bound through the standard library as the file "@..." in the
-// cwd, CwdRelative as every relative path taken as it is, and reached by a dial of the same path. On illumos the net package would
-// read the '@' as an abstract name, which that kernel lacks (ENOENT);
-// sockat-go hands it "./@..." there instead (DR-0002), so the kernel keeps
-// that spelling, which still names the same file. Close leaves the file on
-// every system: elsewhere the listener is the net package's own for "@...",
-// whose Close skips the removal of any address that starts with '@'; on
-// illumos sockat-go's listener for "./@..." does the same, so that Close does
-// not unlink a relative spelling after the cwd may have changed. Where "./" makes the spelling longer than the
-// standard library takes (a path of directMax bytes), the path goes through
-// the routes as a long one, and a dial still reaches the file; elsewhere such
-// a path is still the standard library's. Runs in a child whose cwd is a fresh
-// directory, since the paths are relative to it.
+// a bind makes it absolute (SPEC "相対パスを絶対パスにする"), so a short one is
+// bound through the standard library by its absolute candidate, Original,
+// which no standard library reads as an abstract name, and is reached by a
+// dial of the same path (a connect keeps it relative). Its listener's Close
+// removes the file, as for any absolute path. Only a relative path bound as it
+// is (no absolute spelling, no route: noRouteWorld) is still handed to the
+// standard library relative, CwdRelative: on illumos the net package would
+// read the '@' as an abstract name, which that kernel lacks (ENOENT), so
+// sockat-go hands it "./@..." there instead (DR-0002), and the kernel keeps
+// that spelling, which still names the same file; Close then leaves the
+// file on every system: elsewhere the listener is the net package's own for
+// "@...", whose Close skips the removal of any address that starts with '@';
+// on illumos sockat-go's listener for "./@..." does the same, so that Close
+// does not unlink a relative spelling after the cwd may have changed. A dial
+// of a path from '@' of directMax bytes, which "./" makes longer than the
+// standard library takes, goes through the routes as a long one on illumos
+// and still reaches the file; elsewhere such a path is still the standard
+// library's. Runs in a child whose cwd is a fresh directory, since the paths
+// are relative to it.
 func TestALeadingAtIsAPathWhereThereAreNoAbstractNames(t *testing.T) {
 	t.Parallel()
 	if abstractNames {
@@ -634,20 +640,24 @@ func TestALeadingAtIsAPathWhereThereAreNoAbstractNames(t *testing.T) {
 	if !inTmpCwd(t) {
 		return
 	}
+	real, err := realDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
 	const p = "@s.sock"
 	l, res, err := ListenEx(p, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer l.Close()
-	if res.Route != string(routeStandard) || res.Spelling != (Spelling{Kind: CwdRelative}) {
-		t.Fatalf("%q: %+v, want CwdRelative through standard", p, res)
+	if res.Route != string(routeStandard) || res.Spelling != (Spelling{Kind: Original}) {
+		t.Fatalf("%q: %+v, want Original through standard", p, res)
 	}
 	if !isSocket(p) {
 		t.Fatalf("%q did not name the file %q in the cwd", p, p)
 	}
-	if a := l.Addr().String(); !isSocket(a) {
-		t.Fatalf("the listener's address %q does not name the socket file", a)
+	if a := l.Addr().String(); a != real+"/"+p {
+		t.Fatalf("the listener's address %q, want the absolute candidate %q", a, real+"/"+p)
 	}
 	c, err := Dial(p)
 	if err != nil {
@@ -665,8 +675,28 @@ func TestALeadingAtIsAPathWhereThereAreNoAbstractNames(t *testing.T) {
 		t.Fatalf("%q did not name the file %q in the cwd", q, q)
 	}
 	lq.Close()
-	if _, err := os.Lstat(q); err != nil {
-		t.Fatalf("Close removed %q, which a path starting with '@' keeps: %v", q, err)
+	if exists(q) {
+		t.Fatalf("Close left %q, bound through its absolute candidate", q)
+	}
+
+	ar := "@" + noRouteName[1:]
+	w := noRouteWorld(t)
+	lr, br, err := w.listen(ar, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if br.route != routeStandard || br.spelling != (Spelling{Kind: CwdRelative}) {
+		t.Fatalf("%q: %+v, want CwdRelative through standard", ar, br)
+	}
+	if !isSocket(ar) {
+		t.Fatalf("%q did not name the file in the cwd", ar)
+	}
+	if a, want := lr.Addr().String(), stdSpelling(ar); a != want {
+		t.Fatalf("the listener's address %q, want %q", a, want)
+	}
+	lr.Close()
+	if !exists(ar) {
+		t.Fatalf("Close removed %q, bound relative and starting with '@'", ar)
 	}
 
 	wd, err := os.Getwd()

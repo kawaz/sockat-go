@@ -164,16 +164,26 @@ func (w *world) listen(path string, tr *trace) (*net.UnixListener, bound, error)
 // bind binds (and listens, for opListen) at path, recording the routes found
 // unusable in tr (nil records nothing), with link-dir's E had as e says.
 //
-// An empty path is EINVAL. A path the standard library accepts goes to it as is (stdSpelling), before
-// anything else is looked at (the environment and Options included), and
-// its listener removes the socket file on Close as the net package's does. So
-// does an abstract socket name (Linux, Android). A NUL anywhere else, a
-// leading one too where the kernel has no abstract names, is EINVAL, whatever
-// the length: the standard library would cut the path short there and bind
-// some other path; so is an Options.Base of the wrong form (relative, not
-// ending with a name, or with a NUL). A longer path takes the bind order (bindLong). The error
-// is a *net.OpError for path; the route that bound and failed, if any, is in
-// the bound returned.
+// An empty path is EINVAL. An absolute path the standard library accepts goes
+// to it as is, before anything else is looked at (the environment and Options
+// included), and its listener removes the socket file on Close as the net
+// package's does. So does an abstract socket name (Linux, Android). A NUL
+// anywhere else, a leading one too where the kernel has no abstract names, is
+// EINVAL, whatever the length: the standard library would cut the path short
+// there and bind some other path; so is an Options.Base of the wrong form
+// (relative, not ending with a name, or with a NUL).
+//
+// A relative path is bound through an absolute path naming the same place
+// (SPEC "相対パスを絶対パスにする"): its first absolute candidate that fits
+// (relCandidate) goes to the standard library, so the spelling the kernel
+// keeps, which the listener unlinks on Close, does not depend on the cwd.
+// Otherwise, as a longer absolute path does, it takes the bind order
+// (bindLong); only when no route can be used is it handed to the standard
+// library as it is, if that fits (bindAsIs, CwdRelative). A short relative
+// path not ending with a file name has no candidate and goes there at once.
+// The error is a *net.OpError for path; the route that bound and failed, if
+// any, is in the bound returned. A failure of the bind of a candidate, or of
+// a route, is returned: nothing else is tried after it.
 func (w *world) bind(o op, path string, opts Options, tr *trace, e eUse) (endpoint, bound, error) {
 	if opts.Base != "" {
 		if err := givenShape(opts.Base); err != nil {
@@ -193,28 +203,71 @@ func (w *world) bind(o op, path string, opts Options, tr *trace, e eUse) (endpoi
 	if strings.IndexByte(path, 0) >= 0 {
 		return nil, bound{}, opError(o, path, errNULInPath)
 	}
-	if s := stdSpelling(path); len(s) <= directMax {
-		ep, err := viaStd(o, s, s == path)
+	rel := !isAbs(path)
+	if !rel && len(path) <= directMax {
+		ep, err := viaStd(o, path, true)
 		if err != nil {
-			if s != path {
-				err = opError(o, path, unwrapOpError(err))
-			}
 			return nil, bound{route: routeStandard}, err
 		}
-		if l, ok := ep.(*net.UnixListener); ok && s != path {
-			l.SetUnlinkOnClose(false)
+		return ep, bound{route: routeStandard, spelling: Spelling{Kind: Original}, lookup: path}, nil
+	}
+	if rel {
+		if dir, name, err := splitPath(path); err != nil {
+			if fitsAsIs(path) {
+				return bindAsIs(o, path)
+			}
+		} else if s := relCandidate(dir, name); s != "" {
+			return bindCandidate(o, path, s)
 		}
-		kind := Original
-		if !isAbs(path) {
-			kind = CwdRelative
-		}
-		return ep, bound{route: routeStandard, spelling: Spelling{Kind: kind}}, nil
 	}
 	ep, b, err := w.bindLong(o, path, opts, tr, e)
+	if errors.Is(err, errUnusable) {
+		if rel && fitsAsIs(path) {
+			// The route is standard itself, which then is no route passed
+			// over (SPEC "相対パスを絶対パスにする" 5).
+			tr.dropStandard()
+			return bindAsIs(o, path)
+		}
+		err = errNameTooLong(o)
+	}
 	if err != nil {
 		return nil, b, opError(o, path, err)
 	}
 	return ep, b, nil
+}
+
+// bindCandidate binds through the standard library by s, an absolute
+// candidate of path (SPEC "相対パスを絶対パスにする"): Original, nothing made
+// in a place. The listener removes s on Close, as the net package's do: s is
+// absolute and names the socket file bound. The error, the bind's own, is
+// not one to try anything else after.
+func bindCandidate(o op, path, s string) (endpoint, bound, error) {
+	ep, err := viaStd(o, s, false)
+	if err != nil {
+		return nil, bound{route: routeStandard}, opError(o, path, err)
+	}
+	return ep, bound{route: routeStandard, spelling: Spelling{Kind: Original}, lookup: s}, nil
+}
+
+// bindAsIs binds the relative path through the standard library as it is
+// (stdSpelling): a short one not ending with a file name, whose error the
+// standard library gives, and one no absolute candidate fits and no route
+// reaches (SPEC "相対パスを絶対パスにする" 5). Its spelling is CwdRelative. A
+// listener whose spelling is not the path itself (illumos's "./@...") does
+// not remove it on Close (DR-0017).
+func bindAsIs(o op, path string) (endpoint, bound, error) {
+	s := stdSpelling(path)
+	ep, err := viaStd(o, s, s == path)
+	if err != nil {
+		if s != path {
+			err = opError(o, path, unwrapOpError(err))
+		}
+		return nil, bound{route: routeStandard}, err
+	}
+	if l, ok := ep.(*net.UnixListener); ok && s != path {
+		l.SetUnlinkOnClose(false)
+	}
+	return ep, bound{route: routeStandard, spelling: Spelling{Kind: CwdRelative}, lookup: path}, nil
 }
 
 // abstractName reports whether path is the name of an abstract socket (a
@@ -226,12 +279,15 @@ func abstractName(path string) bool {
 	return abstractNames && (strings.HasPrefix(path, "@") || strings.HasPrefix(path, "\x00"))
 }
 
-// stdSpelling is what path is handed to the standard library as, when it is
-// short enough: path itself, except where the standard library would read a
-// leading '@' as an abstract name that the kernel does not have (illumos).
-// There "./" goes in front, so the bind / connect is of the file "@..." in
-// the cwd, as the path means on that system. When that no longer fits, the
-// path goes through the routes like any other long path.
+// stdSpelling is what a path handed to the standard library as it is (a
+// connect's; a relative one of a bind or a resolve only when no absolute
+// spelling can be used) is handed as, when it is short enough: path itself,
+// except where the standard library would read a leading '@' as an abstract
+// name that the kernel does not have (illumos). There "./" goes in front, so
+// the bind / connect is of the file "@..." in the cwd, as the path means on
+// that system. When that no longer fits, a connect takes the routes like any
+// other long path, and a bind or a resolve, whose routes were found unusable
+// already, is ENAMETOOLONG.
 //
 // Design rationale: SPEC hands a short path to the standard library as it is,
 // but Go's standard library on illumos rewrites a leading '@' to a NUL and
@@ -336,5 +392,15 @@ type skipped struct {
 func (t *trace) add(r route, reason string) {
 	if t != nil {
 		t.skipped = append(t.skipped, skipped{r, reason})
+	}
+}
+
+// dropStandard takes standard out of the routes recorded: for a relative
+// path that no route could be used for and that is then handed to the
+// standard library as it is, standard is the route taken (SPEC
+// "相対パスを絶対パスにする": skipped holds the routes found unusable only).
+func (t *trace) dropStandard() {
+	if t != nil && len(t.skipped) > 0 && t.skipped[0].name == routeStandard {
+		t.skipped = t.skipped[1:]
 	}
 }

@@ -285,10 +285,12 @@ func TestResolveTakesItsBAsTheBindDoes(t *testing.T) {
 // EINVAL even in a short path, a long path not ending with a name is EINVAL,
 // and so is an Options.Base of the wrong form even for a short path; each is
 // an *os.PathError of Op "resolve" for the path, and nothing is made in the
-// places. A path the net package takes is spelt as it is: Original when
-// absolute, CwdRelative when relative, with standard as the route and
-// nothing skipped (its Cleanup does nothing); so is an abstract name of any
-// length (Linux), whose SocketFile has no file to record or remove.
+// places. An absolute path the net package takes is spelt as it is,
+// Original for a bind and for a connect alike (ForConnect tells what its
+// spelling is good for too: SPEC "綴りの性質 Spelling"), with standard as the
+// route and nothing skipped (its Cleanup does nothing); so is an abstract name
+// of any length (Linux), whose SocketFile has no file to record or remove. (A
+// relative path is spelt absolute: TestARelativePathIsBoundThroughItsAbsoluteCandidate.)
 func TestResolveChecksThePathFirstAndSpellsAShortOneAsItIs(t *testing.T) {
 	t.Parallel()
 	w, ps := testWorld(t, nil)
@@ -319,7 +321,7 @@ func TestResolveChecksThePathFirstAndSpellsAShortOneAsItIs(t *testing.T) {
 	for _, c := range []struct {
 		path string
 		kind SpellingKind
-	}{{d + "/s.sock", Original}, {"s.sock", CwdRelative}, {"@sockat-resolve-" + strings.Repeat("a", 120), Original}} {
+	}{{d + "/s.sock", Original}, {"@sockat-resolve-" + strings.Repeat("a", 120), Original}} {
 		if strings.HasPrefix(c.path, "@") && !abstractNames {
 			continue
 		}
@@ -328,7 +330,7 @@ func TestResolveChecksThePathFirstAndSpellsAShortOneAsItIs(t *testing.T) {
 			t.Fatalf("for bind %s: %+v", c.path, f)
 		}
 		fc := resolveConnectIn(t, w, c.path, Options{})
-		if fc.Path != stdSpelling(c.path) || fc.Route != string(routeStandard) || len(fc.Skipped) != 0 || fc.Cleanup() != nil {
+		if fc.Path != stdSpelling(c.path) || fc.Spelling != (Spelling{Kind: c.kind}) || fc.Route != string(routeStandard) || len(fc.Skipped) != 0 || fc.Cleanup() != nil {
 			t.Fatalf("for connect %s: %+v", c.path, fc)
 		}
 		if strings.HasPrefix(c.path, "@") {
@@ -340,25 +342,29 @@ func TestResolveChecksThePathFirstAndSpellsAShortOneAsItIs(t *testing.T) {
 	}
 }
 
-// A relative path the net package takes is CwdRelative: ForBind's
-// SocketFile records the file only while the cwd is the one of the resolve,
-// and is an error of Op "socketfile" after a change, even though the path
-// then names a socket too: an unrelated one of the same name in the new cwd. The cwd is the
+// A relative path spelt as it is, where no absolute spelling and no route
+// can be used (noRouteWorld), is CwdRelative: ForBind's SocketFile records
+// the file only while the cwd is the one of the resolve, and is an error of
+// Op "socketfile" after a change, even though the path then names a socket
+// too: an unrelated one of the same name in the new cwd. The cwd is the
 // process's, hence a child whose cwd is a fresh directory.
 func TestSocketFileOfACwdRelativeResolveChecksTheCwd(t *testing.T) {
 	t.Parallel()
 	if !inTmpCwd(t) {
 		return
 	}
-	w, _ := testWorld(t, nil)
-	f := resolveBindIn(t, w, "s.sock", Options{})
+	w := noRouteWorld(t)
+	f := resolveBindIn(t, w, noRouteName, Options{})
+	if f.Spelling.Kind != CwdRelative || f.Path != noRouteName {
+		t.Fatalf("%+v, want the path itself, CwdRelative", f)
+	}
 	listenSpelling(t, f.Path)
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
 	other := tmpDir(t)
-	listenSpelling(t, other+"/s.sock")
+	listenAt(t, other+"/"+noRouteName)
 	if err := os.Chdir(other); err != nil {
 		t.Fatal(err)
 	}
@@ -388,11 +394,14 @@ func TestSocketFileOfACwdRelativeResolveChecksTheCwdAfterTheRealPath(t *testing.
 	if !inTmpCwd(t) {
 		return
 	}
-	w, _ := testWorld(t, nil)
-	f := resolveBindIn(t, w, "s.sock", Options{})
+	w := noRouteWorld(t)
+	f := resolveBindIn(t, w, noRouteName, Options{})
+	if f.Spelling.Kind != CwdRelative {
+		t.Fatalf("%+v, want CwdRelative", f)
+	}
 	listenSpelling(t, f.Path)
 	other := tmpDir(t)
-	listenSpelling(t, other+"/s.sock")
+	listenAt(t, other+"/"+noRouteName)
 	socketFileReal = func(path string) (string, error) {
 		if err := os.Chdir(other); err != nil {
 			t.Fatal(err)
@@ -405,7 +414,7 @@ func TestSocketFileOfACwdRelativeResolveChecksTheCwdAfterTheRealPath(t *testing.
 	if !errors.Is(err, errCwdChangedSinceResolve) || !errors.As(err, &pe) || pe.Op != "socketfile" {
 		t.Fatalf("with the cwd changed before the real path: %v (recorded %+v)", err, sf)
 	}
-	if !isSocket(other + "/s.sock") {
+	if !isSocket(other + "/" + noRouteName) {
 		t.Fatal("the unrelated socket in the new cwd is gone")
 	}
 }

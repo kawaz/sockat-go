@@ -5,12 +5,21 @@ import "net"
 // Listen creates a socket bound to path and listening on it, like
 // net.ListenUnix("unix", ...) but for a path of any length.
 //
-// A path that the net package accepts goes to net.ListenUnix unchanged, so it
-// behaves exactly as with the net package (including the removal of the
-// socket file when the listener is closed). A longer path is reached by the
-// routes the system has (see the package documentation); the socket file is
-// created at path, and the spelling the kernel keeps for it (the listener's
-// Addr()) goes through a directory of this user's processes in /tmp (or
+// An absolute path that the net package accepts goes to net.ListenUnix
+// unchanged, so it behaves exactly as with the net package (including the
+// removal of the socket file when the listener is closed). A relative path is
+// bound through an absolute path naming the same place, which the net
+// package then gets: its directory's real path, or $PWD's spelling of it,
+// with the file name, when one of them fits, and otherwise a spelling as for
+// a longer path. So the spelling the kernel keeps (the listener's Addr(),
+// which Close unlinks, and the address peers see) names the socket file
+// whatever the cwd becomes; only where no such spelling can be had is the
+// relative path itself handed to the net package. The socket file is made
+// where the relative path names it either way. A longer absolute path goes
+// to net.ListenUnix as its directory's real path with the file name when
+// that fits. Otherwise it is reached by the routes the system has (see the
+// package documentation): the socket file is created at path, and the
+// spelling the kernel keeps for it (the listener's Addr()) goes through a directory of this user's processes in /tmp (or
 // $XDG_RUNTIME_DIR, $TMPDIR, the socket's directory), left there for as long
 // as the process lives; the listens to one directory share the symlink to
 // it in that spelling. Closing the listener unlinks that spelling as the net
@@ -58,9 +67,10 @@ func Dial(path string) (*net.UnixConn, error) {
 // leads to: that is what Remove removes, and the symlink stays.
 // When the file cannot be recorded (a symlink there leads to no socket, for
 // example), the listener is closed, the file is left, and an error is
-// returned; so too for a relative path when the cwd changes (another
-// goroutine's os.Chdir) between the start of the call and the record after
-// the bind.
+// returned; so too for a relative path bound as it is (Spelling
+// CwdRelative: no absolute spelling could be had) when the cwd changes
+// (another goroutine's os.Chdir) between the start of the call and the record
+// after the bind.
 //
 // The listener does not remove the socket file on Close, short paths
 // included: the removal is Bound.File's alone. Neither Remove nor Cleanup is

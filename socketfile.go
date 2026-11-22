@@ -142,8 +142,9 @@ func (f *SocketFile) removeFile() error {
 }
 
 // errNotRecorded is ListenEx's error when the socket file it bound cannot be
-// looked up to be recorded, or, for a relative path, may not be the one at the
-// path recorded (the cwd changed before the bind).
+// looked up to be recorded, or, for a relative path bound as it is
+// (CwdRelative), may not be the one at the path recorded (the cwd changed
+// before the bind).
 var errNotRecorded = errors.New("the socket file bound could not be recorded for its removal; the listener was closed and the file left")
 
 // realFile is the socket file at path with its directory resolved to a real

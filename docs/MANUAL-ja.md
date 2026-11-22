@@ -19,15 +19,15 @@
 - [HTTP クライアントからつなぐ](manual/connect-ja.md#http-クライアントからつなぐ)
 - [同じパスに何度もつなぐ](manual/connect-ja.md#同じパスに何度もつなぐ)
 
-## [パスだけを解決する (resolve)](manual/resolve-ja.md)
-
-- [他のライブラリに bind させる](manual/resolve-ja.md#他のライブラリに-bind-させる)
-- [何度も connect する](manual/resolve-ja.md#何度も-connect-する)
-
 ## [DGRAM を使う](manual/datagram-ja.md)
 
 - [受け取る・送る](manual/datagram-ja.md#受け取る送る)
 - [返信を受け取る](manual/datagram-ja.md#返信を受け取る)
 - [終わる時にソケットのファイルを消す](manual/datagram-ja.md#終わる時にソケットのファイルを消す)
+
+## [パスだけを解決する (resolve)](manual/resolve-ja.md)
+
+- [他のライブラリに bind させる](manual/resolve-ja.md#他のライブラリに-bind-させる)
+- [何度も connect する](manual/resolve-ja.md#何度も-connect-する)
 
 関数と型の一覧、`Options`・`Spelling`・エラー等は [リファレンス](REFERENCE-ja.md) にある。

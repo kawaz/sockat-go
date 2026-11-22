@@ -19,15 +19,15 @@ Pick what you want to do.
 - [Connect from an HTTP client](manual/connect.md#connect-from-an-http-client)
 - [Connect to the same path many times](manual/connect.md#connect-to-the-same-path-many-times)
 
-## [Resolve a path only (resolve)](manual/resolve.md)
-
-- [Let another library bind](manual/resolve.md#let-another-library-bind)
-- [Connect many times](manual/resolve.md#connect-many-times)
-
 ## [Use DGRAM](manual/datagram.md)
 
 - [Receive and send](manual/datagram.md#receive-and-send)
 - [Get a reply](manual/datagram.md#get-a-reply)
 - [Remove the socket file when done](manual/datagram.md#remove-the-socket-file-when-done)
+
+## [Resolve a path only (resolve)](manual/resolve.md)
+
+- [Let another library bind](manual/resolve.md#let-another-library-bind)
+- [Connect many times](manual/resolve.md#connect-many-times)
 
 The functions and types, `Options`, `Spelling`, errors and the like are in the [reference](REFERENCE.md).

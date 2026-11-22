@@ -34,7 +34,7 @@ go get github.com/kawaz/sockat-go
 ## More
 
 - [User manual](./docs/MANUAL.md)
-- [Reference](https://pkg.go.dev/github.com/kawaz/sockat-go)
+- [Reference](./docs/REFERENCE.md)
 - [How it works](https://github.com/kawaz/sockat/blob/main/pages/technical.md)
 
 ## License

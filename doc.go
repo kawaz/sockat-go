@@ -12,11 +12,13 @@
 // Use [Listen] and [Dial] where you would use net.ListenUnix / net.DialUnix
 // (or net.Listen("unix", ...) / net.Dial("unix", ...)), and [ListenUnixgram]
 // and [DialUnixgram] for datagram sockets. They take a path of any length and
-// return the net package's own *net.UnixListener and *net.UnixConn. A path the
-// net package accepts (103 bytes on macOS and the BSDs, 107 on Linux and
-// illumos) is handed to it unchanged, so it behaves exactly as with the net
-// package. For a longer path the socket file is still created at (or looked
-// up at) the path given.
+// return the net package's own *net.UnixListener and *net.UnixConn. An
+// absolute path the net package accepts (103 bytes on macOS and the BSDs, 107
+// on Linux and illumos) is handed to it unchanged, so it behaves exactly as
+// with the net package. A relative path is made absolute first by the binds
+// and the resolves, so that the spelling the kernel keeps does not change
+// with the working directory; the connects take it as it is. For a longer
+// path the socket file is still created at (or looked up at) the path given.
 //
 //	l, err := sockat.Listen("/a/very/long/directory/.../server.sock")
 //	c, err := sockat.Dial("/a/very/long/directory/.../server.sock")
@@ -41,18 +43,23 @@
 // https://github.com/kawaz/sockat/blob/main/docs/SPEC.md, and not repeated
 // here. Read in it, in particular:
 //
+//   - Making a relative path absolute: which operations do, and how
 //   - What differs from the standard for a long path: the address the kernel
-//     returns is the spelling, state is left outside the application's
-//     places, a live D may be removed, a peer with PrivateTmp
-//   - Patterns not to use, with the Go forms in the user manual and the
+//     returns is the spelling (absolute for a relative path too), state is
+//     left outside the application's places, a live D may be removed, a peer
+//     with PrivateTmp
+//   - Patterns not to use, with the Go forms in the reference and the
 //     Example functions of this package
 //   - What stays in the base, and sweep: B, D and E, what Sweep removes, and
 //     how a long-lived process cleans up with ListenEx
 //   - Routes for long paths and their order; how each route is built is in
 //     SPEC-routes.md next to it
 //
-// The routes each system tries in Go are listed in the user manual,
-// https://github.com/kawaz/sockat-go/blob/main/docs/MANUAL.md#how-a-long-path-is-reached.
+// How to use the package, scene by scene, is in the user manual,
+// https://github.com/kawaz/sockat-go/blob/main/docs/MANUAL.md, whose sample
+// code is the Example functions. The routes each system tries in Go are
+// listed in the reference,
+// https://github.com/kawaz/sockat-go/blob/main/docs/REFERENCE.md#how-a-long-path-is-reached.
 //
 // # Go-specific caveats
 //
@@ -66,11 +73,13 @@
 //     sockets (illumos included), a leading NUL is EINVAL too.
 //   - On illumos, a path that starts with '@' names the file "@..." in the
 //     current directory. The net package would read the '@' as an abstract
-//     name, which the kernel there does not have, so the path is handed to it
-//     with "./" in front: the listener's Addr is "./@...", its Close leaves
-//     the file (as the net package elsewhere leaves a path that starts with
-//     '@'), and a path of 106 or 107 bytes, which no longer fits, is treated
-//     as a long path.
+//     name, which the kernel there does not have. A bind makes it absolute
+//     as any other relative path; where it is handed to the net package as a
+//     relative path (a connect, and a bind that could take no route), it
+//     goes with "./" in front: that listener's Addr is "./@...", its Close
+//     leaves the file (as the net package elsewhere leaves a path that starts
+//     with '@'), and a path of 106 or 107 bytes, which no longer fits, is
+//     treated as a long path.
 //   - net.UnixListener's Close unlinks the address it keeps. For [Listen]'s
 //     listener of a long path that is the spelling: through link-dir's the
 //     socket file is removed, through link-file's the symlink E is removed

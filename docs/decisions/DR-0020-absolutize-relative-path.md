@@ -27,6 +27,7 @@
 PATH_MAX を超える cwd:
 
 - 経路に進んだ相対パスで、ソケットのディレクトリの `realDir` が `ENAMETOOLONG`・`ERANGE`・`EINVAL` で失敗したら (`pastPathMax`)、エラーにせず、経路が使えない物として扱う (短ければ相対のまま標準、長ければ `ENAMETOOLONG` で `Route` は無し。どちらも `Skipped` は空)。SPEC は realpath(3) の `ENAMETOOLONG` と `ERANGE` を挙げるが、Go の `realDir` は realpath(3) でなく getcwd と `filepath.EvalSymlinks` で、`syscall.Getwd` は PATH_MAX を超える cwd で Linux は `ENAMETOOLONG`、macOS は `EINVAL` を返す (Go 1.27 で実測 2026-11-22。Linux は約 4200 バイト、macOS は 1027 バイトから)。`ERANGE` は POSIX の getcwd(3) の「バッファが足りない」で、他の OS (未実測) のために入れる。`syscall.Getwd` のバッファは空でないので、`EINVAL` は他の理由では出ない
+- SPEC は realpath が成功して PATH_MAX を超える実パスを返す時 (Linux の glibc) も、その stat の `ENAMETOOLONG` で 5 に進むとする。Go の `realDir` はそういうパスを返さない: `syscall.Getwd` は PATH_MAX (NUL を含む) のバッファで、超えればエラー。`filepath.EvalSymlinks` は普通の要素を足すたびにそれまでの全体を `lstat` し (超えれば `ENAMETOOLONG`)、`..` は末尾を削るだけなので、返すのはいつも `lstat` が通った綴りかその前の部分。Linux で cwd を 3803〜4309 バイトに刻み、ディレクトリ部分を 1・99・299 バイトと `<299 バイト>/../../..` にして実測した (2026-11-22): 成功は最長 4087 バイトで全部 `stat` でき、全体が 4096 を超える物は全部 `ENAMETOOLONG` (getcwd か lstat)。そのため、返した実パスを stat し直す手順は置かない
 - その時、既定の `Listen`・`ListenUnixgram` は相対のまま bind できるが、`ListenEx` 系はソケットのファイルの実パスを引けず覚えられないので、覚えられない時と同じにエラーを返す (listener を閉じ、ソケットのファイルは残す)
 - それ以外の失敗 (`ENOENT`・`ENOTDIR`・`EACCES` 等) はそのエラーを返す
 

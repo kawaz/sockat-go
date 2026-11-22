@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 )
 
@@ -90,9 +91,14 @@ func pwdCandidate(dir, name string) (string, bool) {
 // macOS from 1027), and an lstat of the joined path ENAMETOOLONG; so EINVAL
 // is taken too. ERANGE, POSIX's getcwd(3) error for a buffer too small, is
 // for the other systems (not measured). syscall.Getwd has no other EINVAL to
-// give here (its buffer is never empty), and an lstat none.
+// give here (its buffer is never empty), and an lstat none. On FreeBSD
+// syscall.Getwd fails ENOMEM (measured in CI, 2026-11-22, from a cwd of about
+// 1000 bytes): its __getcwd(2) builds the path in the buffer it is given and
+// reports ENOMEM when the path does not fit there. ENOMEM is taken on FreeBSD
+// only; elsewhere it is no error of the path's length.
 func pastPathMax(err error) bool {
-	return errors.Is(err, syscall.ENAMETOOLONG) || errors.Is(err, syscall.ERANGE) || errors.Is(err, syscall.EINVAL)
+	return errors.Is(err, syscall.ENAMETOOLONG) || errors.Is(err, syscall.ERANGE) || errors.Is(err, syscall.EINVAL) ||
+		(runtime.GOOS == "freebsd" && errors.Is(err, syscall.ENOMEM))
 }
 
 // fitsAsIs reports whether the relative path can be handed to the standard

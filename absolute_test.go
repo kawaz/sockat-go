@@ -398,7 +398,7 @@ func TestARelativePathNoRouteReachesIsBoundAsItIs(t *testing.T) {
 
 // A cwd deeper than PATH_MAX has no real path, its length being the cause
 // (SPEC names ENAMETOOLONG and ERANGE; Go's getcwd fails ENAMETOOLONG on
-// Linux and EINVAL on macOS, pastPathMax), and no $PWD that stat can follow,
+// Linux, EINVAL on macOS and ENOMEM on FreeBSD, pastPathMax), and no $PWD that stat can follow,
 // so a relative path has no absolute candidate and no route can be used for
 // it (each needs the socket's directory's real path): that is no error, and
 // a short relative path is handed to the standard library as it is, as the

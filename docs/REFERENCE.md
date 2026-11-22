@@ -6,13 +6,13 @@ The functions and types are documented on [pkg.go.dev](https://pkg.go.dev/github
 
 ## Relation to the standard library
 
-- The return values are the standard `*net.UnixListener` / `*net.UnixConn` themselves (assignable to `net.Listener` / `net.Conn` as they are)
+- The return values are the standard library's `*net.UnixListener` / `*net.UnixConn` themselves (assignable to `net.Listener` / `net.Conn` as they are)
 - An absolute path short enough for the standard library (up to 107 bytes on Linux / Android / illumos, 103 on Apple's systems and the BSDs) is handed to it unchanged, so it behaves exactly as with the standard library
 - A relative path is made absolute before it is handled by the binds (`Listen`, `ListenEx`, `ListenUnixgram`, `ListenUnixgramEx`) and resolve, and is handled as it is by the connects (`Dial`, `DialEx`, `DialUnixgram`, `DialUnixgramEx`). See the specification's "[Making a relative path absolute](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#making-a-relative-path-absolute)"
 - For a long path too, the socket file is created at the path given
-- Errors are the standard `*net.OpError`: `errors.Is(err, syscall.ENOENT)` and the like work
+- Errors are the standard library's `*net.OpError`: `errors.Is(err, syscall.ENOENT)` and the like work
 - The only dependency is `golang.org/x/sys`. Go: the two supported releases (1.26 and later)
-- A long path, and the bind of a relative path, differ from the standard library in some ways (the address the kernel returns, what stays outside the application's places, and so on). See the specification's "[What differs from the standard for a long path](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#what-differs-from-the-standard-for-a-long-path)" and "[Go-specific caveats](#go-specific-caveats)"
+- A long path, and the bind of a relative path, differ from the standard library in some ways (the address the kernel returns, what stays outside the application's places, and so on). See the specification's "[What differs from the standard library for a long path](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#what-differs-from-the-standard-library-for-a-long-path)" and "[Go-specific caveats](#go-specific-caveats)"
 
 ## Functions
 
@@ -31,16 +31,16 @@ The functions and types are documented on [pkg.go.dev](https://pkg.go.dev/github
 | `Sweep()` | | `sweep` |
 | `SweepBase(base)` | | `sweep_base` |
 
-- There is one `Dial`. Go's standard connect never waits (with a full backlog Linux answers `EAGAIN` at once, macOS `ECONNREFUSED`), so there is no separate `_nonblocking`
-- The `Ex` functions return the cleanup and the diagnostics along with the standard type. Their error is a `*sockat.RouteError`
-- DGRAM's `send_to` and SEQPACKET are open in the SPEC and not made. For SEQPACKET, hand a resolve spelling to the standard `"unixpacket"` sockets (the user manual's "[Use SEQPACKET](manual/seqpacket.md)")
+- There is one `Dial`. The connect of Go's standard library never waits (with a full backlog Linux answers `EAGAIN` at once, macOS `ECONNREFUSED`), so there is no separate `_nonblocking`
+- The `Ex` functions return the cleanup and the diagnostics along with the standard library's type. Their error is a `*sockat.RouteError`
+- DGRAM's `send_to` and SEQPACKET are open in the SPEC and not made. For SEQPACKET, hand a resolve spelling to the standard library's `"unixpacket"` sockets (the user manual's "[Use SEQPACKET](manual/seqpacket.md)")
 
 ## Types
 
 | The SPEC's type | Go's type |
 |---|---|
 | `Bound` | `*Bound` (`File *SocketFile`, `Spelling`, `Route`, `Base`, `Skipped`) |
-| `Connected` / `Report` | The standard `*net.UnixConn` and `Report` (`Route`, `Skipped`) |
+| `Connected` / `Report` | The standard library's `*net.UnixConn` and `Report` (`Route`, `Skipped`) |
 | `ForBind` | `*ForBind` (`Path`, `Spelling`, `Cleanup()`, `SocketFile()`, diagnostics) |
 | `ForConnect` | `*ForConnect` (`Path`, `Spelling`, `Cleanup()`, diagnostics) |
 | `SocketFile` | `*SocketFile` (`Remove()`, `Cleanup()`) |
@@ -126,7 +126,7 @@ What `Remove()` and `Cleanup()` do (remove only while the path names the same fi
 
 The spellings returned and when they cannot be made are in the specification's "[resolve](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#resolve)" and "[`SocketFile` of `ForBind`](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#socketfile-of-forbind)". How to use them is in the user manual's "[Resolve a path only](manual/resolve.md)".
 
-- A listener you made by handing the spelling to `net.ListenUnix` is set `SetUnlinkOnClose(false)` and its file removed by the `SocketFile`'s `Remove` (the standard Close unlinks by the spelling; "[Go-specific caveats](#go-specific-caveats)")
+- A listener you made by handing the spelling to `net.ListenUnix` is set `SetUnlinkOnClose(false)` and its file removed by the `SocketFile`'s `Remove` (the standard library's Close unlinks by the spelling; "[Go-specific caveats](#go-specific-caveats)")
 - Call `ForBind.SocketFile()` after the bind, before closing the listener. It fails with `ENOENT` before the bind, and with `ENOTSOCK` when what the spelling leads to is not a socket
 - The error of a resolve is a `*RouteError` around an `*os.PathError` (`Op` `resolve`, `Path` the path you passed). A length for which `ResolveForBind` returns `ENAMETOOLONG` (one only thread-cwd / at reach) is still reached by `Listen` / `ListenEx`
 
@@ -183,31 +183,31 @@ resolve: `ResolveForBind` takes link-dir of the bind routes and (on macOS and Ne
 The means in Go:
 
 - **thread-cwd and thread-cwd-direct**: a throwaway goroutine locked to its own OS thread moves that thread's cwd (and no other's). The thread is thrown away with the goroutine after use, without unlocking (the cwd is never moved on the main thread, which the runtime does not throw away). Linux uses `unshare(CLONE_FS)` then `fchdir` (not under a seccomp filter, such as Docker's default); Apple's systems use `__pthread_fchdir`
-- **at**: binds a socket of our own with FreeBSD's `bindat(2)` and hands it to the standard type with `net.FileListener`
+- **at**: binds a socket of our own with FreeBSD's `bindat(2)` and hands it to the standard library's type with `net.FileListener`
 - None of the routes changes the working directory of the process or of the calling thread, so any goroutine may call them
 
 ### Routes that depart from the SPEC
 
 | Route | sockat-go | Why |
 |---|---|---|
-| widened (after relative in the connect of Apple's systems) | None (listed in `Skipped` as `no widened route in sockat-go`; the next route is tried) | Handing a socket of our own to the standard type leaves `RemoteAddr()` nil, whose `String()` panics, when the peer bound in the widened form (`syscall` refuses an address longer than `sockaddr_un`) |
+| widened (after relative in the connect of Apple's systems) | None (listed in `Skipped` as `no widened route in sockat-go`; the next route is tried) | Handing a socket of our own to the standard library's type leaves `RemoteAddr()` nil, whose `String()` panics, when the peer bound in the widened form (`syscall` refuses an address longer than `sockaddr_un`) |
 
 With no widened and no fork, on Apple's systems, a connect to a path whose absolute or relative form is at most 253 bytes is `ENAMETOOLONG` when relative does not fit and neither thread-cwd-direct (no `__pthread_fchdir`, or a file name over 103 bytes) nor link-file (no B can be made) can be used.
 
 ## Go-specific caveats
 
-Where sockat-go takes a form other than the standard library's because of how Go's standard library behaves, and what it inherits from it. The differences common to all languages are in the specification's "[What differs from the standard for a long path](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#what-differs-from-the-standard-for-a-long-path)".
+Where sockat-go takes a form other than the standard library's because of how Go's standard library behaves, and what it inherits from it. The differences common to all languages are in the specification's "[What differs from the standard library for a long path](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#what-differs-from-the-standard-library-for-a-long-path)".
 
 - **An empty path is `EINVAL`.** The standard library binds an empty path, on Linux, to an abstract name the kernel picks (autobind), and refuses a connect to it with an error that has no errno
 - **A path containing a NUL byte is `EINVAL`, whatever its length.** The standard library silently cuts the path at the NUL and binds another path. On Linux / Android, an abstract socket name (a leading NUL or `@`) is handed to the standard library as it is (`Spelling` `Original`). Where there are no abstract sockets (illumos included), a leading NUL is `EINVAL` too
 - **The `Err` of an argument error is not a bare `syscall.EINVAL`.** For the argument errors sockat finds itself (an `Options.Base` of the wrong form, a `SweepBase` of the wrong form, a long path that does not end with a name, an empty path, a NUL), the `Err` of the `*net.OpError` / `*os.PathError` is a value that wraps `syscall.EINVAL`. Test it with `errors.Is(err, syscall.EINVAL)` (`== syscall.EINVAL` and a type assertion such as `.(syscall.Errno)` do not match)
 - **On illumos, a path that starts with `@` names the file `@...` in the cwd.** The standard library rewrites a leading `@` into an abstract name, but the illumos kernel has no abstract sockets. A bind makes it absolute as any other relative path. Where it is handed to the standard library as a relative path (a connect, and a bind that, made absolute, could take no route), it goes with `./` in front: that listener's `Addr()` is `./@...`, its `Spelling` is `CwdRelative`, and its Close does not remove the file (as the standard library elsewhere leaves a path that starts with `@`; to remove it, use `ListenEx`'s `Remove`). A path of 106 or 107 bytes, which no longer fits with `./`, goes through the routes as a long path
-- **The standard `UnixListener.Close` unlinks the spelling it keeps.** For the default `Listen`'s listener of a long path, through a link-dir spelling the E on the way is followed and the socket file is removed (as with the standard library). **Through a link-file spelling, the E itself is removed and the socket file stays.** Through a `Dangling` spelling nothing is removed (it is set `SetUnlinkOnClose(false)`). The spelling of a `Listen` on a relative path does not depend on the cwd (except when it was handed to the standard library as a relative path), so Close works as above after a change of the cwd too. The listener of `ListenEx` removes nothing, whatever the spelling, short paths included (`SetUnlinkOnClose(false)`; only `Remove` removes the file)
+- **The standard library's `UnixListener.Close` unlinks the spelling it keeps.** For the default `Listen`'s listener of a long path, through a link-dir spelling the E on the way is followed and the socket file is removed (as with the standard library). **Through a link-file spelling, the E itself is removed and the socket file stays.** Through a `Dangling` spelling nothing is removed (it is set `SetUnlinkOnClose(false)`). The spelling of a `Listen` on a relative path does not depend on the cwd (except when it was handed to the standard library as a relative path), so Close works as above after a change of the cwd too. The listener of `ListenEx` removes nothing, whatever the spelling, short paths included (`SetUnlinkOnClose(false)`; only `Remove` removes the file)
 - **No route for macOS's widened sockaddr.** Why, and what stops being reached: "[Routes that depart from the SPEC](#routes-that-depart-from-the-spec)"
 
 ## Specification and design
 
-- [sockat specification](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md) — the language-independent behaviour (operations, resolve, spelling properties, cleanup, what stays in the base, routes, what differs from the standard, patterns not to use, errors)
+- [sockat specification](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md) — the language-independent behaviour (operations, resolve, spelling properties, cleanup, what stays in the base, routes, what differs from the standard library, patterns not to use, errors)
 - [Per-language caveats](https://github.com/kawaz/sockat/blob/main/pages/langs.md) — the caveats specific to each language's implementation
 - [docs/decisions/](./decisions/INDEX.md) — the design decisions of the Go implementation (DRs, in Japanese)
 - [pkg.go.dev](https://pkg.go.dev/github.com/kawaz/sockat-go) — API

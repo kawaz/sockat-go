@@ -6,7 +6,7 @@
 
 ## つなぐ
 
-`net.Dial("unix", path)` の代わりに `sockat.Dial(path)` と書く。返るのは標準の `*net.UnixConn`。
+`net.Dial("unix", path)` の代わりに `sockat.Dial(path)` と書く。返るのは標準ライブラリの `*net.UnixConn`。
 
 ```go
 c, err := sockat.Dial(path) // *net.UnixConn

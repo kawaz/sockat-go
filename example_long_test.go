@@ -95,8 +95,8 @@ func ExampleSpelling() {
 
 // DialEx reports the route taken and the routes skipped before it, for a log;
 // a failure is a *RouteError with the same report. The route names are for
-// diagnostics: do not branch on them. A long path has a route other than the
-// standard one's, so Route is not empty.
+// diagnostics: do not branch on them. A long path takes a route other than
+// "standard", so Route is not empty.
 func ExampleDialEx() {
 	tmp, dir := longDir()
 	defer os.RemoveAll(tmp)

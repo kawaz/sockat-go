@@ -6,7 +6,7 @@ Part of the [user manual](../MANUAL.md). The code runs as Example functions in [
 
 ## Connect
 
-Write `sockat.Dial(path)` instead of `net.Dial("unix", path)`. It returns the standard `*net.UnixConn`.
+Write `sockat.Dial(path)` instead of `net.Dial("unix", path)`. It returns the standard library's `*net.UnixConn`.
 
 ```go
 c, err := sockat.Dial(path) // *net.UnixConn

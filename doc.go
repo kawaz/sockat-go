@@ -44,10 +44,10 @@
 // here. Read in it, in particular:
 //
 //   - Making a relative path absolute: which operations do, and how
-//   - What differs from the standard for a long path: the address the kernel
-//     returns is the spelling (absolute for a relative path too), state is
-//     left outside the application's places, a live D may be removed, a peer
-//     with PrivateTmp
+//   - What differs from the standard library for a long path: the address
+//     the kernel returns is the spelling (absolute for a relative path too),
+//     state is left outside the application's places, a live D may be
+//     removed, a peer with PrivateTmp
 //   - Patterns not to use, with the Go forms in the reference and the
 //     Example functions of this package
 //   - What stays in the base, and sweep: B, D and E, what Sweep removes, and

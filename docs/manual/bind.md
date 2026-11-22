@@ -6,7 +6,7 @@ Part of the [user manual](../MANUAL.md). The code runs as Example functions in [
 
 ## Listen
 
-Write `sockat.Listen(path)` instead of `net.Listen("unix", path)`. It returns the standard `*net.UnixListener`.
+Write `sockat.Listen(path)` instead of `net.Listen("unix", path)`. It returns the standard library's `*net.UnixListener`.
 
 ```go
 l, err := sockat.Listen(path) // *net.UnixListener

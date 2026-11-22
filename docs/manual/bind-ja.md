@@ -6,7 +6,7 @@
 
 ## 待ち受ける
 
-`net.Listen("unix", path)` の代わりに `sockat.Listen(path)` と書く。返るのは標準の `*net.UnixListener`。
+`net.Listen("unix", path)` の代わりに `sockat.Listen(path)` と書く。返るのは標準ライブラリの `*net.UnixListener`。
 
 ```go
 l, err := sockat.Listen(path) // *net.UnixListener

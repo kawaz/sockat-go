@@ -19,17 +19,13 @@ Pick what you want to do.
 - [Connect from an HTTP client](manual/connect.md#connect-from-an-http-client)
 - [Connect to the same path many times](manual/connect.md#connect-to-the-same-path-many-times)
 
-## [Use SEQPACKET](manual/seqpacket.md)
-
-- [Listen](manual/seqpacket.md#listen)
-- [Connect](manual/seqpacket.md#connect)
-- [Remove the socket file when done](manual/seqpacket.md#remove-the-socket-file-when-done)
-
 ## [Use DGRAM](manual/datagram.md)
 
 - [Receive and send](manual/datagram.md#receive-and-send)
 - [Get a reply](manual/datagram.md#get-a-reply)
 - [Remove the socket file when done](manual/datagram.md#remove-the-socket-file-when-done)
+
+## [Use SEQPACKET](manual/seqpacket.md)
 
 ## [Resolve a path only (resolve)](manual/resolve.md)
 

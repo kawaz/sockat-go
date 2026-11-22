@@ -19,17 +19,13 @@
 - [HTTP クライアントからつなぐ](manual/connect-ja.md#http-クライアントからつなぐ)
 - [同じパスに何度もつなぐ](manual/connect-ja.md#同じパスに何度もつなぐ)
 
-## [SEQPACKET を使う](manual/seqpacket-ja.md)
-
-- [待ち受ける](manual/seqpacket-ja.md#待ち受ける)
-- [つなぐ](manual/seqpacket-ja.md#つなぐ)
-- [終わる時にソケットのファイルを消す](manual/seqpacket-ja.md#終わる時にソケットのファイルを消す)
-
 ## [DGRAM を使う](manual/datagram-ja.md)
 
 - [受け取る・送る](manual/datagram-ja.md#受け取る送る)
 - [返信を受け取る](manual/datagram-ja.md#返信を受け取る)
 - [終わる時にソケットのファイルを消す](manual/datagram-ja.md#終わる時にソケットのファイルを消す)
+
+## [SEQPACKET を使う](manual/seqpacket-ja.md)
 
 ## [パスだけを解決する (resolve)](manual/resolve-ja.md)
 

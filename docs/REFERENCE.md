@@ -33,7 +33,7 @@ The functions and types are documented on [pkg.go.dev](https://pkg.go.dev/github
 
 - There is one `Dial`. The connect of Go's standard library never waits (with a full backlog Linux answers `EAGAIN` at once, macOS `ECONNREFUSED`), so there is no separate `_nonblocking`
 - The `Ex` functions return the cleanup and the diagnostics along with the standard library's type. Their error is a `*sockat.RouteError`
-- DGRAM's `send_to` and SEQPACKET are open in the SPEC and not made. For SEQPACKET, hand a resolve spelling to the standard library's `"unixpacket"` sockets (the user manual's "[Use SEQPACKET](manual/seqpacket.md)")
+- DGRAM's `send_to` is open in the SPEC and not made. There are no functions of its own for SEQPACKET: hand a resolve spelling to the standard library's `"unixpacket"` sockets (the user manual's "[Use SEQPACKET](manual/seqpacket.md)")
 
 ## Types
 

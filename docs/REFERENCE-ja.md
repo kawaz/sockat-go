@@ -33,7 +33,7 @@
 
 - `Dial` は 1 つ。Go の標準ライブラリの connect は元から待たない (backlog が満杯なら Linux は即 `EAGAIN`、macOS は `ECONNREFUSED`) ので、`_nonblocking` を分けない
 - `ListenEx` 等の `Ex` は、標準ライブラリの型と一緒に後始末と診断を返す。失敗は `*sockat.RouteError`
-- DGRAM の `send_to` と SEQPACKET は SPEC で未確定なので無い。SEQPACKET は resolve の綴りを標準ライブラリの `"unixpacket"` のソケットに渡して使う (利用マニュアルの「[SEQPACKET を使う](manual/seqpacket-ja.md)」)
+- DGRAM の `send_to` は SPEC で未確定なので無い。SEQPACKET 専用の関数は無く、resolve の綴りを標準ライブラリの `"unixpacket"` のソケットに渡して使う (利用マニュアルの「[SEQPACKET を使う](manual/seqpacket-ja.md)」)
 
 ## 型
 
